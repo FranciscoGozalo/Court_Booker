@@ -1,14 +1,12 @@
 'use strict';
-// Court alert: a Telegram bot that sends you the Kelvingrove court links just before a new
-// day is released, and turns the message to GO at the release. It reads the public booking
-// sheet to lead with the first free court in your order. You do the booking.
-// Needs Node 20 or later and one variable, TELEGRAM_BOT_TOKEN. See README.md.
+// Court booker: a Telegram bot that keeps your Kelvingrove booking requests. At each release
+// your PC at home signs in to ClubSpark and books (Cloudflare turns Railway away), reports
+// back here, and the bot sends you the court, the time and the gate code on a banner card.
+// Needs Node 20 or later, TELEGRAM_BOT_TOKEN, and AGENT_TOKEN for your PC. See README.md.
 
 const { createApp, VERSION } = require('./app');
 const { createTelegram } = require('./lib/telegram');
 const { createStore } = require('./lib/store');
-const { createCourtChecker } = require('./lib/availability');
-const { createRelay } = require('./lib/relay');
 const { createServer } = require('./lib/server');
 const { clockAt, londonWall } = require('./lib/time');
 
@@ -16,17 +14,15 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const COMMANDS = [
-  ['plan', 'Your plan and the next alert'],
-  ['set', 'Add a day: /set thu 19:00 2h'],
-  ['off', 'Remove a day: /off thu'],
-  ['order', 'Court order: /order 4 3 5 2 6 1'],
-  ['test', 'Send the courts now for an open day'],
-  ['free', 'Which courts are free now'],
-  ['signin', 'Open the booking sheet to sign in'],
-  ['style', 'Card, buttons, links or both'],
-  ['status', 'Clock, version and settings'],
-  ['pause', 'Stop alerts'],
-  ['resume', 'Start alerts again'],
+  ['plan', 'What is booked when'],
+  ['book', 'One date: /book 25 nov 19:00 2h'],
+  ['set', 'Every week: /set thu 19:00 2h'],
+  ['cancel', 'Remove a one-off: /cancel 2'],
+  ['off', 'Stop a weekday: /off thu'],
+  ['order', 'Court order: /order 3 4 5 2 1 6'],
+  ['status', 'Clock, your PC and settings'],
+  ['pause', 'Stop booking'],
+  ['resume', 'Start booking again'],
   ['help', 'Everything I understand'],
 ];
 
@@ -39,7 +35,7 @@ function ukTimeWorks() {
 }
 
 async function main() {
-  log(`Court alert starting, version ${VERSION}, Node ${process.version}.`);
+  log(`Court booker starting, version ${VERSION}, Node ${process.version}.`);
   if (!ukTimeWorks()) {
     log('This server cannot work out UK time (no time zone data in this Node build). Use the Dockerfile in this repository.');
     await sleep(60000);
@@ -58,25 +54,22 @@ async function main() {
   const store = createStore(dataDir, { log });
   const tg = createTelegram(token, { apiUrl: process.env.TELEGRAM_API_URL || undefined });
 
-  // Where the free-court readings come from. With AGENT_TOKEN set, this server does not read
-  // ClubSpark itself (Cloudflare blocks it): a home server posts the readings over HTTP, and the
-  // bot uses the latest. Without it, the bot reads ClubSpark directly, as before.
+  // Your PC reaches the bot over HTTP with a shared token. Without AGENT_TOKEN the bot still
+  // keeps your requests, but nothing can collect them.
   const agentToken = (process.env.AGENT_TOKEN || '').trim();
-  const relay = agentToken ? createRelay() : null;
-  const checkCourts = relay ? relay.checkCourts : createCourtChecker();
-  const app = createApp({ tg, store, log, env: process.env, checkCourts, checkSource: relay ? 'home' : 'direct' });
+  const app = createApp({ tg, store, log, env: process.env, linked: !!agentToken });
   log(`Settings file: ${store.file}`);
-  if (relay) log('Free-court readings will come from a home server (AGENT_TOKEN is set).');
-  if (!app.hasPictures) log('The banner pictures are missing (assets/banner-wait.jpg and banner-open.jpg), so the card look will come as plain text.');
+  if (!app.hasPictures) log('The banner pictures are missing (assets/banner-wait.jpg and banner-open.jpg), so cards will come as plain text.');
 
-  // The endpoint the home server talks to. Also answers a plain /health, which lets Railway give
-  // the service a public domain. Only started when a home server is expected (AGENT_TOKEN set).
-  if (relay) {
-    const planFor = () => { const c = app.cfg(); return { plan: c.plan, order: c.order, releaseMin: c.releaseMin, daysAhead: c.daysAhead, lead: c.lead, free: app.state.free }; };
-    const server = createServer({ relay, getPlan: planFor, token: agentToken, log });
+  // The endpoint your PC talks to. Also answers a plain /health, which lets Railway give the
+  // service a public domain.
+  if (agentToken) {
+    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, token: agentToken, log });
     const port = Number(process.env.PORT) || 8080;
-    server.listen(port, () => log(`Listening for the home server on port ${port}.`));
-    server.on('error', e => log(`The home-server endpoint could not start: ${e.message}`));
+    server.listen(port, () => log(`Listening for your PC on port ${port}.`));
+    server.on('error', e => log(`The endpoint for your PC could not start: ${e.message}`));
+  } else {
+    log('AGENT_TOKEN is not set, so your PC cannot collect bookings. Add it under Variables in Railway.');
   }
 
   try {

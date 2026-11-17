@@ -1,25 +1,26 @@
 'use strict';
-// The bot's behaviour: what it does with each message from its owner, and what it sends when.
-// It sends links for a person to tap. The only thing it asks ClubSpark is the public booking
-// sheet, to see which courts are free; it never signs in and never books anything.
+// The bot's behaviour: your booking requests, what your PC at home should book, and the
+// messages about it. The bot itself never touches ClubSpark: your PC signs in and books
+// (Cloudflare turns Railway away), then reports back here, and the bot tells you the court,
+// the time and the gate code.
 
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { iso, label, hhmm, clockAt, DAY_KEYS, DAY_LONG } = require('./lib/time');
-const { DEFAULT_SID, GUID, SHEET, parseBookAddress } = require('./lib/links');
-const { parseDay, parseTime, parseHours, parseOrder, parsePlan, cleanPlan, cleanOrder, slotText } = require('./lib/plan');
-const { dueEvents, msToNextEvent, nextRelease, checkDate, checkWindows, nextCheckAt, CHECK_AFTER_MS } = require('./lib/schedule');
-const { courtView } = require('./lib/availability');
+const { iso, label, hhmm, todayCivil, addDays, londonInstant, DAY_KEYS, DAY_LONG } = require('./lib/time');
+const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, slotText, slotEnd } = require('./lib/plan');
+const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf } = require('./lib/schedule');
 const M = require('./lib/messages');
 
-const VERSION = '1.4';
-const STYLES = ['card', 'buttons', 'both', 'links'];
-const STATE_VERSION = 3;
+const VERSION = '2.0';
+const STATE_VERSION = 4;
 const SENT_KEEP_MS = 3 * 86400000;
+const RESULTS_KEEP_MS = 60 * 86400000;
+const MAX_AHEAD_DAYS = 90;
+const GONE = ['test', 'free', 'signin', 'style', 'lead', 'warn', 'go', 'code'];   // link-alert commands from version 1
 
-// The two banner pictures for the card: the court before booking opens, and after.
-// Each carries a fingerprint of its contents, so a changed file is uploaded afresh.
+// The two banner pictures: the court before booking opens (heads-up), and with the
+// floodlights on (booked). Each carries a fingerprint, so a changed file is uploaded afresh.
 function loadPictures(dir = path.join(__dirname, 'assets')) {
   const out = {};
   for (const kind of ['wait', 'open']) {
@@ -40,33 +41,49 @@ function intIn(v, lo, hi) {
   return typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi ? v : null;
 }
 
+// A result from the PC, made safe to keep and show. Null if it does not make sense.
+function cleanResult(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = String(raw.id || '');
+  const m = /^(\d{4}-\d{2}-\d{2})@(\d{2}):(\d{2})$/.exec(id);
+  if (!m || !['booked', 'none', 'failed'].includes(raw.status)) return null;
+  const start = Number(m[2]) * 60 + Number(m[3]);
+  const end = intIn(raw.end, start + 30, 1440) ?? slotEnd(start, 1);
+  const r = { id, status: raw.status, date: m[1], start, end };
+  if (raw.status === 'booked') {
+    r.court = String(raw.court ?? '').replace(/[^\w ]/g, '').slice(0, 20);
+    if (!r.court) return null;
+    if (raw.gate) r.gate = String(raw.gate).replace(/[^\w#*-]/g, '').slice(0, 20) || undefined;
+  } else if (raw.why) {
+    r.why = String(raw.why).slice(0, 300);
+  }
+  return r;
+}
+
 // Settings from storage, or from the environment on a first start, made safe to use.
+// Settings saved by version 1 (the link alerts) keep the owner, weekly plan, court order and pictures.
 function loadState(raw, env = {}) {
   const state = {
-    v: STATE_VERSION, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: DEFAULT_SID,
-    lead: 30, warnMin: 5, go: true, style: 'card', free: true, paused: false, sent: {}, live: null, pics: {},
+    v: STATE_VERSION, owner: null, plan: {}, once: [], order: [1, 2, 3, 4, 5, 6], paused: false,
+    results: {}, sent: {}, pics: {}, lastSeen: null,
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
     state.plan = cleanPlan(raw.plan);
+    state.once = cleanOnce(raw.once);
     state.order = cleanOrder(raw.order);
-    if (GUID.test(String(raw.sid || ''))) state.sid = String(raw.sid).toLowerCase();
-    state.lead = intIn(raw.lead, 5, 300) ?? 30;
-    state.warnMin = intIn(raw.warnMin, 0, 60) ?? 5;
-    state.go = raw.go !== false;
-    state.style = STYLES.includes(raw.style) ? raw.style : 'card';
-    // The default look has changed twice: "both" in 1.0, "buttons" in 1.1, the picture card since 1.3.
-    // Settings saved under an old default follow the new one. A look chosen on purpose since then is kept.
-    const savedBy = raw.v === 2 || raw.v === 3 ? raw.v : 1;
-    if ((savedBy === 1 && raw.style === 'both') || (savedBy === 2 && raw.style === 'buttons')) state.style = 'card';
-    state.free = raw.free !== false;                               // reading the sheet for free courts: on unless switched off
     state.paused = raw.paused === true;
-    if (raw.sent && typeof raw.sent === 'object') {
-      for (const k of Object.keys(raw.sent)) if (typeof raw.sent[k] === 'number') state.sent[k] = raw.sent[k];
-    }
-    const l = raw.live;
-    if (l && typeof l === 'object' && typeof l.night === 'string' && Number.isInteger(l.id) && Number.isInteger(l.chat)) {
-      state.live = { night: l.night, chat: l.chat, id: l.id, phase: l.phase === 'go' ? 'go' : 'wait', card: l.card === true };
+    if (raw.v === STATE_VERSION) {
+      if (raw.sent && typeof raw.sent === 'object') {
+        for (const k of Object.keys(raw.sent)) if (typeof raw.sent[k] === 'number') state.sent[k] = raw.sent[k];
+      }
+      if (raw.results && typeof raw.results === 'object') {
+        for (const k of Object.keys(raw.results)) {
+          const r = cleanResult(raw.results[k]);
+          if (r && typeof raw.results[k].at === 'number') state.results[r.id] = { ...r, at: raw.results[k].at };
+        }
+      }
+      if (typeof raw.lastSeen === 'number') state.lastSeen = raw.lastSeen;
     }
     for (const kind of ['wait', 'open']) {                       // what Telegram calls each picture, once it has it
       const p = raw.pics && raw.pics[kind];
@@ -81,10 +98,7 @@ function loadState(raw, env = {}) {
 
 // The settings as one line, for the COURT_SETTINGS variable, and back again.
 function backupLine(state) {
-  return JSON.stringify({
-    v: STATE_VERSION, owner: state.owner, plan: cleanPlan(state.plan), order: state.order, sid: state.sid,
-    lead: state.lead, warnMin: state.warnMin, go: state.go, style: state.style, free: state.free,
-  });
+  return JSON.stringify({ v: STATE_VERSION, owner: state.owner, plan: cleanPlan(state.plan), once: cleanOnce(state.once), order: state.order });
 }
 function readBackup(text) {
   try {
@@ -93,9 +107,8 @@ function readBackup(text) {
   } catch { return null; }
 }
 
-// `checkCourts(dateIso, start, end)` reads the booking sheet (see lib/availability.js). Without it,
-// the bot offers all six courts as it always did.
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait = ms => new Promise(r => setTimeout(r, ms)), pictures = loadPictures(), checkCourts = null, checkSource = 'direct' }) {
+// `linked` says whether a PC can reach the bot (AGENT_TOKEN is set).
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true }) {
   const fromVariable = readBackup(env.COURT_SETTINGS);
   const state = loadState(store.load() ?? fromVariable, env);
   const variableLine = fromVariable ? backupLine(loadState(fromVariable, env)) : null;
@@ -104,186 +117,86 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
   const owner = () => envOwner ?? state.owner;
   const releaseMin = parseTime(env.RELEASE_TIME) ?? 22 * 60;
   const daysAhead = intIn(env.DAYS_AHEAD, 1, 30) ?? 7;
-  const cfg = () => ({
-    plan: state.plan, order: state.order, sid: state.sid, lead: state.lead,
-    warnMin: state.warnMin, go: state.go, style: state.style, releaseMin, daysAhead,
-  });
-  // Will the settings outlive a restart? On disk, or matching the COURT_SETTINGS variable, or not at all.
+  const cfg = () => ({ plan: state.plan, once: state.once, order: state.order, releaseMin, daysAhead });
   function kept() {
     if (store.isPersistent ? store.isPersistent() : true) return 'disk';
     return variableLine !== null && variableLine === backupLine(state) ? 'variable' : 'no';
   }
   const keepNote = () => (kept() !== 'no' ? '' : '\n\nNote: these settings will be lost at the next restart. To keep them, add a Railway volume mounted at /data, or send /backup.');
-  const html = { parse_mode: 'HTML', link_preview_options: M.NO_PREVIEW };
+  const html = { parse_mode: 'HTML', link_preview_options: { is_disabled: true } };
   const say = (chat, text, extra = {}) => tg.send(chat, text, { ...html, ...extra });
-
-  // ---------- sending the courts ----------
-  // In the card look the courts go out as a picture with the words as its caption. A picture
-  // must never cost an alert, so whatever Telegram refuses about one falls back to plain text.
-  const transient = err => !err.code || err.code === 429 || err.code >= 500;   // worth another try shortly
-  const unchanged = err => /not modified/i.test(err.message || '');            // an earlier try got through after all
-  const asText = m => ({ text: m.text, extra: { ...m.extra, link_preview_options: M.NO_PREVIEW } });
-  const asCaption = m => ({ caption: m.text, parse_mode: 'HTML', reply_markup: m.extra.reply_markup });
-  // The look a message already on screen was sent in, whatever the setting says now.
-  const lookOf = (c, card) => ({ ...c, style: card ? 'card' : (c.style === 'card' ? 'buttons' : c.style) });
-  function picture(kind) {
-    const p = pictures && pictures[kind];
-    if (!p) return null;
-    const known = state.pics[kind];
-    return { id: known && known.hash === p.hash ? known.id : null, file: { buf: p.buf, name: p.name } };
-  }
-  function remember(kind, message) {
-    const sizes = message && message.photo;
-    const id = Array.isArray(sizes) && sizes.length ? sizes[sizes.length - 1].file_id : null;
-    if (id && pictures && pictures[kind]) state.pics[kind] = { hash: pictures[kind].hash, id };
-  }
-
-  // What each courts message on screen says now, so it is only edited when that should change.
-  const painted = new Map();
-  const keyOf = m => `${m.text}\n${JSON.stringify(m.extra.reply_markup || null)}`;
-  const paint = (id, m) => {
-    painted.set(id, keyOf(m));
-    if (painted.size > 20) painted.delete(painted.keys().next().value);
-  };
-
-  // Sends the courts. Returns the message's id and whether it went as a card.
-  async function deliver(chat, m, kind) {
-    const sent = await deliverOnce(chat, m, kind);
-    paint(sent.id, m);
-    return sent;
-  }
-  async function deliverOnce(chat, m, kind) {
-    const pic = m.card ? picture(kind) : null;
-    if (!pic) {
-      const sent = await tg.send(chat, m.text, (m.card ? asText(m) : m).extra);
-      return { id: sent.message_id, card: false };
-    }
-    try {
-      let sent;
-      try { sent = await tg.sendPhoto(chat, pic.id || pic.file, asCaption(m)); } catch (err) {
-        if (!pic.id || transient(err)) throw err;
-        delete state.pics[kind];                                   // the saved name for the picture no longer works: upload it again
-        sent = await tg.sendPhoto(chat, pic.file, asCaption(m));
-      }
-      remember(kind, sent);
-      return { id: sent.message_id, card: true };
-    } catch (err) {
-      if (transient(err)) throw err;
-      log(`Telegram would not take the picture (${err.message}). Sending the alert as plain text.`);
-      const sent = await tg.send(chat, m.text, asText(m).extra);
-      return { id: sent.message_id, card: false };
-    }
-  }
-
-  // Turns a waiting message to GO. `m` is the GO message in the look the waiting one was sent in.
-  // Returns false if the message is no longer there to change.
-  async function turnToGo(live, m) {
-    try {
-      if (live.card) await tg.editCaption(live.chat, live.id, m.text, { parse_mode: 'HTML', reply_markup: m.extra.reply_markup });
-      else await tg.edit(live.chat, live.id, m.text, m.extra);
-    } catch (err) {
-      if (err.code !== 400) throw err;
-      if (!unchanged(err)) return false;
-    }
-    paint(live.id, m);
-    if (live.card) {
-      // The words change at once. The picture follows, because a phone has to fetch it.
-      live.phase = 'go'; save();
-      await changePicture(live, m).catch(err => log(`The picture did not change at GO: ${err.message}`));
-    }
-    return true;
-  }
-  async function changePicture(live, m) {
-    const pic = picture('open');
-    if (!pic) return;
-    let useId = pic.id;
-    for (let attempt = 1; ; attempt++) {
-      try {
-        remember('open', await tg.editMedia(live.chat, live.id, useId || pic.file, asCaption(m)));
-        save();
-        return;
-      } catch (err) {
-        if (unchanged(err)) return;
-        if (attempt >= 2) throw err;
-        if (transient(err)) await wait(400);
-        else if (useId) { delete state.pics.open; useId = null; }      // the saved name no longer works: upload instead
-        else throw err;
-      }
-    }
-  }
   const next = () => M.esc(M.nextLine(cfg(), now(), state.paused));
   const toldPrivate = new Set();
 
-  // ---------- which courts are free ----------
-  // On a booking night the sheet is read from shortly before the courts go out until a few
-  // minutes after the release. Reads run alongside the timed messages and never hold them up.
-  const checking = () => !!checkCourts && state.free;
-  const watches = {};          // night -> { rel, answer, fails, failed, nextAt, busy, stopped }
-  let lastCheck = null;        // the latest read, for /status
-  async function readSheet(dateIso, start, end) {
-    const answer = await Promise.resolve().then(() => checkCourts(dateIso, start, end))
-      .catch(e => ({ ok: false, stop: false, why: (e && e.message) || String(e) }));
-    lastCheck = { at: now(), ok: answer.ok, why: answer.why };
-    return answer;
-  }
-  function startChecks(c) {
-    const t = now();
-    for (const night of Object.keys(watches)) if (t > watches[night].rel.releaseAt + CHECK_AFTER_MS + 600000) delete watches[night];
-    if (!checking()) return;
-    for (const rel of checkWindows(t, c)) {
-      const night = iso(rel.night);
-      const w = watches[night] || (watches[night] = { rel, answer: null, fails: 0, failed: false, nextAt: 0, busy: false, stopped: false });
-      if (w.busy || w.stopped || t < w.nextAt) continue;
-      w.busy = true;
-      readSheet(iso(rel.playDate), rel.start, rel.end).then(answer => {
-        w.busy = false;
-        if (answer.ok) { w.answer = { ...answer, at: t }; w.fails = 0; w.failed = false; } else {
-          w.fails++;
-          if (answer.stop) w.stopped = true;
-          if (answer.stop || w.fails >= 3) {
-            if (!w.failed) log(`Could not read the booking sheet: ${answer.why}${answer.stop ? '. Not trying again tonight.' : ''}`);
-            w.failed = true;
-            w.answer = null;   // sustained failure (e.g. the home server went quiet): stop vouching for the last pick, fall back to all six
-          }
-        }
-        w.nextAt = nextCheckAt(now(), rel);
-      });
-    }
-  }
-  // How to offer the courts for a night's release, from the latest read of the sheet.
-  function viewFor(night, phase) {
-    const w = checking() ? watches[night] : null;
-    if (!w) return null;
-    // "Nothing free" is only believed from a read made after the release.
-    const released = phase === 'go' && !!w.answer && w.answer.at >= w.rel.releaseAt;
-    return courtView(cfg().order, w.answer, { released, failed: w.failed });
-  }
-  // Brings the courts message up to date with the sheet, if what it should say has changed.
-  // Left alone in the last seconds before the release, so it cannot get in the way of GO.
-  let repaintAfter = 0;
-  async function repaint(c) {
-    const live = state.live;
-    const w = live && watches[live.night];
-    if (!w || !checking() || now() < repaintAfter) return;
-    if (!w.answer && !w.failed) return;                              // nothing read yet (say, just after a restart): leave it as it is
-    if (live.phase === 'wait' && c.go && now() >= w.rel.releaseAt - 3000) return;
-    const m = M.linksMessage(lookOf(c, live.card), w.rel, live.phase, viewFor(live.night, live.phase));
-    if (painted.get(live.id) === keyOf(m)) return;
+  // ---------- banner cards ----------
+  // A card is a banner picture with the words as its caption. A picture must never cost a
+  // message, so whatever Telegram refuses about one falls back to plain text.
+  const transient = err => !err.code || err.code === 429 || err.code >= 500;
+  async function sendCard(chat, kind, caption) {
+    const p = pictures && pictures[kind];
+    if (!p) return say(chat, caption);
+    const known = state.pics[kind];
+    const extra = { caption, parse_mode: 'HTML' };
     try {
-      if (live.card) await tg.editCaption(live.chat, live.id, m.text, { parse_mode: 'HTML', reply_markup: m.extra.reply_markup });
-      else await tg.edit(live.chat, live.id, m.text, m.extra);
-      paint(live.id, m);
+      let sent;
+      const useId = known && known.hash === p.hash ? known.id : null;
+      try { sent = await tg.sendPhoto(chat, useId || { buf: p.buf, name: p.name }, extra); } catch (err) {
+        if (!useId || transient(err)) throw err;
+        delete state.pics[kind];                                   // the saved name for the picture no longer works: upload it again
+        sent = await tg.sendPhoto(chat, { buf: p.buf, name: p.name }, extra);
+      }
+      const sizes = sent && sent.photo;
+      const id = Array.isArray(sizes) && sizes.length ? sizes[sizes.length - 1].file_id : null;
+      if (id) { state.pics[kind] = { hash: p.hash, id }; save(); }
+      return sent;
     } catch (err) {
-      if (err.code === 400) paint(live.id, m);                       // already says that, or gone: either way, leave it
-      else { repaintAfter = now() + (err.retryAfter ? err.retryAfter * 1000 : 1000); log(`Could not update the courts: ${err.message}`); }
+      if (transient(err)) throw err;
+      log(`Telegram would not take the picture (${err.message}). Sending plain text.`);
+      return say(chat, caption);
     }
   }
 
-  async function setCode(chat, text) {
-    const got = parseBookAddress(text);
-    if (!got.ok) { await say(chat, M.esc(got.why)); return; }
-    state.sid = got.sid; save();
-    await say(chat, `Saved. The court links now use the booking code ending ${got.sid.slice(-6)}${got.court ? `, taken from a Court ${got.court} address` : ''}. Send /test to check it.`);
+  // ---------- your PC ----------
+  // The PC asks what to book. Asking counts as checking in; before a release it also brings a
+  // heads-up card, once per release.
+  function jobsForAgent() {
+    const t = now();
+    state.lastSeen = t;
+    const c = cfg();
+    const jobs = state.paused || owner() === null ? [] : jobsFor(t, c, state.results);
+    const coming = jobs.filter(j => j.releaseAt > t);
+    if (coming.length) {
+      const key = `ready:${coming[0].releaseAt}`;
+      if (!state.sent[key]) {
+        state.sent[key] = t;
+        sendCard(owner(), 'wait', M.headsUp(c, coming)).catch(e => { delete state.sent[key]; log(`Heads-up not sent: ${e.message}`); });
+      }
+    }
+    save();
+    return {
+      jobs: jobs.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end, hours: j.hours, releaseAt: j.releaseAt })),
+      order: c.order, releaseMin, daysAhead,
+    };
+  }
+
+  // The PC says what happened. The message goes out first: if Telegram fails, the PC is told
+  // so and tries again, and nothing is recorded twice.
+  async function resultFromAgent(raw) {
+    const r = cleanResult(raw);
+    if (!r) return { ok: false, why: 'that result is missing something or does not make sense' };
+    const prev = state.results[r.id];
+    if (prev && prev.status === 'booked' && r.status !== 'booked') return { ok: true };       // a booking stands
+    const same = prev && prev.status === r.status && prev.court === r.court;
+    const chat = owner();
+    if (!same && chat !== null) {
+      if (r.status === 'booked') await sendCard(chat, 'open', M.bookedCaption(r));
+      else await say(chat, M.failedText(r));
+    }
+    state.results[r.id] = { ...r, at: now() };
+    for (const k of Object.keys(state.results)) if (now() - state.results[k].at > RESULTS_KEEP_MS) delete state.results[k];
+    save();
+    log(`Result from the PC: ${r.id} ${r.status}${r.court ? ` (Court ${r.court})` : ''}`);
+    return { ok: true };
   }
 
   // ---------- messages from the owner ----------
@@ -310,11 +223,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
       if (!toldPrivate.has(chat) && toldPrivate.size < 1000) { toldPrivate.add(chat); await say(chat, 'This bot is private.').catch(() => {}); }
       return;
     }
-    if (!cmd) {
-      if (/^https?:\/\//i.test(text)) await setCode(chat, text);
-      else await say(chat, 'Send /help to see what I understand.');
-      return;
-    }
+    if (!cmd) { await say(chat, 'Send /help to see what I understand.'); return; }
     log(`Command: /${cmd}`);
     const c = cfg(), t = now();
 
@@ -324,121 +233,83 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
         await say(chat, M.HELP); break;
 
       case 'plan':
-        await say(chat, M.planMessage(c, t, state.paused) + keepNote()); break;
+      case 'list':
+        await say(chat, M.planMessage(c, t, state.paused, state.results) + keepNote()); break;
 
       case 'next':
         await say(chat, next()); break;
 
-      case 'status': {
-        const check = checkCourts ? { on: state.free, last: lastCheck, source: checkSource } : null;
-        await say(chat, M.statusMessage(c, t, { version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused, check }));
+      case 'status':
+        await say(chat, M.statusMessage(c, t, {
+          version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused,
+          linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null,
+        }));
         break;
-      }
-
-      case 'free': {
-        const a = (args[0] || '').toLowerCase();
-        if (a === 'on' || a === 'off') {
-          state.free = a === 'on'; save();
-          await say(chat, state.free
-            ? 'On booking nights I will read the booking sheet and lead with the first free court in your order. Send /free to try it now.'
-            : 'The alerts will show all six courts, without reading the booking sheet.');
-          break;
-        }
-        if (a) { await say(chat, `Send  /free  to check now, or  /free on  /  /free off\nNow: ${state.free ? 'on' : 'off'}`); break; }
-        if (!checkCourts) { await say(chat, 'This copy of the bot cannot read the booking sheet.'); break; }
-        const rel = nextRelease(t, c);
-        if (!rel) { await say(chat, 'Set a day first, for example  /set thu 19:00 2h'); break; }
-        const date = checkDate(t, c, rel);
-        const answer = await readSheet(iso(date), rel.start, rel.end);
-        await say(chat, M.freeMessage(c, date, rel, answer, state.free));
-        break;
-      }
 
       case 'set': {
         const usage = 'Use it like this:  /set thu 19:00 2h\nDay, start time, then 1h or 2h (1h if you leave it out).';
         const day = parseDay(args[0]);
-        let start = null, hours = null;
-        const range = /^(.+?)(?:-|–|to)(.+)$/i.exec(args.slice(1).join(''));
-        if (range && parseTime(range[1]) !== null && parseTime(range[2]) !== null) {   // "19:00-21:00"
-          start = parseTime(range[1]);
-          const len = parseTime(range[2]) - start;
-          hours = len === 60 ? 1 : len === 120 ? 2 : null;
-          if (!hours) { await say(chat, 'A booking can be one hour or two.\n' + usage); break; }
-        } else {
-          start = parseTime(args[1]);
-          hours = args.length > 2 ? parseHours(args.slice(2).join(' ')) : 1;
-        }
-        if (!day || start === null || !hours) { await say(chat, usage); break; }
-        if (start % 30 !== 0) { await say(chat, 'Slots start on the hour. Try a time like 19:00.'); break; }
-        if (start + hours * 60 > 1440) { await say(chat, 'That slot runs past midnight. Try an earlier time.'); break; }
-        state.plan[day] = { start, hours }; save();
+        const slot = parseSlot(args.slice(1));
+        if (!day || !('start' in slot)) { await say(chat, (slot.why ? `${slot.why}\n` : '') + usage); break; }
+        state.plan[day] = { start: slot.start, hours: slot.hours }; save();
         const name = DAY_LONG[DAY_KEYS.indexOf(day)];
-        const odd = start % 60 !== 0 ? '\nNote: I have only seen Kelvingrove slots start on the hour. Send /test to check this one opens.' : '';
-        await say(chat, `<b>${name}s · ${slotText(state.plan[day])}</b>${odd}\nThe alert comes ${daysAhead} days before, ${state.lead} s ahead of the ${hhmm(releaseMin)} release.\n\n${next()}${keepNote()}`);
+        await say(chat, `<b>${name}s · ${slotText(state.plan[day])}</b>\nBooked every week, ${daysAhead} days before at ${hhmm(releaseMin)}, when the day opens.\n\n${next()}${keepNote()}`);
         break;
       }
 
       case 'off': {
-        if ((args[0] || '').toLowerCase() === 'all') { state.plan = {}; save(); await say(chat, 'All days removed. No alerts will be sent.'); break; }
+        if ((args[0] || '').toLowerCase() === 'all') { state.plan = {}; save(); await say(chat, `Every weekly booking removed. One-off dates stay; see /plan.\n\n${next()}`); break; }
         const day = parseDay(args[0]);
         if (!day) { await say(chat, 'Use it like this:  /off thu   (or /off all)'); break; }
         const had = !!state.plan[day];
         delete state.plan[day]; save();
-        await say(chat, `${had ? 'Removed' : 'There was no alert for'} ${DAY_LONG[DAY_KEYS.indexOf(day)]}.\n\n${next()}${keepNote()}`);
+        await say(chat, `${had ? 'Removed' : 'There was no weekly booking for'} ${DAY_LONG[DAY_KEYS.indexOf(day)]}s.\n\n${next()}${keepNote()}`);
+        break;
+      }
+
+      case 'book': {
+        const usage = 'Use it like this:  /book 25 nov 19:00 2h\nA date (25 nov, 25/11, wed, tomorrow), a start time, then 1h or 2h.';
+        const today = todayCivil(t);
+        const got = parseBooking(args, today);
+        if (!('date' in got)) { await say(chat, (got.why ? `${got.why}\n` : '') + usage); break; }
+        const date = got.date, dateIso = iso(date);
+        if (date < today || londonInstant(date, got.start) <= t) {
+          await say(chat, `${label(date)} at ${hhmm(got.start)} has already passed.`); break;
+        }
+        if (date > addDays(today, MAX_AHEAD_DAYS)) { await say(chat, `That is more than ${MAX_AHEAD_DAYS} days away. Try a nearer date.`); break; }
+        if (state.once.some(o => o.date === dateIso && o.start === got.start)) { await say(chat, `${label(date)} at ${hhmm(got.start)} is already on your list. See /plan.`); break; }
+        state.once = cleanOnce([...state.once, { date: dateIso, start: got.start, hours: got.hours }]); save();
+        const opens = opensAt(date, c);
+        const when = opens > t
+          ? `Booked when it opens: ${label(addDays(date, -daysAhead))} at ${hhmm(releaseMin)}.`
+          : 'That day is already open, so your PC books it on its next run (21:55 each night), or straight away if you run the booker on the PC now.';
+        await say(chat, `<b>${label(date)} · ${slotText({ start: got.start, hours: got.hours })}</b>\n${when}${keepNote()}`);
+        break;
+      }
+
+      case 'cancel': {
+        const n = intIn(args[0] ?? null, 1, state.once.length || 1);
+        let gone = null;
+        if (n !== null && state.once[n - 1]) gone = state.once.splice(n - 1, 1)[0];
+        else if (args.length) {
+          const date = parseBooking([...args, '00:00'], todayCivil(t)).date ?? null;   // "/cancel 25 nov": that date's one-offs
+          if (date !== null) {
+            const before = state.once.length;
+            state.once = state.once.filter(o => o.date !== iso(date));
+            if (state.once.length < before) gone = { date: iso(date), all: true };
+          }
+        }
+        if (!gone) { await say(chat, 'Use the number from /plan, like  /cancel 2  (or a date, like  /cancel 25 nov)'); break; }
+        save();
+        await say(chat, `Removed ${gone.all ? `every one-off on ${label(civilOf(gone.date))}` : `${label(civilOf(gone.date))} · ${slotText(gone)}`}.\n\n${next()}`);
         break;
       }
 
       case 'order': {
         const order = parseOrder(rest);
-        if (!order) { await say(chat, `Use it like this:  /order 4 3 5 2 6 1\nCourts 1 to 6, each once. Any you leave out go last.\nNow: ${state.order.join(', ')}`); break; }
+        if (!order) { await say(chat, `Use it like this:  /order 3 4 5 2 1 6\nCourts 1 to 6, each once. Any you leave out go last.\nNow: ${state.order.join(', ')}`); break; }
         state.order = order; save();
         await say(chat, `Court order: ${order.join(', ')}`);
-        break;
-      }
-
-      case 'lead': {
-        const n = intIn(args[0] ?? null, 5, 300);
-        if (n === null) { await say(chat, `Use a number of seconds from 5 to 300, for example  /lead 30\nNow: ${state.lead} s`); break; }
-        state.lead = n; save();
-        await say(chat, `The alert will arrive ${n} s before the release.`);
-        break;
-      }
-
-      case 'warn': {
-        const n = intIn(args[0] ?? null, 0, 60);
-        if (n === null) { await say(chat, `Use a number of minutes from 0 to 60, for example  /warn 5  (0 for no heads-up)\nNow: ${state.warnMin} min`); break; }
-        state.warnMin = n; save();
-        const tooClose = n > 0 && n * 60 <= state.lead + 5;
-        await say(chat, n === 0 ? 'No heads-up message.'
-          : tooClose ? `That is no earlier than the links themselves (${state.lead} s before), so there will be no separate heads-up.`
-            : `Heads-up ${n} min before the release.`);
-        break;
-      }
-
-      case 'go': {
-        const a = (args[0] || '').toLowerCase();
-        if (a !== 'on' && a !== 'off') { await say(chat, `Send  /go on  or  /go off\nNow: ${state.go ? 'on' : 'off'}`); break; }
-        state.go = a === 'on'; save();
-        await say(chat, state.go ? 'At the release the alert will turn to GO.' : 'The alert will stay as it is at the release.');
-        break;
-      }
-
-      case 'style': {
-        const a = (args[0] || '').toLowerCase();
-        if (!STYLES.includes(a)) { await say(chat, `Send  /style card,  /style buttons,  /style both  or  /style links\nNow: ${state.style}`); break; }
-        state.style = a; save();
-        await say(chat, {
-          buttons: 'Plain text with the court buttons.',
-          card: 'A picture card that changes when booking opens.' + (pictures ? '' : ' (The pictures are missing from this build, so it will come as plain text.)'),
-          both: 'The buttons, plus your first-choice court written out as a link that opens in one tap.',
-          links: 'The courts written out as links that open in one tap. No buttons.',
-        }[a] + ' Send /test to see it.');
-        break;
-      }
-
-      case 'code': {
-        if (!rest) { await say(chat, `Paste a confirm-screen address here to replace the booking code.\nTo get one: tap a free slot on the sheet, then Continue booking, and copy the address of the screen that follows.\nNow: code ending ${state.sid.slice(-6)}`); break; }
-        await setCode(chat, rest);
         break;
       }
 
@@ -447,114 +318,67 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
 
       case 'pause':
         state.paused = true; save();
-        await say(chat, 'Paused. No alerts until you send /resume.'); break;
+        await say(chat, 'Paused. Your PC will not book anything until you send /resume.'); break;
 
       case 'resume':
         state.paused = false; save();
-        await say(chat, `Alerts are on.\n\n${next()}`); break;
-
-      case 'signin':
-        await say(chat, 'Open the booking sheet and sign in to ClubSpark there. The court links open in the same place, so you will still be signed in when they arrive.', { reply_markup: { inline_keyboard: [[{ text: 'Open the booking sheet', url: SHEET }]] } }); break;
-
-      case 'test': {
-        const rel = nextRelease(t, c);
-        if (!rel) { await say(chat, 'Set a day first, for example  /set thu 19:00 2h'); break; }
-        const date = checkDate(t, c, rel);
-        const answer = checking() ? await readSheet(iso(date), rel.start, rel.end) : null;
-        const view = phase => courtView(c.order, answer, { released: phase === 'go', failed: !!answer && !answer.ok });
-        const sent = await deliver(chat, M.testMessage(c, rel, date, 'wait', view('wait')), 'wait');
-        if (c.go) {
-          await wait(5000);                                        // on purpose, so before and after can both be seen
-          const live = { chat, id: sent.id, card: sent.card, phase: 'wait' };
-          await turnToGo(live, M.testMessage(lookOf(c, sent.card), rel, date, 'go', view('go'))).catch(e => log(`Test GO edit failed: ${e.message}`));
-        }
-        save();
-        break;
-      }
+        await say(chat, `Booking is on.\n\n${next()}`); break;
 
       default:
-        await say(chat, 'I do not know that one. Send /help to see what I understand.');
+        await say(chat, GONE.includes(cmd)
+          ? 'That was for the old link alerts. The bot now books for you: see /help.'
+          : 'I do not know that one. Send /help to see what I understand.');
     }
   }
 
-  // ---------- the timed messages ----------
+  // ---------- the timer ----------
+  // Warns you if your PC has not checked in shortly before a release, and tidies up.
   let ticking = false;
-  const retryAt = {};   // after a failed send, when to try that message again
+  const retryAt = {};
   async function tick() {
     if (ticking) return;
     ticking = true;
     try {
+      const t = now(), today = todayCivil(t);
+      const pastOnce = state.once.filter(o => civilOf(o.date) < today);
+      if (pastOnce.length) { state.once = state.once.filter(o => civilOf(o.date) >= today); save(); }
       const chat = owner();
-      if (chat === null || state.paused) return;
-      const c = cfg();
-      startChecks(c);
-      for (const e of dueEvents(now(), c, state.sent)) {
-        if (state.sent[e.key] || (retryAt[e.key] && now() < retryAt[e.key])) continue;
-        const night = iso(e.rel.night);
-        try {
-          if (e.type === 'warn') {
-            const m = M.warnMessage(c, e.rel, now());
-            await tg.send(chat, m.text, m.extra);
-          } else if (e.type === 'links') {
-            const phase = now() >= e.rel.releaseAt ? 'go' : 'wait';
-            const sent = await deliver(chat, M.linksMessage(c, e.rel, phase, viewFor(night, phase)), phase === 'go' ? 'open' : 'wait');
-            state.live = { night, chat, id: sent.id, phase, card: sent.card };
-            if (phase === 'go') state.sent[`${night}:go`] = now();   // it already says GO
-          } else if (e.type === 'go') {
-            if (!state.sent[`${night}:links`]) continue;             // the links are still to come and will say GO themselves
-            const live = state.live && state.live.night === night ? state.live : null;
-            if (!live || live.phase !== 'go') {
-              const turned = live ? await turnToGo(live, M.linksMessage(lookOf(c, live.card), e.rel, 'go', viewFor(night, 'go'))) : false;
-              if (turned) live.phase = 'go';
-              else {                                                      // the message has gone, so GO goes out afresh
-                const sent = await deliver(chat, M.linksMessage(c, e.rel, 'go', viewFor(night, 'go')), 'open');
-                state.live = { night, chat, id: sent.id, phase: 'go', card: sent.card };
-              }
-            }
-          }
-          state.sent[e.key] = now();
-          for (const k of Object.keys(state.sent)) if (now() - state.sent[k] > SENT_KEEP_MS) delete state.sent[k];
-          save();
-          log(`Sent ${e.type} for ${label(e.rel.playDate)} at ${clockAt(now())} UK`);
-        } catch (err) {
-          retryAt[e.key] = now() + (err.retryAfter ? err.retryAfter * 1000 : 1000);
-          log(`Could not send ${e.type}: ${err.message}. Trying again shortly.`);
-        }
+      if (chat === null || state.paused || !linked) return;
+      const rel = missingFor(t, cfg(), state.lastSeen);
+      if (!rel) return;
+      const key = `missing:${rel.releaseAt}`;
+      if (state.sent[key] || (retryAt[key] && t < retryAt[key])) return;
+      try {
+        await say(chat, M.missingText(cfg(), rel));
+        state.sent[key] = t;
+        for (const k of Object.keys(state.sent)) if (t - state.sent[k] > SENT_KEEP_MS) delete state.sent[k];
+        save();
+        log(`Warned that the PC has not checked in for ${label(rel.playDate)}`);
+      } catch (err) {
+        retryAt[key] = t + (err.retryAfter ? err.retryAfter * 1000 : 5000);
+        log(`Could not send the warning: ${err.message}`);
       }
-      await repaint(c);
     } finally {
       ticking = false;
     }
   }
 
-  // How long until the next timed message, so the caller can wake up exactly then.
+  // How long until the timer next matters, so the caller can wake up then.
   function msToNext() {
-    if (owner() === null || state.paused) return null;
-    return msToNextEvent(now(), cfg());
+    if (owner() === null || state.paused || !linked) return null;
+    return msToNextCheck(now(), cfg());
   }
 
-  // A quiet note on start-up, so a deploy can be seen to have worked. With a plan set, it also
-  // reads the booking sheet once, so it is plain from the start whether ClubSpark lets this server in.
+  // A quiet note on start-up, so a deploy can be seen to have worked.
   async function announce() {
     const chat = owner();
     if (chat === null) { log('No owner yet. Open the bot in Telegram and send /start.'); return; }
-    let sheet = '';
-    const c = cfg(), rel = checking() ? nextRelease(now(), c) : null;
-    if (rel && checkSource === 'home') {
-      // The home server only reads during a booking-night window, so there is nothing to read at
-      // start-up. Just say where readings come from; /status shows when the last one arrived.
-      sheet = '\nFree-court readings come from your home server. It reads ClubSpark on booking nights.';
-    } else if (rel) {
-      const answer = await readSheet(iso(checkDate(now(), c, rel)), rel.start, rel.end);
-      log(answer.ok ? 'The booking sheet can be read from here.' : `The booking sheet cannot be read from here: ${answer.why}`);
-      sheet = answer.ok ? '\nFree-court check: working.'
-        : `\nFree-court check: not working (${M.esc(answer.why)}). The alerts will show all six courts.`;
-    }
-    await tg.send(chat, `Court alert is running (version ${VERSION}).\n${next()}${sheet}${keepNote()}`, { ...html, disable_notification: true })
+    const pc = linked ? '' : '\nYour PC cannot reach me yet: set AGENT_TOKEN in Railway (see the README).';
+    await tg.send(chat, `Court booker is running (version ${VERSION}).\n${next()}${pc}${keepNote()}`, { ...html, disable_notification: true })
       .catch(e => log(`Start-up note not sent: ${e.message}`));
   }
 
-  return { handleUpdate, tick, msToNext, announce, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
+  return { handleUpdate, tick, msToNext, announce, jobsForAgent, resultFromAgent, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
 }
 
-module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, intIn, VERSION, STYLES };
+module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, cleanResult, intIn, VERSION };

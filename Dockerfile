@@ -1,7 +1,7 @@
-# Court alert bot. No packages to install: it runs on Node alone.
+# Court booker bot. No packages to install: it runs on Node alone.
 FROM node:22-alpine
 WORKDIR /app
-COPY package.json index.js app.js home-agent.js ./
+COPY package.json index.js app.js ./
 COPY lib ./lib
 COPY assets ./assets
 ENV NODE_ENV=production
