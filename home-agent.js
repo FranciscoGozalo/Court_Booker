@@ -9,8 +9,9 @@
 // See the "Run the check from your home server" section of README.md.
 
 const { createCourtChecker } = require('./lib/availability');
-const { createAgentLoop } = require('./lib/agent');
-const { clockAt, londonWall } = require('./lib/time');
+const { createAgentLoop, describeReading } = require('./lib/agent');
+const { nextRelease, checkDate } = require('./lib/schedule');
+const { clockAt, londonWall, iso, label } = require('./lib/time');
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -74,6 +75,19 @@ async function main() {
   process.on('unhandledRejection', e => log('Unhandled error:', e && e.message ? e.message : e));
 
   await refreshPlan();
+
+  // One read now, for a day that is already open, so it is plain from the start whether ClubSpark
+  // lets this machine in. On booking nights the reads follow the release by themselves.
+  const rel = cfg && cfg.free !== false ? nextRelease(Date.now(), cfg) : null;
+  if (rel) {
+    const date = checkDate(Date.now(), cfg, rel);
+    const answer = await checkCourts(iso(date), rel.start, rel.end);
+    log(`Test read, ${label(date)} ${hhmm(rel.start)}–${hhmm(rel.end)}: ${describeReading(cfg.order, answer)}`);
+    log(`Next booking night: ${label(rel.night)}, for ${label(rel.playDate)}. Leave this running.`);
+  } else if (cfg) {
+    log(cfg.free === false ? 'The free-court check is switched off in the bot (/free on to use it).' : 'No day is set in the bot yet (/set thu 19:00 2h).');
+  }
+
   while (!stopping) {
     if (Date.now() - lastPlanAt > 60000) await refreshPlan();
     try { await loop(cfg, { onResult: post }); } catch (e) { log(`Tick failed: ${e.message}`); }

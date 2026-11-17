@@ -46,7 +46,7 @@ Nothing here disguises anything: the home program reads the public booking sheet
    RELAY_URL=https://your-railway-address  AGENT_TOKEN=the-same-line  node home-agent.js
    ```
 
-   It should print `Reached the Railway bot and the token works.` Leave it running. On a booking night it reads the sheet around the release and sends the results to the bot; the rest of the time it sits quietly.
+   It should print `Reached the Railway bot and the token works.`, then one test read for a day that is already open: `ClubSpark can be read from here. Courts: 3 free, 4 booked, …`. If that line says `cannot be read from here`, this machine's connection is turned away too and the home route will not help. Otherwise leave it running. On a booking night it reads the sheet around the release and sends the results to the bot; the rest of the time it sits quietly.
 4. **Keep it running.** So it starts on its own after a reboot or power cut, run it under whatever your machine uses — a `systemd` service on Linux, `pm2`, or Task Scheduler on Windows. It needs only `RELAY_URL` and `AGENT_TOKEN`.
 
 Check it is working: send `/status` to the bot. It says `last reading from your home server at …` once a reading has arrived (that happens around the release, so on a quiet afternoon it will say it is waiting). If the home machine goes quiet mid-release, the card falls back to all six courts within half a minute and the alert still reaches you.

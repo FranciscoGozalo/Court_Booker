@@ -58,3 +58,14 @@ test('a posted failure carries its reason and slot through', async () => {
   assert.match(posts[0].why, /403/);
   assert.deepEqual([posts[0].date, posts[0].start, posts[0].end], ['2026-11-26', 1140, 1260]);
 });
+
+test('the start-up test read is described in one line, courts in the owner\'s order', () => {
+  const { describeReading } = require('../lib/agent');
+  const order = [4, 3, 5, 2, 6, 1];
+  assert.equal(describeReading(order, { ok: true, visible: true, courts: { ...ALL_FREE, 4: 'booked', 5: 'coaching' } }),
+    'ClubSpark can be read from here. Courts: 4 booked, 3 free, 5 coaching, 2 free, 6 free, 1 free');
+  assert.equal(describeReading(order, { ok: false, why: 'ClubSpark turned this server away (HTTP 403, Cloudflare)' }),
+    'ClubSpark cannot be read from here: ClubSpark turned this server away (HTTP 403, Cloudflare)');
+  assert.equal(describeReading(order, { ok: true, visible: false, courts: {} }), 'ClubSpark answered, but the sheet shows nothing for that day');
+  assert.equal(describeReading(order, null), 'ClubSpark cannot be read from here: no answer');
+});
