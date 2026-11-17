@@ -196,6 +196,13 @@ test('a PC that has not checked in is warned about once, two minutes before', as
   assert.equal(b.tg.calls.length, 0);
 });
 
+test('a PC asking hours before the release gets its jobs but no heads-up yet', async () => {
+  const { app, tg } = makeApp(`${TUE}T15:00:00Z`, { state: { owner: OWNER, plan: { tue: { start: 960, hours: 2 } } } });
+  assert.equal(app.jobsForAgent().jobs.length, 1);
+  await new Promise(r => setImmediate(r));
+  assert.equal(tg.calls.length, 0);
+});
+
 test('paused: the PC is told there is nothing to book', () => {
   const { app } = makeApp(`${TUE}T21:55:00Z`, { state: { owner: OWNER, plan: { tue: { start: 960, hours: 2 } }, paused: true } });
   assert.deepEqual(app.jobsForAgent().jobs, []);

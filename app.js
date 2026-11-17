@@ -17,6 +17,7 @@ const STATE_VERSION = 4;
 const SENT_KEEP_MS = 3 * 86400000;
 const RESULTS_KEEP_MS = 60 * 86400000;
 const MAX_AHEAD_DAYS = 90;
+const HEADS_UP_MS = 30 * 60 * 1000;   // the heads-up card only goes out when the PC checks in this close to a release
 const GONE = ['test', 'free', 'signin', 'style', 'lead', 'warn', 'go', 'code'];   // link-alert commands from version 1
 
 // The two banner pictures: the court before booking opens (heads-up), and with the
@@ -164,7 +165,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     state.lastSeen = t;
     const c = cfg();
     const jobs = state.paused || owner() === null ? [] : jobsFor(t, c, state.results);
-    const coming = jobs.filter(j => j.releaseAt > t);
+    const coming = jobs.filter(j => j.releaseAt > t && j.releaseAt - t <= HEADS_UP_MS);
     if (coming.length) {
       const key = `ready:${coming[0].releaseAt}`;
       if (!state.sent[key]) {
