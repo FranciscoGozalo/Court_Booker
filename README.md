@@ -1,6 +1,6 @@
 # Court alert
 
-A small Telegram bot for Kelvingrove Park Tennis Courts. On your booking nights it messages you a button for each court just before ClubSpark releases the new day, then turns the message to **GO** at the release.
+A small Telegram bot for Kelvingrove Park Tennis Courts. On your booking nights it messages you a card with a button for each court just before ClubSpark releases the new day, then turns the card to **GO** at the release.
 
 You do the booking. You tap a court, ClubSpark shows its confirm screen, and you press Confirm and pay. The bot never contacts ClubSpark, never signs in and never books anything. It only sends messages to you.
 
@@ -13,8 +13,8 @@ Kelvingrove opens each day for booking 7 days ahead at 22:00, so the alert for a
 | UK time | What arrives |
 | --- | --- |
 | 21:55:00 | A heads-up, with a button to check you are signed in to ClubSpark |
-| 21:59:30 | Six court buttons for your slot, in your order of courts |
-| 22:00:00 | The same message turns to "GO. Tap a court now." |
+| 21:59:30 | A card: a picture of the court with the floodlights off, your slot, and six court buttons in your order |
+| 22:00:00 | The same card turns to "GO": the words at once, then the picture, with the floodlights on |
 
 If ClubSpark says "Sorry, your booking was unsuccessful", that court has gone. Go back and tap the next one.
 
@@ -67,7 +67,7 @@ Out of the box, Railway forgets the bot's settings each time it restarts. Do one
 | `/plan` | Your plan and when the next alert is due. |
 | `/test` | Send the courts now, for a day that is already open. |
 | `/signin` | Open the booking sheet so you can sign in. |
-| `/style buttons` | How the courts are shown. See below. |
+| `/style card` | How the courts are shown. See below. |
 | `/lead 30` | How many seconds before the release the alert arrives (5 to 300). |
 | `/warn 5` | How many minutes before the release the heads-up arrives. `0` for none. |
 | `/go off` | Leave the alert as it is at the release. |
@@ -79,13 +79,24 @@ Out of the box, Railway forgets the bot's settings each time it restarts. Do one
 
 ## How the courts are shown
 
-Telegram asks "Open this link?" before it opens a button's link. An address written out in the message opens on the first tap, but ClubSpark's addresses are long. So there are three styles:
+- `/style card` (the default): a picture on top, your slot and the status under it, then the court buttons. At the release the words turn to GO and the picture changes.
+- `/style buttons`: the same words and buttons as plain text, with no picture.
+- `/style both`: plain text, plus your first-choice court written out as a link.
+- `/style links`: all six courts written out as links. No buttons, and a long message.
 
-- `/style buttons` (the default): court buttons only. Tidy; each court is a tap and a confirm.
-- `/style both`: the buttons, plus your first-choice court written out as a link that opens in one tap.
-- `/style links`: all six courts written out. One tap each, but a long message.
+Telegram asks "Open this link?" before it opens a button's link. An address written out in the message opens on the first tap, which is what `both` and `links` are for, but ClubSpark's addresses are long.
 
-Send `/test` after changing it to see how it looks.
+If Telegram ever refuses a picture, the alert goes out as plain text instead, so a picture can never cost you an alert.
+
+## The pictures
+
+The two banners the bot sends are `assets/banner-wait.jpg` and `assets/banner-open.jpg`, 1280 by 480 pixels. They are made from the two pictures in `art/` (`wait.jpg` and `open.jpg`) by laying the words over them:
+
+```
+NODE_PATH=$(npm root -g) node art/make-banners.cjs
+```
+
+To change a picture, replace the file in `art/` with another of the same shape, keep its left third dark and plain for the words, and run that again. The bot notices a changed banner by itself and uploads it the next time it is needed.
 
 ## Good to know
 
@@ -124,4 +135,6 @@ lib/schedule.js   which messages are due when
 lib/messages.js   the words and buttons
 lib/telegram.js   Telegram Bot API client
 lib/store.js      the settings file
+assets/           the two banners the bot sends
+art/              the pictures the banners are made from, and the script that makes them
 ```

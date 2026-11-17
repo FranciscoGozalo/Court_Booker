@@ -18,7 +18,7 @@ const COMMANDS = [
   ['order', 'Court order: /order 4 3 5 2 6 1'],
   ['test', 'Send the courts now for an open day'],
   ['signin', 'Open the booking sheet to sign in'],
-  ['style', 'Buttons, links or both'],
+  ['style', 'Card, buttons, links or both'],
   ['status', 'Clock, version and settings'],
   ['pause', 'Stop alerts'],
   ['resume', 'Start alerts again'],
@@ -54,6 +54,7 @@ async function main() {
   const tg = createTelegram(token, { apiUrl: process.env.TELEGRAM_API_URL || undefined });
   const app = createApp({ tg, store, log, env: process.env });
   log(`Settings file: ${store.file}`);
+  if (!app.hasPictures) log('The banner pictures are missing (assets/banner-wait.jpg and banner-open.jpg), so the card look will come as plain text.');
 
   try {
     const me = await tg.call('getMe');

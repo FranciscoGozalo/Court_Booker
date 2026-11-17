@@ -19,7 +19,7 @@ test('the links message before the release', () => {
   const c = cfg(), m = M.linksMessage(c, rel(c), 'wait', linksAt);
   const lines = plain(m.text).split('\n');
   assert.equal(lines[0], 'Thu 26 Nov · 19:00–21:00');
-  assert.equal(lines[1], 'Opens at 22:00:00, in 30 s. Wait for GO.');
+  assert.equal(lines[1], 'Opens at 22:00:00 · wait for GO');
   assert.equal(lines[3], 'Court 4, one tap:');
   assert.equal(lines[4], L.directUrl(4, civil(2026, 11, 26), 1140, 1260, L.DEFAULT_SID));
   assert.equal(lines.length, 5);
@@ -39,13 +39,13 @@ test('the court buttons follow the chosen order and carry the right slot', () =>
 });
 
 test('turning to GO changes one line and moves nothing', () => {
-  for (const style of ['both', 'links', 'buttons']) {
+  for (const style of ['card', 'both', 'links', 'buttons']) {
     const c = cfg({ style });
     const w = M.linksMessage(c, rel(c), 'wait', linksAt), g = M.linksMessage(c, rel(c), 'go', at('2026-11-19T22:00:00Z'));
     const wl = w.text.split('\n'), gl = g.text.split('\n');
     assert.equal(wl.length, gl.length, style);
     assert.deepEqual(wl.filter((l, i) => l !== gl[i]).length, 1, style);
-    assert.equal(gl[1], '<b>GO.</b> Tap a court now.');
+    assert.equal(gl[1], '<b>GO</b> · tap a court now');
     assert.notEqual(w.text, g.text);
     assert.deepEqual(g.extra, w.extra, style);                         // the very same buttons in the same places
   }
@@ -75,19 +75,34 @@ test('the three styles', () => {
 });
 
 test('written-out links are never wrapped in hidden-link markup, and nothing is fetched for a preview', () => {
-  for (const style of ['both', 'links', 'buttons']) {
+  for (const style of ['card', 'both', 'links', 'buttons']) {
     const c = cfg({ style });
     for (const m of [M.linksMessage(c, rel(c), 'wait', linksAt), M.linksMessage(c, rel(c), 'go', linksAt), M.warnMessage(c, rel(c), linksAt), M.testMessage(c, rel(c), civil(2026, 11, 20), 'wait')]) {
       assert.ok(!/<a\s/i.test(m.text));
-      assert.deepEqual(m.extra.link_preview_options, { is_disabled: true });
+      if (m.card) assert.equal(m.extra.link_preview_options, undefined);     // a picture has no link preview to switch off
+      else assert.deepEqual(m.extra.link_preview_options, { is_disabled: true });
       assert.ok(!/&(?!amp;|lt;|gt;)/.test(m.text), 'every & is escaped');
     }
   }
 });
 
-test('a late links message counts down from where it is', () => {
-  const c = cfg();
-  assert.match(M.linksMessage(c, rel(c), 'wait', at('2026-11-19T21:59:45Z')).text, /in 15 s\. Wait for GO\./);
+test('with GO switched off, the waiting line makes no promise of it', () => {
+  const c = cfg({ go: false });
+  assert.equal(M.linksMessage(c, rel(c), 'wait').text.split('\n')[1], 'Opens at 22:00:00');
+  assert.equal(M.testMessage(c, rel(c), civil(2026, 11, 20), 'wait').text.split('\n')[1], 'Opens at the release');
+});
+
+test('the card: the words become a caption, with the buttons and nothing a text message alone needs', () => {
+  const c = cfg({ style: 'card' });
+  const w = M.linksMessage(c, rel(c), 'wait'), g = M.linksMessage(c, rel(c), 'go');
+  assert.equal(w.card, true);
+  assert.equal(w.text, '<b>Thu 26 Nov · 19:00–21:00</b>\nOpens at 22:00:00 · wait for GO');
+  assert.equal(g.text, '<b>Thu 26 Nov · 19:00–21:00</b>\n<b>GO</b> · tap a court now');
+  assert.deepEqual(Object.keys(w.extra).sort(), ['parse_mode', 'reply_markup']);         // a picture takes no link-preview setting
+  assert.deepEqual(w.extra.reply_markup, M.linksMessage(cfg({ style: 'buttons' }), rel(c), 'wait').extra.reply_markup);
+  assert.ok(w.text.length < 1024 && M.testMessage(c, rel(c), civil(2026, 11, 20), 'go').text.length < 1024);   // Telegram's limit for a caption
+  for (const style of ['buttons', 'both', 'links']) assert.equal(M.linksMessage(cfg({ style }), rel(c), 'wait').card, undefined);
+  assert.equal(M.testMessage(c, rel(c), civil(2026, 11, 20), 'wait').card, true);
 });
 
 test('the heads-up', () => {
@@ -98,8 +113,8 @@ test('the heads-up', () => {
 
 test('the try-out message', () => {
   const c = cfg(), m = M.testMessage(c, rel(c), civil(2026, 11, 20), 'wait'), g = M.testMessage(c, rel(c), civil(2026, 11, 20), 'go');
-  assert.deepEqual(plain(m.text).split('\n').slice(0, 2), ['Test · Fri 20 Nov · 19:00–21:00', 'Waiting. On the night this line counts down to the release.']);
-  assert.equal(g.text.split('\n')[1], '<b>GO.</b> This is how it turns at the release.');
+  assert.deepEqual(plain(m.text).split('\n').slice(0, 2), ['Test · Fri 20 Nov · 19:00–21:00', 'Opens at the release · wait for GO']);
+  assert.equal(g.text.split('\n')[1], '<b>GO</b> · tap a court now');
   assert.match(m.extra.reply_markup.inline_keyboard[0][0].url, /Date=2026-11-20&/);
   assert.equal(m.text.split('\n').length, g.text.split('\n').length);
   assert.match(g.text, /GO/);

@@ -2,16 +2,32 @@
 // The bot's behaviour: what it does with each message from its owner, and what it sends when.
 // It talks to Telegram only. It never contacts ClubSpark: it sends links for a person to tap.
 
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 const { iso, label, hhmm, clockAt, DAY_KEYS, DAY_LONG } = require('./lib/time');
 const { DEFAULT_SID, GUID, SHEET, parseBookAddress } = require('./lib/links');
 const { parseDay, parseTime, parseHours, parseOrder, parsePlan, cleanPlan, cleanOrder, slotText } = require('./lib/plan');
 const { dueEvents, msToNextEvent, nextRelease, checkDate } = require('./lib/schedule');
 const M = require('./lib/messages');
 
-const VERSION = '1.2';
-const STYLES = ['buttons', 'both', 'links'];
-const STATE_VERSION = 2;
+const VERSION = '1.3';
+const STYLES = ['card', 'buttons', 'both', 'links'];
+const STATE_VERSION = 3;
 const SENT_KEEP_MS = 3 * 86400000;
+
+// The two banner pictures for the card: the court before booking opens, and after.
+// Each carries a fingerprint of its contents, so a changed file is uploaded afresh.
+function loadPictures(dir = path.join(__dirname, 'assets')) {
+  const out = {};
+  for (const kind of ['wait', 'open']) {
+    const name = `banner-${kind}.jpg`;
+    let buf;
+    try { buf = fs.readFileSync(path.join(dir, name)); } catch { return null; }
+    out[kind] = { buf, name, hash: crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16) };
+  }
+  return out;
+}
 
 // A whole number in a range, from a number or a string of digits. Anything else is null.
 function intIn(v, lo, hi) {
@@ -26,7 +42,7 @@ function intIn(v, lo, hi) {
 function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: DEFAULT_SID,
-    lead: 30, warnMin: 5, go: true, style: 'buttons', paused: false, sent: {}, live: null,
+    lead: 30, warnMin: 5, go: true, style: 'card', paused: false, sent: {}, live: null, pics: {},
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -36,17 +52,22 @@ function loadState(raw, env = {}) {
     state.lead = intIn(raw.lead, 5, 300) ?? 30;
     state.warnMin = intIn(raw.warnMin, 0, 60) ?? 5;
     state.go = raw.go !== false;
-    state.style = STYLES.includes(raw.style) ? raw.style : 'buttons';
-    // Version 1.0 saved its own default look, "both". The default is now buttons only, so
-    // settings written by 1.0 follow it. A later /style both is saved with the new version and sticks.
-    if (raw.v !== STATE_VERSION && raw.style === 'both') state.style = 'buttons';
+    state.style = STYLES.includes(raw.style) ? raw.style : 'card';
+    // The default look has changed twice: "both" in 1.0, "buttons" in 1.1, the picture card since 1.3.
+    // Settings saved under an old default follow the new one. A look chosen on purpose since then is kept.
+    const savedBy = raw.v === 2 || raw.v === 3 ? raw.v : 1;
+    if ((savedBy === 1 && raw.style === 'both') || (savedBy === 2 && raw.style === 'buttons')) state.style = 'card';
     state.paused = raw.paused === true;
     if (raw.sent && typeof raw.sent === 'object') {
       for (const k of Object.keys(raw.sent)) if (typeof raw.sent[k] === 'number') state.sent[k] = raw.sent[k];
     }
     const l = raw.live;
     if (l && typeof l === 'object' && typeof l.night === 'string' && Number.isInteger(l.id) && Number.isInteger(l.chat)) {
-      state.live = { night: l.night, chat: l.chat, id: l.id, phase: l.phase === 'go' ? 'go' : 'wait' };
+      state.live = { night: l.night, chat: l.chat, id: l.id, phase: l.phase === 'go' ? 'go' : 'wait', card: l.card === true };
+    }
+    for (const kind of ['wait', 'open']) {                       // what Telegram calls each picture, once it has it
+      const p = raw.pics && raw.pics[kind];
+      if (p && typeof p.hash === 'string' && typeof p.id === 'string') state.pics[kind] = { hash: p.hash, id: p.id };
     }
   } else {
     state.plan = parsePlan(env.COURT_PLAN);
@@ -69,7 +90,7 @@ function readBackup(text) {
   } catch { return null; }
 }
 
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait = ms => new Promise(r => setTimeout(r, ms)) }) {
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait = ms => new Promise(r => setTimeout(r, ms)), pictures = loadPictures() }) {
   const fromVariable = readBackup(env.COURT_SETTINGS);
   const state = loadState(store.load() ?? fromVariable, env);
   const variableLine = fromVariable ? backupLine(loadState(fromVariable, env)) : null;
@@ -90,8 +111,87 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
   const keepNote = () => (kept() !== 'no' ? '' : '\n\nNote: these settings will be lost at the next restart. To keep them, add a Railway volume mounted at /data, or send /backup.');
   const html = { parse_mode: 'HTML', link_preview_options: M.NO_PREVIEW };
   const say = (chat, text, extra = {}) => tg.send(chat, text, { ...html, ...extra });
-  const sendMsg = (chat, m) => tg.send(chat, m.text, m.extra);
-  const editMsg = (chat, id, m) => tg.edit(chat, id, m.text, m.extra);
+
+  // ---------- sending the courts ----------
+  // In the card look the courts go out as a picture with the words as its caption. A picture
+  // must never cost an alert, so whatever Telegram refuses about one falls back to plain text.
+  const transient = err => !err.code || err.code === 429 || err.code >= 500;   // worth another try shortly
+  const unchanged = err => /not modified/i.test(err.message || '');            // an earlier try got through after all
+  const asText = m => ({ text: m.text, extra: { ...m.extra, link_preview_options: M.NO_PREVIEW } });
+  const asCaption = m => ({ caption: m.text, parse_mode: 'HTML', reply_markup: m.extra.reply_markup });
+  // The look a message already on screen was sent in, whatever the setting says now.
+  const lookOf = (c, card) => ({ ...c, style: card ? 'card' : (c.style === 'card' ? 'buttons' : c.style) });
+  function picture(kind) {
+    const p = pictures && pictures[kind];
+    if (!p) return null;
+    const known = state.pics[kind];
+    return { id: known && known.hash === p.hash ? known.id : null, file: { buf: p.buf, name: p.name } };
+  }
+  function remember(kind, message) {
+    const sizes = message && message.photo;
+    const id = Array.isArray(sizes) && sizes.length ? sizes[sizes.length - 1].file_id : null;
+    if (id && pictures && pictures[kind]) state.pics[kind] = { hash: pictures[kind].hash, id };
+  }
+
+  // Sends the courts. Returns the message's id and whether it went as a card.
+  async function deliver(chat, m, kind) {
+    const pic = m.card ? picture(kind) : null;
+    if (!pic) {
+      const sent = await tg.send(chat, m.text, (m.card ? asText(m) : m).extra);
+      return { id: sent.message_id, card: false };
+    }
+    try {
+      let sent;
+      try { sent = await tg.sendPhoto(chat, pic.id || pic.file, asCaption(m)); } catch (err) {
+        if (!pic.id || transient(err)) throw err;
+        delete state.pics[kind];                                   // the saved name for the picture no longer works: upload it again
+        sent = await tg.sendPhoto(chat, pic.file, asCaption(m));
+      }
+      remember(kind, sent);
+      return { id: sent.message_id, card: true };
+    } catch (err) {
+      if (transient(err)) throw err;
+      log(`Telegram would not take the picture (${err.message}). Sending the alert as plain text.`);
+      const sent = await tg.send(chat, m.text, asText(m).extra);
+      return { id: sent.message_id, card: false };
+    }
+  }
+
+  // Turns a waiting message to GO. `m` is the GO message in the look the waiting one was sent in.
+  // Returns false if the message is no longer there to change.
+  async function turnToGo(live, m) {
+    try {
+      if (live.card) await tg.editCaption(live.chat, live.id, m.text, { parse_mode: 'HTML', reply_markup: m.extra.reply_markup });
+      else await tg.edit(live.chat, live.id, m.text, m.extra);
+    } catch (err) {
+      if (err.code !== 400) throw err;
+      if (!unchanged(err)) return false;
+    }
+    if (live.card) {
+      // The words change at once. The picture follows, because a phone has to fetch it.
+      live.phase = 'go'; save();
+      await changePicture(live, m).catch(err => log(`The picture did not change at GO: ${err.message}`));
+    }
+    return true;
+  }
+  async function changePicture(live, m) {
+    const pic = picture('open');
+    if (!pic) return;
+    let useId = pic.id;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        remember('open', await tg.editMedia(live.chat, live.id, useId || pic.file, asCaption(m)));
+        save();
+        return;
+      } catch (err) {
+        if (unchanged(err)) return;
+        if (attempt >= 2) throw err;
+        if (transient(err)) await wait(400);
+        else if (useId) { delete state.pics.open; useId = null; }      // the saved name no longer works: upload instead
+        else throw err;
+      }
+    }
+  }
   const next = () => M.esc(M.nextLine(cfg(), now(), state.paused));
   const toldPrivate = new Set();
 
@@ -219,10 +319,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
 
       case 'style': {
         const a = (args[0] || '').toLowerCase();
-        if (!STYLES.includes(a)) { await say(chat, `Send  /style buttons,  /style both  or  /style links\nNow: ${state.style}`); break; }
+        if (!STYLES.includes(a)) { await say(chat, `Send  /style card,  /style buttons,  /style both  or  /style links\nNow: ${state.style}`); break; }
         state.style = a; save();
         await say(chat, {
-          buttons: 'Court buttons only. Telegram asks "Open this link?" when you tap one.',
+          buttons: 'Plain text with the court buttons.',
+          card: 'A picture card that changes when booking opens.' + (pictures ? '' : ' (The pictures are missing from this build, so it will come as plain text.)'),
           both: 'The buttons, plus your first-choice court written out as a link that opens in one tap.',
           links: 'All six courts written out as links that open in one tap. No buttons.',
         }[a] + ' Send /test to see it.');
@@ -253,12 +354,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
         const rel = nextRelease(t, c);
         if (!rel) { await say(chat, 'Set a day first, for example  /set thu 19:00 2h'); break; }
         const date = checkDate(t, c, rel);
-        const first = M.testMessage(c, rel, date, 'wait');
-        const sent = await sendMsg(chat, first);
+        const sent = await deliver(chat, M.testMessage(c, rel, date, 'wait'), 'wait');
         if (c.go) {
-          await wait(5000);
-          await editMsg(chat, sent.message_id, M.testMessage(c, rel, date, 'go')).catch(e => log(`Test GO edit failed: ${e.message}`));
+          await wait(5000);                                        // on purpose, so before and after can both be seen
+          const live = { chat, id: sent.id, card: sent.card, phase: 'wait' };
+          await turnToGo(live, M.testMessage(lookOf(c, sent.card), rel, date, 'go')).catch(e => log(`Test GO edit failed: ${e.message}`));
         }
+        save();
         break;
       }
 
@@ -286,27 +388,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
             await tg.send(chat, m.text, m.extra);
           } else if (e.type === 'links') {
             const phase = now() >= e.rel.releaseAt ? 'go' : 'wait';
-            const sent = await sendMsg(chat, M.linksMessage(c, e.rel, phase, now()));
-            state.live = { night, chat, id: sent.message_id, phase };
+            const sent = await deliver(chat, M.linksMessage(c, e.rel, phase), phase === 'go' ? 'open' : 'wait');
+            state.live = { night, chat, id: sent.id, phase, card: sent.card };
             if (phase === 'go') state.sent[`${night}:go`] = now();   // it already says GO
           } else if (e.type === 'go') {
             if (!state.sent[`${night}:links`]) continue;             // the links are still to come and will say GO themselves
             const live = state.live && state.live.night === night ? state.live : null;
             if (!live || live.phase !== 'go') {
-              const m = M.linksMessage(c, e.rel, 'go', now());
-              let edited = false;
-              if (live) {
-                try { await editMsg(live.chat, live.id, m); edited = true; }
-                catch (err) {
-                  if (err.code !== 400) throw err;
-                  if (/not modified/i.test(err.message)) edited = true;   // an earlier try got through after all
-                }                                                         // any other 400: the message has gone, so send GO afresh
-              }
-              if (!edited) {
-                const sent = await sendMsg(chat, m);
-                state.live = { night, chat, id: sent.message_id, phase: 'go' };
-              } else {
-                live.phase = 'go';
+              const turned = live ? await turnToGo(live, M.linksMessage(lookOf(c, live.card), e.rel, 'go')) : false;
+              if (turned) live.phase = 'go';
+              else {                                                      // the message has gone, so GO goes out afresh
+                const sent = await deliver(chat, M.linksMessage(c, e.rel, 'go'), 'open');
+                state.live = { night, chat, id: sent.id, phase: 'go', card: sent.card };
               }
             }
           }
@@ -338,7 +431,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
       .catch(e => log(`Start-up note not sent: ${e.message}`));
   }
 
-  return { handleUpdate, tick, msToNext, announce, kept, state, cfg, owner, VERSION };
+  return { handleUpdate, tick, msToNext, announce, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
 }
 
-module.exports = { createApp, loadState, backupLine, readBackup, intIn, VERSION, STYLES };
+module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, intIn, VERSION, STYLES };

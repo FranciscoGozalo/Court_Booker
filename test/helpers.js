@@ -3,6 +3,21 @@
 
 const at = s => Date.parse(s);
 
+// A picture arrives either as a file ({ buf, name }) or as the id Telegram gave it earlier.
+const nameOf = photo => (typeof photo === 'string' ? photo : `upload:${photo.name}`);
+const sizesOf = photo => [{ file_id: 'thumb' }, { file_id: typeof photo === 'string' ? photo : `id:${photo.name}` }];
+function refuse(tg, photo) {
+  let message = null;
+  if (tg.refusePhotos) message = 'Bad Request: PHOTO_INVALID_DIMENSIONS';
+  else if (typeof photo === 'string' && tg.staleIds.has(photo)) message = 'Bad Request: wrong file identifier/HTTP URL specified';
+  if (message) { const e = new Error(message); e.code = 400; throw e; }
+}
+// Two tiny stand-in pictures, as the app loads them from assets/.
+const PICTURES = {
+  wait: { buf: Buffer.from('waiting picture'), name: 'banner-wait.jpg', hash: 'hash-wait' },
+  open: { buf: Buffer.from('open picture'), name: 'banner-open.jpg', hash: 'hash-open' },
+};
+
 function fakeTelegram(clock) {
   let nextId = 100;
   const tg = {
@@ -23,6 +38,36 @@ function fakeTelegram(clock) {
       }
       tg.calls.push({ at: clock.t, method: 'edit', chat, text, extra, id });
       return true;
+    },
+    // ---- pictures ----
+    refusePhotos: false,      // answer every picture as Telegram does one it will not accept
+    staleIds: new Set(),      // picture ids that Telegram no longer recognises
+    failMedia: null,          // { code, message, once } for changing a message's picture
+    async sendPhoto(chat, photo, extra = {}) {
+      if (tg.failSend > 0) { tg.failSend--; throw new Error('network down'); }
+      refuse(tg, photo);
+      const id = nextId++;
+      tg.calls.push({ at: clock.t, method: 'photo', chat, text: extra.caption, extra, id, photo: nameOf(photo) });
+      return { message_id: id, photo: sizesOf(photo) };
+    },
+    async editCaption(chat, id, caption, extra = {}) {
+      if (tg.failEdit) {
+        const e = new Error(tg.failEdit.message || 'edit failed'); e.code = tg.failEdit.code;
+        if (tg.failEdit.once) tg.failEdit = null;
+        throw e;
+      }
+      tg.calls.push({ at: clock.t, method: 'caption', chat, text: caption, extra, id });
+      return { message_id: id };
+    },
+    async editMedia(chat, id, photo, extra = {}) {
+      if (tg.failMedia) {
+        const e = new Error(tg.failMedia.message || 'media failed'); if (tg.failMedia.code) e.code = tg.failMedia.code;
+        if (tg.failMedia.once) tg.failMedia = null;
+        throw e;
+      }
+      refuse(tg, photo);
+      tg.calls.push({ at: clock.t, method: 'media', chat, text: extra.caption, extra, id, photo: nameOf(photo) });
+      return { message_id: id, photo: sizesOf(photo) };
     },
     skewMs: () => 0,
     last: () => tg.calls[tg.calls.length - 1],
@@ -58,4 +103,4 @@ async function runLikeIndex(app, clock, from, to) {
 }
 const clockOf = ms => new Date(ms).toISOString();
 
-module.exports = { at, fakeTelegram, memStore, say, run, runLikeIndex, clockOf };
+module.exports = { at, fakeTelegram, memStore, say, run, runLikeIndex, clockOf, PICTURES };

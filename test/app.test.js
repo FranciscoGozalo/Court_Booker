@@ -3,25 +3,27 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createApp, loadState, backupLine, readBackup, intIn } = require('../app');
 const L = require('../lib/links');
-const { at, fakeTelegram, memStore, say, run, runLikeIndex, clockOf } = require('./helpers');
+const { at, fakeTelegram, memStore, say, run, runLikeIndex, clockOf, PICTURES } = require('./helpers');
 
 const ME = 5550001, STRANGER = 5550002;
 const GIVEN = 'https://clubspark.lta.org.uk/KelvingroveParkTennisCourts/Booking/Book?Contacts%5B0%5D.IsPrimary=true&Contacts%5B0%5D.IsJunior=false&Contacts%5B0%5D.IsPlayer=true&ResourceID=41c43943-426c-422d-adf6-d84367f60067&Date=2026-11-17&SessionID=ff6ac50a-dbea-4388-90d7-dcc8332240fd&StartTime=900&EndTime=960&Category=0&SubCategory=0&VenueID=44c8485b-ba20-4617-b364-445810cb9212&ResourceGroupID=44c8485b-ba20-4617-b364-445810cb9212';
 
-// A bot that has been claimed and given a plan: Thursdays 19:00 for two hours, courts 4 3 5 2 6 1.
-function setup({ start = '2026-11-16T22:45:00Z', store = memStore(), env = {}, plan = true } = {}) {
+function setup({ start = '2026-11-16T22:45:00Z', store = memStore(), env = {}, pictures = PICTURES } = {}) {
   const clock = { t: at(start) };
   const tg = fakeTelegram(clock);
   const logs = [];
-  const make = () => createApp({ now: () => clock.t, tg, store, env, log: m => logs.push(m), wait: async ms => { clock.t += ms; } });
+  const make = (pics = pictures) => createApp({ now: () => clock.t, tg, store, env, pictures: pics, log: m => logs.push(m), wait: async ms => { clock.t += ms; } });
   const app = make();
-  return { clock, tg, store, logs, app, make, plan };
+  return { clock, tg, store, logs, app, make };
 }
-async function ready(opts) {
+// A bot that has been claimed and given a plan: Thursdays 19:00 for two hours, courts 4 3 5 2 6 1.
+// Most tests here are about timing, so they use the plain-text look; `card: true` keeps the picture card.
+async function ready(opts = {}) {
   const s = setup(opts);
   await s.app.handleUpdate(say(ME, '/start'));
   await s.app.handleUpdate(say(ME, '/set thu 19:00 2h'));
   await s.app.handleUpdate(say(ME, '/order 4 3 5 2 6 1'));
+  if (!opts.card) await s.app.handleUpdate(say(ME, '/style buttons'));
   s.tg.clear();
   return s;
 }
@@ -122,8 +124,8 @@ test('the release night, tick by tick: heads-up, links 30 s before, GO on the do
   assert.deepEqual(kinds(tg), ['send@21:55:00.000', 'send@21:59:30.000', 'edit@22:00:00.000']);
   const [warn, links, go] = tg.calls;
   assert.equal(warn.text, '<b>Thu 26 Nov · 19:00–21:00</b>\nBooking opens at 22:00. Your courts arrive at 21:59:30.\nCourt order: 4, 3, 5, 2, 6, 1. Check you are signed in now.');
-  assert.equal(links.text, '<b>Thu 26 Nov · 19:00–21:00</b>\nOpens at 22:00:00, in 30 s. Wait for GO.');
-  assert.equal(go.text, '<b>Thu 26 Nov · 19:00–21:00</b>\n<b>GO.</b> Tap a court now.');
+  assert.equal(links.text, '<b>Thu 26 Nov · 19:00–21:00</b>\nOpens at 22:00:00 · wait for GO');
+  assert.equal(go.text, '<b>Thu 26 Nov · 19:00–21:00</b>\n<b>GO</b> · tap a court now');
   assert.equal(go.id, links.id);                                       // the same message, edited
   assert.equal(go.chat, ME);
   assert.deepEqual(go.extra, links.extra);                              // the very same buttons in the same places
@@ -194,12 +196,12 @@ test('starting late: links at once, already saying GO if the release has passed'
   let s = await ready();
   await run(s.app, s.clock, '2026-11-19T21:59:41Z', '2026-11-19T22:10:00Z');        // 19 s before
   assert.deepEqual(kinds(s.tg), ['send@21:59:41.000', 'edit@22:00:00.000']);
-  assert.match(s.tg.calls[0].text, /in 19 s\. Wait for GO\./);
+  assert.match(s.tg.calls[0].text, /Opens at 22:00:00 · wait for GO$/);
 
   s = await ready();
   await run(s.app, s.clock, '2026-11-19T22:00:40Z', '2026-11-19T22:10:00Z');        // 40 s after
   assert.deepEqual(kinds(s.tg), ['send@22:00:40.000']);
-  assert.match(s.tg.calls[0].text, /<b>GO\.<\/b>/);
+  assert.match(s.tg.calls[0].text, /<b>GO<\/b> · tap a court now/);
 
   s = await ready();
   await run(s.app, s.clock, '2026-11-19T22:03:00Z', '2026-11-19T23:59:00Z', 1000);  // 3 min after: too late to matter
@@ -226,7 +228,7 @@ test('if the links message was deleted, GO arrives as a new message', async () =
   s.tg.failEdit = { code: 400, message: 'Bad Request: message to edit not found' };
   await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
   assert.deepEqual(kinds(s.tg), ['send@21:59:30.000', 'send@22:00:00.000']);
-  assert.match(s.tg.last().text, /<b>GO\.<\/b>/);
+  assert.match(s.tg.last().text, /<b>GO<\/b> · tap a court now/);
 });
 
 test('a network blip is retried a second later, without duplicates', async () => {
@@ -267,7 +269,7 @@ test('/go off leaves the links message alone; /warn 0 drops the heads-up; /lead 
   s.tg.clear();
   await run(s.app, s.clock, '2026-11-19T21:50:00Z', '2026-11-19T22:10:00Z');
   assert.deepEqual(kinds(s.tg), ['send@21:59:15.000']);
-  assert.match(s.tg.calls[0].text, /in 45 s\./);
+  assert.match(s.tg.calls[0].text, /\nOpens at 22:00:00$/);                    // and no promise of GO, since it is off
   for (const bad of ['/lead', '/lead 2', '/lead 301', '/lead abc', '/warn -1', '/warn 61', '/go', '/go maybe']) {
     await s.app.handleUpdate(say(ME, bad));
     assert.deepEqual([s.app.state.lead, s.app.state.warnMin, s.app.state.go], [45, 0, false], bad);
@@ -337,9 +339,9 @@ test('/order, /off and /plan', async () => {
 
 test('/style changes how the courts are shown', async () => {
   const s = await ready();
-  assert.equal(s.app.state.style, 'buttons');                            // the default: no address in the message
+  assert.equal(s.app.state.style, 'buttons');                            // plain text, no address in the message
   await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T21:59:31Z');
-  assert.equal(s.tg.last().text, '<b>Thu 26 Nov · 19:00–21:00</b>\nOpens at 22:00:00, in 30 s. Wait for GO.');
+  assert.equal(s.tg.last().text, '<b>Thu 26 Nov · 19:00–21:00</b>\nOpens at 22:00:00 · wait for GO');
   await s.app.handleUpdate(say(ME, '/style both'));
   assert.match(s.tg.last().text, /^The buttons, plus your first-choice court written out/);
   await s.app.handleUpdate(say(ME, '/test'));
@@ -382,9 +384,9 @@ test('/test sends real links for a day that is already open, then shows GO', asy
   const s = await ready({ start: '2026-11-17T12:00:00Z' });              // Tuesday lunchtime
   await s.app.handleUpdate(say(ME, '/test'));
   assert.deepEqual(s.tg.calls.map(c => c.method), ['send', 'edit']);
-  assert.equal(s.tg.calls[0].text, '<b>Test · Thu 19 Nov · 19:00–21:00</b>\nWaiting. On the night this line counts down to the release.\nThis day is already open, so a free court shows the confirm screen. Back out and nothing is booked.');
+  assert.equal(s.tg.calls[0].text, '<b>Test · Thu 19 Nov · 19:00–21:00</b>\nOpens at the release · wait for GO\nTest only. This day is already open, so a free court shows the confirm screen. Back out and nothing is booked.');
   assert.match(s.tg.calls[0].extra.reply_markup.inline_keyboard[0][0].url, /Date=2026-11-19&.*StartTime=1140&EndTime=1260/);
-  assert.match(s.tg.calls[1].text, /\n<b>GO\.<\/b> This is how it turns at the release\.\n/);
+  assert.match(s.tg.calls[1].text, /\n<b>GO<\/b> · tap a court now\nTest only\./);
   assert.deepEqual(s.tg.calls[1].extra, s.tg.calls[0].extra);
   assert.equal(s.tg.calls[1].at - s.tg.calls[0].at, 5000);
   assert.equal(s.tg.calls[1].id, s.tg.calls[0].id);
@@ -401,7 +403,7 @@ test('/signin, /status, /help and things it does not know', async () => {
   await s.app.handleUpdate(say(ME, '/signin'));
   assert.deepEqual(s.tg.last().extra.reply_markup.inline_keyboard, [[{ text: 'Open the booking sheet', url: L.SHEET }]]);
   await s.app.handleUpdate(say(ME, '/status'));
-  assert.match(s.tg.last().text, /Status<\/b>  \(version 1\.2\)[\s\S]*UK time now: 22:45:00[\s\S]*kept across restarts: yes[\s\S]*Style: buttons[\s\S]*Next alert/);
+  assert.match(s.tg.last().text, /Status<\/b>  \(version 1\.3\)[\s\S]*UK time now: 22:45:00[\s\S]*kept across restarts: yes[\s\S]*Style: buttons[\s\S]*Next alert/);
   await s.app.handleUpdate(say(ME, '/help'));
   assert.match(s.tg.last().text, /I never contact ClubSpark myself/);
   await s.app.handleUpdate(say(ME, '/dance'));
@@ -437,7 +439,7 @@ test('with no storage yet, variables can seed the plan, the order and the owner'
   assert.deepEqual(s.app.state.plan, { thu: { start: 1140, hours: 2 }, fri: { start: 1140, hours: 1 } });
   assert.deepEqual(s.app.state.order, [4, 3, 5, 2, 6, 1]);
   await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:00:05Z');
-  assert.deepEqual(kinds(s.tg), ['send@21:59:30.000', 'edit@22:00:00.000']);      // works with no /start at all
+  assert.deepEqual(kinds(s.tg), ['photo@21:59:30.000', 'caption@22:00:00.000', 'media@22:00:00.000']);   // works with no /start at all, in the default look
 });
 
 test('when settings are not being kept, it says so', async () => {
@@ -462,7 +464,7 @@ test('/backup gives one line that brings everything back on a server with no sto
   assert.equal(a.app.kept(), 'no');
   await a.app.handleUpdate(say(ME, '/backup'));
   const line = /<code>(.*)<\/code>/.exec(a.tg.last().text)[1].replace(/&amp;/g, '&');
-  assert.deepEqual(JSON.parse(line), { v: 2, owner: ME, plan: { thu: { start: 1140, hours: 2 }, fri: { start: 1080, hours: 1 } }, order: [4, 3, 5, 2, 6, 1], sid: L.DEFAULT_SID, lead: 20, warnMin: 5, go: true, style: 'links' });
+  assert.deepEqual(JSON.parse(line), { v: 3, owner: ME, plan: { thu: { start: 1140, hours: 2 }, fri: { start: 1080, hours: 1 } }, order: [4, 3, 5, 2, 6, 1], sid: L.DEFAULT_SID, lead: 20, warnMin: 5, go: true, style: 'links' });
 
   const b = setup({ store: memStore(null, false), env: { COURT_SETTINGS: line } });   // after a restart: nothing saved, only the variable
   assert.equal(b.app.owner(), ME);
@@ -501,19 +503,23 @@ test('saved settings beat the COURT_SETTINGS variable, and a junk variable is ig
   }
   assert.equal(readBackup('{"a":1}').a, 1);
   assert.equal(readBackup(undefined), null);
-  assert.equal(backupLine(loadState(null)), JSON.stringify({ v: 2, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'buttons' }));
+  assert.equal(backupLine(loadState(null)), JSON.stringify({ v: 3, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'card' }));
 });
 
-test('settings saved by version 1.0 take the new buttons-only look; a later choice sticks', async () => {
-  const asSavedBy10 = { owner: ME, plan: { thu: { start: 1140, hours: 2 } }, order: [4, 3, 5, 2, 6, 1], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'both', paused: false, sent: {}, live: null };
-  const store = memStore(asSavedBy10);
+test('settings saved under an old default look move to the picture card; a look chosen on purpose stays', async () => {
+  const saved = { owner: ME, plan: { thu: { start: 1140, hours: 2 } }, order: [4, 3, 5, 2, 6, 1], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, paused: false, sent: {}, live: null };
+  assert.equal(loadState({ ...saved, style: 'both' }).style, 'card');                    // 1.0's default
+  assert.equal(loadState({ ...saved, v: 2, style: 'buttons' }).style, 'card');           // 1.1's default
+  assert.equal(loadState({ ...saved, style: 'links' }).style, 'links');                  // always a choice
+  assert.equal(loadState({ ...saved, v: 2, style: 'both' }).style, 'both');              // chosen in 1.1
+  assert.equal(loadState({ ...saved, v: 3, style: 'buttons' }).style, 'buttons');        // chosen now
+  const store = memStore({ ...saved, v: 2, style: 'buttons' });                          // as the live bot's settings are
   const s = setup({ store });
-  assert.equal(s.app.state.style, 'buttons');
-  assert.deepEqual(s.app.state.plan, { thu: { start: 1140, hours: 2 } });   // nothing else changes
+  assert.equal(s.app.state.style, 'card');
+  assert.deepEqual(s.app.state.plan, { thu: { start: 1140, hours: 2 } });                // nothing else changes
   assert.equal(s.app.owner(), ME);
-  await s.app.handleUpdate(say(ME, '/style both'));                         // now chosen on purpose
-  assert.equal(setup({ store }).app.state.style, 'both');
-  assert.equal(loadState({ ...asSavedBy10, style: 'links' }).style, 'links');   // 1.0's other looks were always a choice
+  await s.app.handleUpdate(say(ME, '/style buttons'));                                   // now chosen on purpose
+  assert.equal(setup({ store }).app.state.style, 'buttons');
 });
 
 test('an edit that was already applied is left alone, whatever words Telegram uses', async () => {
@@ -526,7 +532,7 @@ test('an edit that was already applied is left alone, whatever words Telegram us
 
 test('damaged storage does not break the bot', () => {
   const st = loadState({ owner: 'me', plan: 'x', order: [9], sid: '<script>', lead: 9999, warnMin: null, go: 'no', style: 'x', paused: 'yes', sent: { a: 'b', '2026-11-19:links': 5 }, live: { night: 5 } });
-  assert.deepEqual(st, { v: 2, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'buttons', paused: false, sent: { '2026-11-19:links': 5 }, live: null });
+  assert.deepEqual(st, { v: 3, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'card', paused: false, sent: { '2026-11-19:links': 5 }, live: null, pics: {} });
   assert.deepEqual(loadState(null).plan, {});
   assert.deepEqual(loadState('junk').order, [1, 2, 3, 4, 5, 6]);
 });
@@ -553,4 +559,172 @@ test('the bot only ever links to ClubSpark, and only talks to its owner', async 
       .concat(((c.extra.reply_markup || {}).inline_keyboard || []).flat().map(b => b.url));
     for (const u of urls) assert.equal(new URL(u).hostname, 'clubspark.lta.org.uk', u);
   }
+});
+
+// ---------------- the picture card ----------------
+
+test('the card on a release night: picture and buttons 30 s before, words to GO on the dot, then the picture', async () => {
+  const { app, tg, clock } = await ready({ card: true });
+  await run(app, clock, '2026-11-19T21:50:00Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(kinds(tg), ['send@21:55:00.000', 'photo@21:59:30.000', 'caption@22:00:00.000', 'media@22:00:00.000']);
+  const [warn, card, words, pic] = tg.calls;
+  assert.match(warn.text, /Booking opens at 22:00/);                    // the heads-up stays a plain message
+  assert.equal(card.photo, 'upload:banner-wait.jpg');
+  assert.equal(card.text, '<b>Thu 26 Nov · 19:00–21:00</b>\nOpens at 22:00:00 · wait for GO');
+  assert.deepEqual(Object.keys(card.extra).sort(), ['caption', 'parse_mode', 'reply_markup']);
+  assert.deepEqual(card.extra.reply_markup.inline_keyboard.map(r => r.map(b => b.text)), [['Court 4', 'Court 3', 'Court 5'], ['Court 2', 'Court 6', 'Court 1'], ['Whole sheet']]);
+  assert.equal(words.text, '<b>Thu 26 Nov · 19:00–21:00</b>\n<b>GO</b> · tap a court now');
+  assert.equal(pic.text, words.text);
+  assert.equal(pic.photo, 'upload:banner-open.jpg');
+  assert.deepEqual([words.id, pic.id], [card.id, card.id]);             // one message throughout
+  assert.deepEqual(words.extra.reply_markup, card.extra.reply_markup);  // the buttons never change
+  assert.deepEqual(pic.extra.reply_markup, card.extra.reply_markup);
+  assert.equal(card.extra.disable_notification, undefined);             // it must buzz
+  assert.deepEqual(app.state.live, { night: '2026-11-19', chat: ME, id: card.id, phase: 'go', card: true });
+});
+
+test('each picture is uploaded once; after that Telegram is told which one by name', async () => {
+  const s = await ready({ card: true });
+  await s.app.handleUpdate(say(ME, '/warn 0'));
+  s.tg.clear();
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:00:05Z');
+  assert.deepEqual(s.tg.calls.map(c => c.photo).filter(Boolean), ['upload:banner-wait.jpg', 'upload:banner-open.jpg']);
+  assert.deepEqual(s.app.state.pics, { wait: { hash: 'hash-wait', id: 'id:banner-wait.jpg' }, open: { hash: 'hash-open', id: 'id:banner-open.jpg' } });
+  s.tg.clear();
+  const again = s.make();                                               // a week on, after a restart
+  await run(again, s.clock, '2026-11-26T21:59:00Z', '2026-11-26T22:00:05Z');
+  assert.deepEqual(kinds(s.tg), ['photo@21:59:30.000', 'caption@22:00:00.000', 'media@22:00:00.000']);
+  assert.deepEqual(s.tg.calls.map(c => c.photo).filter(Boolean), ['id:banner-wait.jpg', 'id:banner-open.jpg']);
+  s.tg.clear();
+  const swapped = s.make({ wait: { ...PICTURES.wait, hash: 'new-wait' }, open: PICTURES.open });   // one picture replaced in the build
+  await run(swapped, s.clock, '2026-12-03T21:59:00Z', '2026-12-03T22:00:05Z');
+  assert.deepEqual(s.tg.calls.map(c => c.photo).filter(Boolean), ['upload:banner-wait.jpg', 'id:banner-open.jpg']);
+});
+
+test('the card across a restart, and after a late start', async () => {
+  let s = await ready({ card: true });
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T21:59:44.900Z');
+  const cardId = s.tg.last().id;
+  const app2 = s.make();                                                // a redeploy between the card and GO
+  await run(app2, s.clock, '2026-11-19T21:59:45Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(kinds(s.tg), ['photo@21:59:30.000', 'caption@22:00:00.000', 'media@22:00:00.000']);
+  assert.deepEqual(s.tg.calls.map(c => c.id), [cardId, cardId, cardId]);
+
+  s = await ready({ card: true });                                      // started 40 s after the release
+  await run(s.app, s.clock, '2026-11-19T22:00:40Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(kinds(s.tg), ['photo@22:00:40.000']);
+  assert.equal(s.tg.calls[0].photo, 'upload:banner-open.jpg');          // straight to the open picture
+  assert.match(s.tg.calls[0].text, /<b>GO<\/b> · tap a court now/);
+});
+
+test('a picture never costs an alert: if Telegram refuses it, the plain alert goes out instead', async () => {
+  const s = await ready({ card: true });
+  s.tg.refusePhotos = true;
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(kinds(s.tg), ['send@21:59:30.000', 'edit@22:00:00.000']);
+  assert.equal(s.tg.calls[0].text, '<b>Thu 26 Nov · 19:00–21:00</b>\nOpens at 22:00:00 · wait for GO');
+  assert.deepEqual(s.tg.calls[0].extra.link_preview_options, { is_disabled: true });
+  assert.equal(s.tg.calls[0].extra.reply_markup.inline_keyboard[0][0].text, 'Court 4');
+  assert.equal(s.tg.calls[1].text, '<b>Thu 26 Nov · 19:00–21:00</b>\n<b>GO</b> · tap a court now');
+  assert.deepEqual(s.tg.calls[1].extra, s.tg.calls[0].extra);
+  assert.equal(s.app.state.live.card, false);
+  assert.ok(s.logs.some(l => /would not take the picture/.test(l)));
+
+  const none = await ready({ card: true, pictures: null });             // a build with the pictures missing
+  await run(none.app, none.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(kinds(none.tg), ['send@21:59:30.000', 'edit@22:00:00.000']);
+});
+
+test('if only the picture change fails at GO, the words have still turned and nothing is repeated', async () => {
+  let s = await ready({ card: true });
+  s.tg.failMedia = { code: 400, message: 'Bad Request: PHOTO_INVALID_DIMENSIONS' };
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(kinds(s.tg), ['photo@21:59:30.000', 'caption@22:00:00.000']);
+  assert.match(s.tg.calls[1].text, /<b>GO<\/b>/);
+  assert.equal(s.app.state.live.phase, 'go');
+  assert.ok(s.logs.some(l => /picture did not change at GO/.test(l)));
+
+  s = await ready({ card: true });                                      // a network blip on the picture: one more try
+  s.tg.failMedia = { message: 'network down', once: true };
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(s.tg.calls.map(c => c.method), ['photo', 'caption', 'media']);
+  assert.equal(s.tg.calls[2].at - s.tg.calls[1].at, 400);
+});
+
+test('a network blip on the card is retried as a card, not downgraded to text', async () => {
+  const s = await ready({ card: true });
+  s.tg.failSend = 2;
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(kinds(s.tg), ['photo@21:59:32.000', 'caption@22:00:00.000', 'media@22:00:00.000']);
+});
+
+test('a picture name Telegram no longer knows is replaced by a fresh upload', async () => {
+  const s = await ready({ card: true });
+  s.app.state.pics = { wait: { hash: 'hash-wait', id: 'old-wait' }, open: { hash: 'hash-open', id: 'old-open' } };
+  s.tg.staleIds.add('old-wait').add('old-open');
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(s.tg.calls.map(c => `${c.method}:${c.photo || ''}`), ['photo:upload:banner-wait.jpg', 'caption:', 'media:upload:banner-open.jpg']);
+  assert.deepEqual(s.app.state.pics, { wait: { hash: 'hash-wait', id: 'id:banner-wait.jpg' }, open: { hash: 'hash-open', id: 'id:banner-open.jpg' } });
+});
+
+test('if the card was deleted before the release, GO arrives as a new card with the open picture', async () => {
+  const s = await ready({ card: true });
+  s.tg.failEdit = { code: 400, message: 'Bad Request: message to edit not found' };
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(kinds(s.tg), ['photo@21:59:30.000', 'photo@22:00:00.000']);
+  assert.equal(s.tg.calls[1].photo, 'upload:banner-open.jpg');
+  assert.match(s.tg.calls[1].text, /<b>GO<\/b>/);
+});
+
+test('changing the look between the alert and GO still finishes the message in the look it was sent in', async () => {
+  const s = await ready({ card: true });
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T21:59:40Z');
+  await s.app.handleUpdate(say(ME, '/style links'));
+  s.tg.clear();
+  await run(s.app, s.clock, '2026-11-19T21:59:41Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(s.tg.calls.map(c => c.method), ['caption', 'media']);
+  assert.equal(s.tg.calls[0].text, '<b>Thu 26 Nov · 19:00–21:00</b>\n<b>GO</b> · tap a court now');
+  assert.equal(s.tg.calls[0].extra.reply_markup.inline_keyboard.length, 3);
+});
+
+test('/test in the card look shows the wait picture, then GO and the open picture', async () => {
+  const s = await ready({ card: true, start: '2026-11-17T12:00:00Z' });
+  await s.app.handleUpdate(say(ME, '/test'));
+  assert.deepEqual(s.tg.calls.map(c => `${c.method}:${c.photo || ''}`), ['photo:upload:banner-wait.jpg', 'caption:', 'media:upload:banner-open.jpg']);
+  assert.equal(s.tg.calls[0].text, '<b>Test · Thu 19 Nov · 19:00–21:00</b>\nOpens at the release · wait for GO\nTest only. This day is already open, so a free court shows the confirm screen. Back out and nothing is booked.');
+  assert.match(s.tg.calls[1].text, /\n<b>GO<\/b> · tap a court now\n/);
+  assert.equal(s.tg.calls[1].at - s.tg.calls[0].at, 5000);
+  assert.match(s.tg.calls[0].extra.reply_markup.inline_keyboard[0][0].url, /Date=2026-11-19&/);
+  assert.deepEqual(s.app.state.sent, {});
+  assert.equal(s.app.state.live, null);                                 // a test never stands in for the real alert
+  assert.deepEqual(Object.keys(s.store.load().pics), ['wait', 'open']); // but it does teach Telegram both pictures
+  await s.app.handleUpdate(say(ME, '/style card'));
+  assert.match(s.tg.last().text, /^A picture card that changes when booking opens\. Send \/test to see it\.$/);
+});
+
+test('in the card look too, the bot only links to ClubSpark and only talks to its owner', async () => {
+  const s = await ready({ card: true });
+  await s.app.handleUpdate(say(ME, '/test'));
+  await run(s.app, s.clock, '2026-11-19T21:50:00Z', '2026-11-19T22:05:00Z', 1000);
+  assert.ok(s.tg.calls.length >= 7);
+  for (const c of s.tg.calls) {
+    assert.equal(c.chat, ME);
+    const urls = (String(c.text).replace(/&amp;/g, '&').match(/https?:\/\/[^\s<]+/g) || [])
+      .concat(((c.extra.reply_markup || {}).inline_keyboard || []).flat().map(b => b.url));
+    for (const u of urls) assert.equal(new URL(u).hostname, 'clubspark.lta.org.uk', u);
+  }
+});
+
+test('the real pictures are in the build and are what the app loads', () => {
+  const { loadPictures } = require('../app');
+  const pics = loadPictures();
+  assert.deepEqual(Object.keys(pics), ['wait', 'open']);
+  for (const k of ['wait', 'open']) {
+    assert.equal(pics[k].name, `banner-${k}.jpg`);
+    assert.deepEqual([...pics[k].buf.subarray(0, 3)], [0xFF, 0xD8, 0xFF]);       // a JPEG
+    assert.ok(pics[k].buf.length > 10000 && pics[k].buf.length < 400000);
+    assert.match(pics[k].hash, /^[0-9a-f]{16}$/);
+  }
+  assert.notEqual(pics.wait.hash, pics.open.hash);
+  assert.equal(loadPictures('/nowhere/at/all'), null);
 });
