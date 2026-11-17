@@ -8,7 +8,7 @@ const { parseDay, parseTime, parseHours, parseOrder, parsePlan, cleanPlan, clean
 const { dueEvents, msToNextEvent, nextRelease, checkDate } = require('./lib/schedule');
 const M = require('./lib/messages');
 
-const VERSION = '1.1';
+const VERSION = '1.2';
 const STYLES = ['buttons', 'both', 'links'];
 const STATE_VERSION = 2;
 const SENT_KEEP_MS = 3 * 86400000;
@@ -90,27 +90,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
   const keepNote = () => (kept() !== 'no' ? '' : '\n\nNote: these settings will be lost at the next restart. To keep them, add a Railway volume mounted at /data, or send /backup.');
   const html = { parse_mode: 'HTML', link_preview_options: M.NO_PREVIEW };
   const say = (chat, text, extra = {}) => tg.send(chat, text, { ...html, ...extra });
-  // Button colours are a recent Telegram feature. If the API ever refuses them, say so in the
-  // log and send the same message without them, so a colour can never cost an alert.
-  const coloursRefused = (m, err) => M.hasColours(m) && err.code === 400
-    && !/not modified|not found|can't be edited/i.test(err.message || '')
-    && /button|keyboard|markup|style/i.test(err.message || '');
-  async function sendMsg(chat, m) {
-    try { return await tg.send(chat, m.text, m.extra); } catch (err) {
-      if (!coloursRefused(m, err)) throw err;
-      log(`Telegram refused the button colours (${err.message}). Sending without them.`);
-      const p = M.withoutColours(m);
-      return tg.send(chat, p.text, p.extra);
-    }
-  }
-  async function editMsg(chat, id, m) {
-    try { return await tg.edit(chat, id, m.text, m.extra); } catch (err) {
-      if (!coloursRefused(m, err)) throw err;
-      log(`Telegram refused the button colours (${err.message}). Sending without them.`);
-      const p = M.withoutColours(m);
-      return tg.edit(chat, id, p.text, p.extra);
-    }
-  }
+  const sendMsg = (chat, m) => tg.send(chat, m.text, m.extra);
+  const editMsg = (chat, id, m) => tg.edit(chat, id, m.text, m.extra);
   const next = () => M.esc(M.nextLine(cfg(), now(), state.paused));
   const toldPrivate = new Set();
 

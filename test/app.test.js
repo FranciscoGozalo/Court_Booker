@@ -3,7 +3,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createApp, loadState, backupLine, readBackup, intIn } = require('../app');
 const L = require('../lib/links');
-const M = require('../lib/messages');
 const { at, fakeTelegram, memStore, say, run, runLikeIndex, clockOf } = require('./helpers');
 
 const ME = 5550001, STRANGER = 5550002;
@@ -127,10 +126,9 @@ test('the release night, tick by tick: heads-up, links 30 s before, GO on the do
   assert.equal(go.text, '<b>Thu 26 Nov · 19:00–21:00</b>\n<b>GO.</b> Tap a court now.');
   assert.equal(go.id, links.id);                                       // the same message, edited
   assert.equal(go.chat, ME);
-  assert.deepEqual(M.withoutColours(go).extra, links.extra);            // the same buttons in the same places
-  assert.equal(M.hasColours(links), false);
-  assert.deepEqual(go.extra.reply_markup.inline_keyboard.map(r => r.map(b => `${b.text}:${b.style || '-'}`)),
-    [['Court 4:success', 'Court 3:primary', 'Court 5:primary'], ['Court 2:primary', 'Court 6:primary', 'Court 1:primary'], ['Whole sheet:-']]);
+  assert.deepEqual(go.extra, links.extra);                              // the very same buttons in the same places
+  assert.deepEqual(go.extra.reply_markup.inline_keyboard.map(r => r.map(b => b.text)), [['Court 4', 'Court 3', 'Court 5'], ['Court 2', 'Court 6', 'Court 1'], ['Whole sheet']]);
+  assert.ok(!JSON.stringify(go.extra).includes('style'));               // no button colours
   const first = new URL(links.extra.reply_markup.inline_keyboard[0][0].url);
   assert.deepEqual([first.searchParams.get('ResourceID'), first.searchParams.get('Date'), first.searchParams.get('StartTime'), first.searchParams.get('EndTime')],
     [L.COURTS[4], '2026-11-26', '1140', '1260']);
@@ -202,7 +200,6 @@ test('starting late: links at once, already saying GO if the release has passed'
   await run(s.app, s.clock, '2026-11-19T22:00:40Z', '2026-11-19T22:10:00Z');        // 40 s after
   assert.deepEqual(kinds(s.tg), ['send@22:00:40.000']);
   assert.match(s.tg.calls[0].text, /<b>GO\.<\/b>/);
-  assert.equal(M.hasColours(s.tg.calls[0]), true);
 
   s = await ready();
   await run(s.app, s.clock, '2026-11-19T22:03:00Z', '2026-11-19T23:59:00Z', 1000);  // 3 min after: too late to matter
@@ -388,9 +385,7 @@ test('/test sends real links for a day that is already open, then shows GO', asy
   assert.equal(s.tg.calls[0].text, '<b>Test · Thu 19 Nov · 19:00–21:00</b>\nWaiting. On the night this line counts down to the release.\nThis day is already open, so a free court shows the confirm screen. Back out and nothing is booked.');
   assert.match(s.tg.calls[0].extra.reply_markup.inline_keyboard[0][0].url, /Date=2026-11-19&.*StartTime=1140&EndTime=1260/);
   assert.match(s.tg.calls[1].text, /\n<b>GO\.<\/b> This is how it turns at the release\.\n/);
-  assert.equal(M.hasColours(s.tg.calls[0]), false);
-  assert.equal(M.hasColours(s.tg.calls[1]), true);
-  assert.deepEqual(M.withoutColours(s.tg.calls[1]).extra, s.tg.calls[0].extra);
+  assert.deepEqual(s.tg.calls[1].extra, s.tg.calls[0].extra);
   assert.equal(s.tg.calls[1].at - s.tg.calls[0].at, 5000);
   assert.equal(s.tg.calls[1].id, s.tg.calls[0].id);
   assert.deepEqual(s.app.state.sent, {});                                // a test never counts as the real thing
@@ -406,7 +401,7 @@ test('/signin, /status, /help and things it does not know', async () => {
   await s.app.handleUpdate(say(ME, '/signin'));
   assert.deepEqual(s.tg.last().extra.reply_markup.inline_keyboard, [[{ text: 'Open the booking sheet', url: L.SHEET }]]);
   await s.app.handleUpdate(say(ME, '/status'));
-  assert.match(s.tg.last().text, /Status<\/b>  \(version 1\.1\)[\s\S]*UK time now: 22:45:00[\s\S]*kept across restarts: yes[\s\S]*Style: buttons[\s\S]*Next alert/);
+  assert.match(s.tg.last().text, /Status<\/b>  \(version 1\.2\)[\s\S]*UK time now: 22:45:00[\s\S]*kept across restarts: yes[\s\S]*Style: buttons[\s\S]*Next alert/);
   await s.app.handleUpdate(say(ME, '/help'));
   assert.match(s.tg.last().text, /I never contact ClubSpark myself/);
   await s.app.handleUpdate(say(ME, '/dance'));
@@ -521,38 +516,12 @@ test('settings saved by version 1.0 take the new buttons-only look; a later choi
   assert.equal(loadState({ ...asSavedBy10, style: 'links' }).style, 'links');   // 1.0's other looks were always a choice
 });
 
-test('if Telegram refused button colours, every alert would still arrive, just without them', async () => {
-  let s = await ready();
-  s.tg.refuseColours = true;
-  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
-  assert.deepEqual(kinds(s.tg), ['send@21:59:30.000', 'edit@22:00:00.000']);
-  assert.equal(s.tg.calls[1].text, '<b>Thu 26 Nov · 19:00–21:00</b>\n<b>GO.</b> Tap a court now.');
-  assert.equal(s.tg.calls[1].id, s.tg.calls[0].id);
-  assert.equal(M.hasColours(s.tg.calls[1]), false);
-  assert.deepEqual(s.tg.calls[1].extra, s.tg.calls[0].extra);
-  assert.ok(s.logs.some(l => /refused the button colours/.test(l)));
-
-  s = await ready();                                                       // a late start sends GO as a new message
-  s.tg.refuseColours = true;
-  await run(s.app, s.clock, '2026-11-19T22:00:40Z', '2026-11-19T22:10:00Z');
-  assert.deepEqual(kinds(s.tg), ['send@22:00:40.000']);
-  assert.match(s.tg.calls[0].text, /<b>GO\.<\/b>/);
-  assert.equal(M.hasColours(s.tg.calls[0]), false);
-
-  s = await ready({ start: '2026-11-17T12:00:00Z' });                      // and so does /test
-  s.tg.refuseColours = true;
-  await s.app.handleUpdate(say(ME, '/test'));
-  assert.deepEqual(s.tg.calls.map(c => c.method), ['send', 'edit']);
-  assert.match(s.tg.calls[1].text, /<b>GO\.<\/b>/);
-});
-
-test('an edit that was already applied is not mistaken for a colour problem', async () => {
+test('an edit that was already applied is left alone, whatever words Telegram uses', async () => {
   const s = await ready();
   s.tg.failEdit = { code: 400, once: true, message: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message' };
   await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
-  assert.deepEqual(kinds(s.tg), ['send@21:59:30.000']);                    // no second edit that would strip the colours
+  assert.deepEqual(kinds(s.tg), ['send@21:59:30.000']);                    // no second edit, no second message
   assert.equal(s.app.state.live.phase, 'go');
-  assert.ok(!s.logs.some(l => /refused the button colours/.test(l)));
 });
 
 test('damaged storage does not break the bot', () => {

@@ -47,27 +47,8 @@ test('turning to GO changes one line and moves nothing', () => {
     assert.deepEqual(wl.filter((l, i) => l !== gl[i]).length, 1, style);
     assert.equal(gl[1], '<b>GO.</b> Tap a court now.');
     assert.notEqual(w.text, g.text);
-    assert.deepEqual(M.withoutColours(g).extra, w.extra, style);       // same buttons in the same places; only colour is added
+    assert.deepEqual(g.extra, w.extra, style);                         // the very same buttons in the same places
   }
-});
-
-test('colour arrives with GO: green for the first choice, blue for the rest, the sheet left plain', () => {
-  const c = cfg({ style: 'buttons' });
-  const w = M.linksMessage(c, rel(c), 'wait', linksAt), g = M.linksMessage(c, rel(c), 'go', linksAt);
-  const colours = m => m.extra.reply_markup.inline_keyboard.map(r => r.map(b => b.style || '-'));
-  assert.deepEqual(colours(w), [['-', '-', '-'], ['-', '-', '-'], ['-']]);
-  assert.deepEqual(colours(g), [['success', 'primary', 'primary'], ['primary', 'primary', 'primary'], ['-']]);
-  assert.equal(g.extra.reply_markup.inline_keyboard[0][0].text, 'Court 4');
-  assert.equal(M.hasColours(w), false);
-  assert.equal(M.hasColours(g), true);
-  const p = M.withoutColours(g);
-  assert.equal(M.hasColours(p), false);
-  assert.equal(p.text, g.text);
-  assert.deepEqual(p.extra, w.extra);
-  assert.equal(M.hasColours(g), true, 'taking the colours off makes a copy');
-  assert.equal(M.withoutColours(w), w);
-  const t = M.testMessage(c, rel(c), civil(2026, 11, 20), 'go');
-  assert.deepEqual(colours(t)[0], ['success', 'primary', 'primary']);
 });
 
 test('buttons only is two short lines, with no address in sight and no emoji', () => {

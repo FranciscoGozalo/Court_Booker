@@ -14,7 +14,7 @@ Kelvingrove opens each day for booking 7 days ahead at 22:00, so the alert for a
 | --- | --- |
 | 21:55:00 | A heads-up, with a button to check you are signed in to ClubSpark |
 | 21:59:30 | Six court buttons for your slot, in your order of courts |
-| 22:00:00 | The same message turns to "GO" and the buttons take colour: green for your first choice, blue for the rest |
+| 22:00:00 | The same message turns to "GO. Tap a court now." |
 
 If ClubSpark says "Sorry, your booking was unsuccessful", that court has gone. Go back and tap the next one.
 
