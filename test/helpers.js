@@ -3,14 +3,23 @@
 
 const at = s => Date.parse(s);
 
+function refuseIfColoured(tg, extra) {
+  const rows = (extra.reply_markup || {}).inline_keyboard || [];
+  if (tg.refuseColours && rows.some(r => r.some(b => b.style))) {
+    const e = new Error("Bad Request: can't parse inline keyboard button: unsupported style"); e.code = 400; throw e;
+  }
+}
+
 function fakeTelegram(clock) {
   let nextId = 100;
   const tg = {
     calls: [],
     failSend: 0,        // how many of the next sends should fail
     failEdit: null,     // { code, message, once }
+    refuseColours: false,   // answer like an API that does not accept coloured buttons
     async send(chat, text, extra = {}) {
       if (tg.failSend > 0) { tg.failSend--; throw new Error('network down'); }
+      refuseIfColoured(tg, extra);
       const id = nextId++;
       tg.calls.push({ at: clock.t, method: 'send', chat, text, extra, id });
       return { message_id: id };
@@ -21,6 +30,7 @@ function fakeTelegram(clock) {
         if (tg.failEdit.once) tg.failEdit = null;
         throw e;
       }
+      refuseIfColoured(tg, extra);
       tg.calls.push({ at: clock.t, method: 'edit', chat, text, extra, id });
       return true;
     },

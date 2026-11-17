@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createApp, loadState, backupLine, readBackup, intIn } = require('../app');
 const L = require('../lib/links');
+const M = require('../lib/messages');
 const { at, fakeTelegram, memStore, say, run, runLikeIndex, clockOf } = require('./helpers');
 
 const ME = 5550001, STRANGER = 5550002;
@@ -101,7 +102,7 @@ test('/set understands the usual ways of writing a slot', async () => {
     await app.handleUpdate(say(ME, text));
     assert.deepEqual(app.state.plan[day], want, text);
   }
-  assert.match(tg.last().text, /^Tuesdays: 20:00 to 21:00\./);
+  assert.match(tg.last().text, /^<b>Tuesdays · 20:00–21:00<\/b>\n/);
   for (const bad of ['/set', '/set thu', '/set thu 25:00', '/set xyz 19:00', '/set thu 19:00 3h', '/set thu 19:00-22:30', '/set thu 19:10', '/set thu 23:00 2h']) {
     const before = JSON.stringify(app.state.plan);
     await app.handleUpdate(say(ME, bad));
@@ -113,7 +114,7 @@ test('/set replies with the slot and when the alert will come', async () => {
   const { app, tg } = setup({ start: '2026-11-16T22:45:00Z' });
   await app.handleUpdate(say(ME, '/start'));
   await app.handleUpdate(say(ME, '/set thu 19:00 2h'));
-  assert.equal(tg.last().text, 'Thursdays: 19:00 to 21:00.\nThe links come 7 days before, 30 s ahead of the 22:00 release.\n\nNext alert: Thu 19 Nov at 21:59:30 (in 3 days), for Thu 26 Nov 19:00 to 21:00.');
+  assert.equal(tg.last().text, '<b>Thursdays · 19:00–21:00</b>\nThe alert comes 7 days before, 30 s ahead of the 22:00 release.\n\nNext alert: Thu 19 Nov at 21:59:30 (in 3 days), for Thu 26 Nov, 19:00–21:00.');
 });
 
 test('the release night, tick by tick: heads-up, links 30 s before, GO on the dot', async () => {
@@ -121,12 +122,15 @@ test('the release night, tick by tick: heads-up, links 30 s before, GO on the do
   await run(app, clock, '2026-11-19T21:50:00Z', '2026-11-19T22:10:00Z');
   assert.deepEqual(kinds(tg), ['send@21:55:00.000', 'send@21:59:30.000', 'edit@22:00:00.000']);
   const [warn, links, go] = tg.calls;
-  assert.match(warn.text, /Thu 26 Nov opens at 22:00/);
-  assert.match(links.text, /^<b>Thu 26 Nov · 19:00 to 21:00<\/b>\n⏳ Opens at 22:00:00, in 30 s\. Wait for GO\./);
-  assert.match(go.text, /^<b>Thu 26 Nov · 19:00 to 21:00<\/b>\n🟢 GO\. Open now\. Tap a court\./);
+  assert.equal(warn.text, '<b>Thu 26 Nov · 19:00–21:00</b>\nBooking opens at 22:00. Your courts arrive at 21:59:30.\nCourt order: 4, 3, 5, 2, 6, 1. Check you are signed in now.');
+  assert.equal(links.text, '<b>Thu 26 Nov · 19:00–21:00</b>\nOpens at 22:00:00, in 30 s. Wait for GO.');
+  assert.equal(go.text, '<b>Thu 26 Nov · 19:00–21:00</b>\n<b>GO.</b> Tap a court now.');
   assert.equal(go.id, links.id);                                       // the same message, edited
   assert.equal(go.chat, ME);
-  assert.deepEqual(go.extra, links.extra);
+  assert.deepEqual(M.withoutColours(go).extra, links.extra);            // the same buttons in the same places
+  assert.equal(M.hasColours(links), false);
+  assert.deepEqual(go.extra.reply_markup.inline_keyboard.map(r => r.map(b => `${b.text}:${b.style || '-'}`)),
+    [['Court 4:success', 'Court 3:primary', 'Court 5:primary'], ['Court 2:primary', 'Court 6:primary', 'Court 1:primary'], ['Whole sheet:-']]);
   const first = new URL(links.extra.reply_markup.inline_keyboard[0][0].url);
   assert.deepEqual([first.searchParams.get('ResourceID'), first.searchParams.get('Date'), first.searchParams.get('StartTime'), first.searchParams.get('EndTime')],
     [L.COURTS[4], '2026-11-26', '1140', '1260']);
@@ -152,10 +156,10 @@ test('nothing is sent on nights that are not in the plan, and each night only on
     'send 2026-11-19T21:55:00', 'send 2026-11-19T21:59:30', 'edit 2026-11-19T22:00:00',
     'send 2026-11-20T21:55:00', 'send 2026-11-20T21:59:30', 'edit 2026-11-20T22:00:00',
   ]);
-  assert.match(tg.calls[4].text, /Fri 27 Nov · 19:00 to 20:00/);
+  assert.match(tg.calls[4].text, /Fri 27 Nov · 19:00–20:00/);
   await run(app, clock, '2026-11-26T21:50:00Z', '2026-11-26T22:05:00Z', 1000);     // the next Thursday
   assert.equal(tg.calls.length, 9);
-  assert.match(tg.calls[7].text, /Thu 3 Dec · 19:00 to 21:00/);
+  assert.match(tg.calls[7].text, /Thu 3 Dec · 19:00–21:00/);
   assert.deepEqual(Object.keys(app.state.sent).sort(), ['2026-11-26:go', '2026-11-26:links', '2026-11-26:warn']);   // old nights forgotten
 });
 
@@ -197,7 +201,8 @@ test('starting late: links at once, already saying GO if the release has passed'
   s = await ready();
   await run(s.app, s.clock, '2026-11-19T22:00:40Z', '2026-11-19T22:10:00Z');        // 40 s after
   assert.deepEqual(kinds(s.tg), ['send@22:00:40.000']);
-  assert.match(s.tg.calls[0].text, /🟢 GO/);
+  assert.match(s.tg.calls[0].text, /<b>GO\.<\/b>/);
+  assert.equal(M.hasColours(s.tg.calls[0]), true);
 
   s = await ready();
   await run(s.app, s.clock, '2026-11-19T22:03:00Z', '2026-11-19T23:59:00Z', 1000);  // 3 min after: too late to matter
@@ -224,7 +229,7 @@ test('if the links message was deleted, GO arrives as a new message', async () =
   s.tg.failEdit = { code: 400, message: 'Bad Request: message to edit not found' };
   await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
   assert.deepEqual(kinds(s.tg), ['send@21:59:30.000', 'send@22:00:00.000']);
-  assert.match(s.tg.last().text, /🟢 GO/);
+  assert.match(s.tg.last().text, /<b>GO\.<\/b>/);
 });
 
 test('a network blip is retried a second later, without duplicates', async () => {
@@ -261,7 +266,7 @@ test('/go off leaves the links message alone; /warn 0 drops the heads-up; /lead 
   await s.app.handleUpdate(say(ME, '/go off'));
   await s.app.handleUpdate(say(ME, '/warn 0'));
   await s.app.handleUpdate(say(ME, '/lead 45'));
-  assert.equal(s.tg.last().text, 'The links will arrive 45 s before the release.');
+  assert.equal(s.tg.last().text, 'The alert will arrive 45 s before the release.');
   s.tg.clear();
   await run(s.app, s.clock, '2026-11-19T21:50:00Z', '2026-11-19T22:10:00Z');
   assert.deepEqual(kinds(s.tg), ['send@21:59:15.000']);
@@ -284,7 +289,7 @@ test('summer time: everything an hour earlier in UTC, the same on the UK clock',
   const s = await ready({ start: '2027-06-07T12:00:00Z' });
   await run(s.app, s.clock, '2027-06-10T20:50:00Z', '2027-06-10T21:10:00Z');
   assert.deepEqual(kinds(s.tg), ['send@20:55:00.000', 'send@20:59:30.000', 'edit@21:00:00.000']);
-  assert.match(s.tg.calls[1].text, /Thu 17 Jun · 19:00 to 21:00<\/b>\n⏳ Opens at 22:00:00/);
+  assert.match(s.tg.calls[1].text, /Thu 17 Jun · 19:00–21:00<\/b>\nOpens at 22:00:00/);
 });
 
 test('the nights the clocks change', async () => {
@@ -293,18 +298,18 @@ test('the nights the clocks change', async () => {
   s.tg.clear();
   await run(s.app, s.clock, '2027-03-28T20:50:00Z', '2027-03-28T22:10:00Z', 500);   // spring forward that morning
   assert.deepEqual(kinds(s.tg), ['send@20:55:00.000', 'send@20:59:30.000', 'edit@21:00:00.000']);
-  assert.match(s.tg.calls[1].text, /Sun 4 Apr · 10:00 to 11:00/);
+  assert.match(s.tg.calls[1].text, /Sun 4 Apr · 10:00–11:00/);
   s.tg.clear();
   await run(s.app, s.clock, '2027-10-31T20:50:00Z', '2027-10-31T22:10:00Z', 500);   // fall back that morning
   assert.deepEqual(kinds(s.tg), ['send@21:55:00.000', 'send@21:59:30.000', 'edit@22:00:00.000']);
-  assert.match(s.tg.calls[1].text, /Sun 7 Nov · 10:00 to 11:00/);
+  assert.match(s.tg.calls[1].text, /Sun 7 Nov · 10:00–11:00/);
 });
 
 test('release rules can be changed with variables', async () => {
   const s = await ready({ env: { RELEASE_TIME: '20:00', DAYS_AHEAD: '6' }, start: '2026-11-16T12:00:00Z' });
   await run(s.app, s.clock, '2026-11-20T19:50:00Z', '2026-11-20T20:10:00Z');        // Friday night -> Thursday
   assert.deepEqual(kinds(s.tg), ['send@19:55:00.000', 'send@19:59:30.000', 'edit@20:00:00.000']);
-  assert.match(s.tg.calls[1].text, /Thu 26 Nov · 19:00 to 21:00<\/b>\n⏳ Opens at 20:00:00/);
+  assert.match(s.tg.calls[1].text, /Thu 26 Nov · 19:00–21:00<\/b>\nOpens at 20:00:00/);
   const junk = await ready({ env: { RELEASE_TIME: 'soon', DAYS_AHEAD: '0' } });
   assert.deepEqual([junk.app.cfg().releaseMin, junk.app.cfg().daysAhead], [1320, 7]);
 });
@@ -320,7 +325,7 @@ test('/order, /off and /plan', async () => {
   await s.app.handleUpdate(say(ME, '/order 654321'));
   assert.deepEqual(s.app.state.order, [6, 5, 4, 3, 2, 1]);
   await s.app.handleUpdate(say(ME, '/plan'));
-  assert.match(s.tg.last().text, /Thursday: 19:00 to 21:00[\s\S]*Court order: 6, 5, 4, 3, 2, 1[\s\S]*Next alert: Thu 19 Nov at 21:59:30/);
+  assert.match(s.tg.last().text, /Thursday · 19:00–21:00[\s\S]*Court order: 6, 5, 4, 3, 2, 1[\s\S]*Next alert: Thu 19 Nov at 21:59:30/);
   await s.app.handleUpdate(say(ME, '/off fri'));
   assert.match(s.tg.last().text, /^There was no alert for Friday\./);
   await s.app.handleUpdate(say(ME, '/off thursday'));
@@ -335,7 +340,15 @@ test('/order, /off and /plan', async () => {
 
 test('/style changes how the courts are shown', async () => {
   const s = await ready();
-  assert.equal(s.app.state.style, 'both');
+  assert.equal(s.app.state.style, 'buttons');                            // the default: no address in the message
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T21:59:31Z');
+  assert.equal(s.tg.last().text, '<b>Thu 26 Nov · 19:00–21:00</b>\nOpens at 22:00:00, in 30 s. Wait for GO.');
+  await s.app.handleUpdate(say(ME, '/style both'));
+  assert.match(s.tg.last().text, /^The buttons, plus your first-choice court written out/);
+  await s.app.handleUpdate(say(ME, '/test'));
+  assert.match(s.tg.last().text, /\n\nCourt 4, one tap:\nhttps:\/\/clubspark\.lta\.org\.uk\//);
+  assert.ok(s.tg.last().extra.reply_markup);
+  s.app.state.sent = {};
   await s.app.handleUpdate(say(ME, '/style links'));
   s.tg.clear();
   await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:00:05Z');
@@ -372,9 +385,12 @@ test('/test sends real links for a day that is already open, then shows GO', asy
   const s = await ready({ start: '2026-11-17T12:00:00Z' });              // Tuesday lunchtime
   await s.app.handleUpdate(say(ME, '/test'));
   assert.deepEqual(s.tg.calls.map(c => c.method), ['send', 'edit']);
-  assert.match(s.tg.calls[0].text, /^<b>TEST · Thu 19 Nov · 19:00 to 21:00<\/b>\nThis day is already open/);
+  assert.equal(s.tg.calls[0].text, '<b>Test · Thu 19 Nov · 19:00–21:00</b>\nWaiting. On the night this line counts down to the release.\nThis day is already open, so a free court shows the confirm screen. Back out and nothing is booked.');
   assert.match(s.tg.calls[0].extra.reply_markup.inline_keyboard[0][0].url, /Date=2026-11-19&.*StartTime=1140&EndTime=1260/);
-  assert.match(s.tg.calls[1].text, /🟢 This is what GO looks like/);
+  assert.match(s.tg.calls[1].text, /\n<b>GO\.<\/b> This is how it turns at the release\.\n/);
+  assert.equal(M.hasColours(s.tg.calls[0]), false);
+  assert.equal(M.hasColours(s.tg.calls[1]), true);
+  assert.deepEqual(M.withoutColours(s.tg.calls[1]).extra, s.tg.calls[0].extra);
   assert.equal(s.tg.calls[1].at - s.tg.calls[0].at, 5000);
   assert.equal(s.tg.calls[1].id, s.tg.calls[0].id);
   assert.deepEqual(s.app.state.sent, {});                                // a test never counts as the real thing
@@ -390,7 +406,7 @@ test('/signin, /status, /help and things it does not know', async () => {
   await s.app.handleUpdate(say(ME, '/signin'));
   assert.deepEqual(s.tg.last().extra.reply_markup.inline_keyboard, [[{ text: 'Open the booking sheet', url: L.SHEET }]]);
   await s.app.handleUpdate(say(ME, '/status'));
-  assert.match(s.tg.last().text, /Status<\/b>  \(version 1\.0\)[\s\S]*UK time now: 22:45:00[\s\S]*kept across restarts: yes[\s\S]*Style: both[\s\S]*Next alert/);
+  assert.match(s.tg.last().text, /Status<\/b>  \(version 1\.1\)[\s\S]*UK time now: 22:45:00[\s\S]*kept across restarts: yes[\s\S]*Style: buttons[\s\S]*Next alert/);
   await s.app.handleUpdate(say(ME, '/help'));
   assert.match(s.tg.last().text, /I never contact ClubSpark myself/);
   await s.app.handleUpdate(say(ME, '/dance'));
@@ -451,7 +467,7 @@ test('/backup gives one line that brings everything back on a server with no sto
   assert.equal(a.app.kept(), 'no');
   await a.app.handleUpdate(say(ME, '/backup'));
   const line = /<code>(.*)<\/code>/.exec(a.tg.last().text)[1].replace(/&amp;/g, '&');
-  assert.deepEqual(JSON.parse(line), { owner: ME, plan: { thu: { start: 1140, hours: 2 }, fri: { start: 1080, hours: 1 } }, order: [4, 3, 5, 2, 6, 1], sid: L.DEFAULT_SID, lead: 20, warnMin: 5, go: true, style: 'links' });
+  assert.deepEqual(JSON.parse(line), { v: 2, owner: ME, plan: { thu: { start: 1140, hours: 2 }, fri: { start: 1080, hours: 1 } }, order: [4, 3, 5, 2, 6, 1], sid: L.DEFAULT_SID, lead: 20, warnMin: 5, go: true, style: 'links' });
 
   const b = setup({ store: memStore(null, false), env: { COURT_SETTINGS: line } });   // after a restart: nothing saved, only the variable
   assert.equal(b.app.owner(), ME);
@@ -490,12 +506,58 @@ test('saved settings beat the COURT_SETTINGS variable, and a junk variable is ig
   }
   assert.equal(readBackup('{"a":1}').a, 1);
   assert.equal(readBackup(undefined), null);
-  assert.equal(backupLine(loadState(null)), JSON.stringify({ owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'both' }));
+  assert.equal(backupLine(loadState(null)), JSON.stringify({ v: 2, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'buttons' }));
+});
+
+test('settings saved by version 1.0 take the new buttons-only look; a later choice sticks', async () => {
+  const asSavedBy10 = { owner: ME, plan: { thu: { start: 1140, hours: 2 } }, order: [4, 3, 5, 2, 6, 1], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'both', paused: false, sent: {}, live: null };
+  const store = memStore(asSavedBy10);
+  const s = setup({ store });
+  assert.equal(s.app.state.style, 'buttons');
+  assert.deepEqual(s.app.state.plan, { thu: { start: 1140, hours: 2 } });   // nothing else changes
+  assert.equal(s.app.owner(), ME);
+  await s.app.handleUpdate(say(ME, '/style both'));                         // now chosen on purpose
+  assert.equal(setup({ store }).app.state.style, 'both');
+  assert.equal(loadState({ ...asSavedBy10, style: 'links' }).style, 'links');   // 1.0's other looks were always a choice
+});
+
+test('if Telegram refused button colours, every alert would still arrive, just without them', async () => {
+  let s = await ready();
+  s.tg.refuseColours = true;
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(kinds(s.tg), ['send@21:59:30.000', 'edit@22:00:00.000']);
+  assert.equal(s.tg.calls[1].text, '<b>Thu 26 Nov · 19:00–21:00</b>\n<b>GO.</b> Tap a court now.');
+  assert.equal(s.tg.calls[1].id, s.tg.calls[0].id);
+  assert.equal(M.hasColours(s.tg.calls[1]), false);
+  assert.deepEqual(s.tg.calls[1].extra, s.tg.calls[0].extra);
+  assert.ok(s.logs.some(l => /refused the button colours/.test(l)));
+
+  s = await ready();                                                       // a late start sends GO as a new message
+  s.tg.refuseColours = true;
+  await run(s.app, s.clock, '2026-11-19T22:00:40Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(kinds(s.tg), ['send@22:00:40.000']);
+  assert.match(s.tg.calls[0].text, /<b>GO\.<\/b>/);
+  assert.equal(M.hasColours(s.tg.calls[0]), false);
+
+  s = await ready({ start: '2026-11-17T12:00:00Z' });                      // and so does /test
+  s.tg.refuseColours = true;
+  await s.app.handleUpdate(say(ME, '/test'));
+  assert.deepEqual(s.tg.calls.map(c => c.method), ['send', 'edit']);
+  assert.match(s.tg.calls[1].text, /<b>GO\.<\/b>/);
+});
+
+test('an edit that was already applied is not mistaken for a colour problem', async () => {
+  const s = await ready();
+  s.tg.failEdit = { code: 400, once: true, message: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message' };
+  await run(s.app, s.clock, '2026-11-19T21:59:00Z', '2026-11-19T22:10:00Z');
+  assert.deepEqual(kinds(s.tg), ['send@21:59:30.000']);                    // no second edit that would strip the colours
+  assert.equal(s.app.state.live.phase, 'go');
+  assert.ok(!s.logs.some(l => /refused the button colours/.test(l)));
 });
 
 test('damaged storage does not break the bot', () => {
   const st = loadState({ owner: 'me', plan: 'x', order: [9], sid: '<script>', lead: 9999, warnMin: null, go: 'no', style: 'x', paused: 'yes', sent: { a: 'b', '2026-11-19:links': 5 }, live: { night: 5 } });
-  assert.deepEqual(st, { owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'both', paused: false, sent: { '2026-11-19:links': 5 }, live: null });
+  assert.deepEqual(st, { v: 2, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'buttons', paused: false, sent: { '2026-11-19:links': 5 }, live: null });
   assert.deepEqual(loadState(null).plan, {});
   assert.deepEqual(loadState('junk').order, [1, 2, 3, 4, 5, 6]);
 });

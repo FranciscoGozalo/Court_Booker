@@ -18,8 +18,8 @@ const linksAt = at('2026-11-19T21:59:30Z');
 test('the links message before the release', () => {
   const c = cfg(), m = M.linksMessage(c, rel(c), 'wait', linksAt);
   const lines = plain(m.text).split('\n');
-  assert.equal(lines[0], 'Thu 26 Nov · 19:00 to 21:00');
-  assert.equal(lines[1], '⏳ Opens at 22:00:00, in 30 s. Wait for GO.');
+  assert.equal(lines[0], 'Thu 26 Nov · 19:00–21:00');
+  assert.equal(lines[1], 'Opens at 22:00:00, in 30 s. Wait for GO.');
   assert.equal(lines[3], 'Court 4, one tap:');
   assert.equal(lines[4], L.directUrl(4, civil(2026, 11, 26), 1140, 1260, L.DEFAULT_SID));
   assert.equal(lines.length, 5);
@@ -45,10 +45,39 @@ test('turning to GO changes one line and moves nothing', () => {
     const wl = w.text.split('\n'), gl = g.text.split('\n');
     assert.equal(wl.length, gl.length, style);
     assert.deepEqual(wl.filter((l, i) => l !== gl[i]).length, 1, style);
-    assert.equal(plain(gl[1]), '🟢 GO. Open now. Tap a court.');
+    assert.equal(gl[1], '<b>GO.</b> Tap a court now.');
     assert.notEqual(w.text, g.text);
-    assert.deepEqual(w.extra, g.extra, style);                         // same buttons in the same places
+    assert.deepEqual(M.withoutColours(g).extra, w.extra, style);       // same buttons in the same places; only colour is added
   }
+});
+
+test('colour arrives with GO: green for the first choice, blue for the rest, the sheet left plain', () => {
+  const c = cfg({ style: 'buttons' });
+  const w = M.linksMessage(c, rel(c), 'wait', linksAt), g = M.linksMessage(c, rel(c), 'go', linksAt);
+  const colours = m => m.extra.reply_markup.inline_keyboard.map(r => r.map(b => b.style || '-'));
+  assert.deepEqual(colours(w), [['-', '-', '-'], ['-', '-', '-'], ['-']]);
+  assert.deepEqual(colours(g), [['success', 'primary', 'primary'], ['primary', 'primary', 'primary'], ['-']]);
+  assert.equal(g.extra.reply_markup.inline_keyboard[0][0].text, 'Court 4');
+  assert.equal(M.hasColours(w), false);
+  assert.equal(M.hasColours(g), true);
+  const p = M.withoutColours(g);
+  assert.equal(M.hasColours(p), false);
+  assert.equal(p.text, g.text);
+  assert.deepEqual(p.extra, w.extra);
+  assert.equal(M.hasColours(g), true, 'taking the colours off makes a copy');
+  assert.equal(M.withoutColours(w), w);
+  const t = M.testMessage(c, rel(c), civil(2026, 11, 20), 'go');
+  assert.deepEqual(colours(t)[0], ['success', 'primary', 'primary']);
+});
+
+test('buttons only is two short lines, with no address in sight and no emoji', () => {
+  const c = cfg({ style: 'buttons' });
+  for (const m of [M.linksMessage(c, rel(c), 'wait', linksAt), M.linksMessage(c, rel(c), 'go', linksAt), M.warnMessage(c, rel(c), linksAt), M.testMessage(c, rel(c), civil(2026, 11, 20), 'wait'), M.testMessage(c, rel(c), civil(2026, 11, 20), 'go')]) {
+    assert.ok(!/https?:/.test(m.text), m.text);
+    assert.ok(!/\p{Extended_Pictographic}/u.test(m.text), m.text);
+    assert.ok(m.text.split('\n').length <= 3);
+  }
+  assert.ok(!/\p{Extended_Pictographic}/u.test(M.HELP + M.planMessage(c, linksAt, false) + M.statusMessage(c, linksAt, { version: '1', skewMs: 0, kept: 'no', paused: false })));
 });
 
 test('the three styles', () => {
@@ -82,13 +111,14 @@ test('a late links message counts down from where it is', () => {
 
 test('the heads-up', () => {
   const c = cfg(), m = M.warnMessage(c, rel(c), at('2026-11-19T21:55:00Z'));
-  assert.equal(plain(m.text), 'Kelvingrove · Thu 26 Nov opens at 22:00\nYour slot: 19:00 to 21:00. Courts in order: 4, 3, 5, 2, 6, 1.\nThe court links arrive at 21:59:30. Check you are signed in now.');
+  assert.equal(plain(m.text), 'Thu 26 Nov · 19:00–21:00\nBooking opens at 22:00. Your courts arrive at 21:59:30.\nCourt order: 4, 3, 5, 2, 6, 1. Check you are signed in now.');
   assert.deepEqual(m.extra.reply_markup.inline_keyboard, [[{ text: 'Check I am signed in', url: 'https://clubspark.lta.org.uk/KelvingroveParkTennisCourts/Booking/BookByDate' }]]);
 });
 
 test('the try-out message', () => {
   const c = cfg(), m = M.testMessage(c, rel(c), civil(2026, 11, 20), 'wait'), g = M.testMessage(c, rel(c), civil(2026, 11, 20), 'go');
-  assert.equal(plain(m.text).split('\n')[0], 'TEST · Fri 20 Nov · 19:00 to 21:00');
+  assert.deepEqual(plain(m.text).split('\n').slice(0, 2), ['Test · Fri 20 Nov · 19:00–21:00', 'Waiting. On the night this line counts down to the release.']);
+  assert.equal(g.text.split('\n')[1], '<b>GO.</b> This is how it turns at the release.');
   assert.match(m.extra.reply_markup.inline_keyboard[0][0].url, /Date=2026-11-20&/);
   assert.equal(m.text.split('\n').length, g.text.split('\n').length);
   assert.match(g.text, /GO/);
@@ -98,12 +128,12 @@ test('plan, next alert and status', () => {
   const c = cfg({ plan: { thu: { start: 1140, hours: 2 }, fri: { start: 1080, hours: 1 }, sun: { start: 600, hours: 1 } } });
   const now = at('2026-11-16T21:40:00Z');
   const p = plain(M.planMessage(c, now, false));
-  assert.match(p, /Thursday: 19:00 to 21:00\nFriday: 18:00 to 19:00\nSunday: 10:00 to 11:00/);   // Monday first, Sunday last
+  assert.match(p, /Thursday · 19:00–21:00\nFriday · 18:00–19:00\nSunday · 10:00–11:00/);   // Monday first, Sunday last
   assert.match(p, /Court order: 4, 3, 5, 2, 6, 1/);
-  assert.match(p, /Links arrive 30 s before the 22:00 release, then turn to GO\./);
+  assert.match(p, /Alert 30 s before the 22:00 release, then GO\./);
   assert.match(p, /Heads-up 5 min before\./);
-  assert.equal(M.nextLine(c, now, false), 'Next alert: Thu 19 Nov at 21:59:30 (in 3 days), for Thu 26 Nov 19:00 to 21:00.');
-  assert.equal(M.nextLine(c, at('2026-11-19T21:58:00Z'), false), 'Next alert: Thu 19 Nov at 21:59:30 (in 2 min), for Thu 26 Nov 19:00 to 21:00.');
+  assert.equal(M.nextLine(c, now, false), 'Next alert: Thu 19 Nov at 21:59:30 (in 3 days), for Thu 26 Nov, 19:00–21:00.');
+  assert.equal(M.nextLine(c, at('2026-11-19T21:58:00Z'), false), 'Next alert: Thu 19 Nov at 21:59:30 (in 2 min), for Thu 26 Nov, 19:00–21:00.');
   assert.equal(M.nextLine(c, now, true), 'Alerts are paused. Send /resume to switch them back on.');
   assert.equal(M.nextLine(cfg({ plan: {} }), now, false), 'No alert is scheduled.');
   assert.match(plain(M.planMessage(cfg({ plan: {} }), now, false)), /No days set yet/);

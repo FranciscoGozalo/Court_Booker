@@ -1,6 +1,6 @@
 # Court alert
 
-A small Telegram bot for Kelvingrove Park Tennis Courts. On your booking nights it messages you the court links just before ClubSpark releases the new day, then turns the message to **GO** at the release.
+A small Telegram bot for Kelvingrove Park Tennis Courts. On your booking nights it messages you a button for each court just before ClubSpark releases the new day, then turns the message to **GO** at the release.
 
 You do the booking. You tap a court, ClubSpark shows its confirm screen, and you press Confirm and pay. The bot never contacts ClubSpark, never signs in and never books anything. It only sends messages to you.
 
@@ -13,8 +13,8 @@ Kelvingrove opens each day for booking 7 days ahead at 22:00, so the alert for a
 | UK time | What arrives |
 | --- | --- |
 | 21:55:00 | A heads-up, with a button to check you are signed in to ClubSpark |
-| 21:59:30 | The court links for your slot, in your order of courts |
-| 22:00:00 | The same message changes to "GO. Open now. Tap a court." |
+| 21:59:30 | Six court buttons for your slot, in your order of courts |
+| 22:00:00 | The same message turns to "GO" and the buttons take colour: green for your first choice, blue for the rest |
 
 If ClubSpark says "Sorry, your booking was unsuccessful", that court has gone. Go back and tap the next one.
 
@@ -65,12 +65,12 @@ Out of the box, Railway forgets the bot's settings each time it restarts. Do one
 | `/off thu` | Stop Thursdays. `/off all` clears everything. |
 | `/order 4 3 5 2 6 1` | Which courts to offer first. |
 | `/plan` | Your plan and when the next alert is due. |
-| `/test` | Send the links now, for a day that is already open. |
+| `/test` | Send the courts now, for a day that is already open. |
 | `/signin` | Open the booking sheet so you can sign in. |
-| `/style both` | How the courts are shown. See below. |
-| `/lead 30` | How many seconds before the release the links arrive (5 to 300). |
+| `/style buttons` | How the courts are shown. See below. |
+| `/lead 30` | How many seconds before the release the alert arrives (5 to 300). |
 | `/warn 5` | How many minutes before the release the heads-up arrives. `0` for none. |
-| `/go off` | Leave the links message as it is at the release. |
+| `/go off` | Leave the alert as it is at the release. |
 | `/code` | Replace the booking code. You can also just paste a confirm-screen address. |
 | `/pause`, `/resume` | Stop and restart alerts. |
 | `/status` | Clock check, version, and whether settings are being kept. |
@@ -79,11 +79,11 @@ Out of the box, Railway forgets the bot's settings each time it restarts. Do one
 
 ## How the courts are shown
 
-Telegram asks "Open this link?" before it opens a button's link. A link written out in the message opens on the first tap. So there are three styles:
+Telegram asks "Open this link?" before it opens a button's link. An address written out in the message opens on the first tap, but ClubSpark's addresses are long. So there are three styles:
 
-- `/style both` (the default): your first-choice court is written out as a one-tap link, with buttons for all six courts underneath.
-- `/style links`: all six courts are written out. One tap each, but a long message.
-- `/style buttons`: buttons only. Tidy, but each takes two taps.
+- `/style buttons` (the default): court buttons only. Tidy; each court is a tap and a confirm.
+- `/style both`: the buttons, plus your first-choice court written out as a link that opens in one tap.
+- `/style links`: all six courts written out. One tap each, but a long message.
 
 Send `/test` after changing it to see how it looks.
 

@@ -33,8 +33,8 @@ test('court order', () => {
 
 test('slot ends', () => {
   assert.deepEqual([P.slotEnd(1140, 1), P.slotEnd(1140, 2), P.slotEnd(1380, 2)], [1200, 1260, 1440]);
-  assert.equal(P.slotText({ start: 1140, hours: 2 }), '19:00 to 21:00');
-  assert.equal(P.slotText({ start: 540, hours: 1 }), '09:00 to 10:00');
+  assert.equal(P.slotText({ start: 1140, hours: 2 }), '19:00–21:00');
+  assert.equal(P.slotText({ start: 540, hours: 1 }), '09:00–10:00');
 });
 
 test('a plan written as one line (the COURT_PLAN variable)', () => {

@@ -8,8 +8,9 @@ const { parseDay, parseTime, parseHours, parseOrder, parsePlan, cleanPlan, clean
 const { dueEvents, msToNextEvent, nextRelease, checkDate } = require('./lib/schedule');
 const M = require('./lib/messages');
 
-const VERSION = '1.0';
-const STYLES = ['both', 'links', 'buttons'];
+const VERSION = '1.1';
+const STYLES = ['buttons', 'both', 'links'];
+const STATE_VERSION = 2;
 const SENT_KEEP_MS = 3 * 86400000;
 
 // A whole number in a range, from a number or a string of digits. Anything else is null.
@@ -24,8 +25,8 @@ function intIn(v, lo, hi) {
 // Settings from storage, or from the environment on a first start, made safe to use.
 function loadState(raw, env = {}) {
   const state = {
-    owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: DEFAULT_SID,
-    lead: 30, warnMin: 5, go: true, style: 'both', paused: false, sent: {}, live: null,
+    v: STATE_VERSION, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: DEFAULT_SID,
+    lead: 30, warnMin: 5, go: true, style: 'buttons', paused: false, sent: {}, live: null,
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -35,7 +36,10 @@ function loadState(raw, env = {}) {
     state.lead = intIn(raw.lead, 5, 300) ?? 30;
     state.warnMin = intIn(raw.warnMin, 0, 60) ?? 5;
     state.go = raw.go !== false;
-    state.style = STYLES.includes(raw.style) ? raw.style : 'both';
+    state.style = STYLES.includes(raw.style) ? raw.style : 'buttons';
+    // Version 1.0 saved its own default look, "both". The default is now buttons only, so
+    // settings written by 1.0 follow it. A later /style both is saved with the new version and sticks.
+    if (raw.v !== STATE_VERSION && raw.style === 'both') state.style = 'buttons';
     state.paused = raw.paused === true;
     if (raw.sent && typeof raw.sent === 'object') {
       for (const k of Object.keys(raw.sent)) if (typeof raw.sent[k] === 'number') state.sent[k] = raw.sent[k];
@@ -54,7 +58,7 @@ function loadState(raw, env = {}) {
 // The settings as one line, for the COURT_SETTINGS variable, and back again.
 function backupLine(state) {
   return JSON.stringify({
-    owner: state.owner, plan: cleanPlan(state.plan), order: state.order, sid: state.sid,
+    v: STATE_VERSION, owner: state.owner, plan: cleanPlan(state.plan), order: state.order, sid: state.sid,
     lead: state.lead, warnMin: state.warnMin, go: state.go, style: state.style,
   });
 }
@@ -83,9 +87,30 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
     if (store.isPersistent ? store.isPersistent() : true) return 'disk';
     return variableLine !== null && variableLine === backupLine(state) ? 'variable' : 'no';
   }
-  const keepNote = () => (kept() !== 'no' ? '' : '\n\n⚠️ These settings will be lost at the next restart. To keep them, add a Railway volume mounted at /data, or send /backup.');
+  const keepNote = () => (kept() !== 'no' ? '' : '\n\nNote: these settings will be lost at the next restart. To keep them, add a Railway volume mounted at /data, or send /backup.');
   const html = { parse_mode: 'HTML', link_preview_options: M.NO_PREVIEW };
   const say = (chat, text, extra = {}) => tg.send(chat, text, { ...html, ...extra });
+  // Button colours are a recent Telegram feature. If the API ever refuses them, say so in the
+  // log and send the same message without them, so a colour can never cost an alert.
+  const coloursRefused = (m, err) => M.hasColours(m) && err.code === 400
+    && !/not modified|not found|can't be edited/i.test(err.message || '')
+    && /button|keyboard|markup|style/i.test(err.message || '');
+  async function sendMsg(chat, m) {
+    try { return await tg.send(chat, m.text, m.extra); } catch (err) {
+      if (!coloursRefused(m, err)) throw err;
+      log(`Telegram refused the button colours (${err.message}). Sending without them.`);
+      const p = M.withoutColours(m);
+      return tg.send(chat, p.text, p.extra);
+    }
+  }
+  async function editMsg(chat, id, m) {
+    try { return await tg.edit(chat, id, m.text, m.extra); } catch (err) {
+      if (!coloursRefused(m, err)) throw err;
+      log(`Telegram refused the button colours (${err.message}). Sending without them.`);
+      const p = M.withoutColours(m);
+      return tg.edit(chat, id, p.text, p.extra);
+    }
+  }
   const next = () => M.esc(M.nextLine(cfg(), now(), state.paused));
   const toldPrivate = new Set();
 
@@ -162,7 +187,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
         state.plan[day] = { start, hours }; save();
         const name = DAY_LONG[DAY_KEYS.indexOf(day)];
         const odd = start % 60 !== 0 ? '\nNote: I have only seen Kelvingrove slots start on the hour. Send /test to check this one opens.' : '';
-        await say(chat, `${name}s: ${slotText(state.plan[day])}.${odd}\nThe links come ${daysAhead} days before, ${state.lead} s ahead of the ${hhmm(releaseMin)} release.\n\n${next()}${keepNote()}`);
+        await say(chat, `<b>${name}s · ${slotText(state.plan[day])}</b>${odd}\nThe alert comes ${daysAhead} days before, ${state.lead} s ahead of the ${hhmm(releaseMin)} release.\n\n${next()}${keepNote()}`);
         break;
       }
 
@@ -188,7 +213,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
         const n = intIn(args[0] ?? null, 5, 300);
         if (n === null) { await say(chat, `Use a number of seconds from 5 to 300, for example  /lead 30\nNow: ${state.lead} s`); break; }
         state.lead = n; save();
-        await say(chat, `The links will arrive ${n} s before the release.`);
+        await say(chat, `The alert will arrive ${n} s before the release.`);
         break;
       }
 
@@ -207,18 +232,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
         const a = (args[0] || '').toLowerCase();
         if (a !== 'on' && a !== 'off') { await say(chat, `Send  /go on  or  /go off\nNow: ${state.go ? 'on' : 'off'}`); break; }
         state.go = a === 'on'; save();
-        await say(chat, state.go ? 'At the release the links message will turn to GO.' : 'The links message will stay as it is at the release.');
+        await say(chat, state.go ? 'At the release the alert will turn to GO.' : 'The alert will stay as it is at the release.');
         break;
       }
 
       case 'style': {
         const a = (args[0] || '').toLowerCase();
-        if (!STYLES.includes(a)) { await say(chat, `Send  /style both,  /style links  or  /style buttons\nNow: ${state.style}`); break; }
+        if (!STYLES.includes(a)) { await say(chat, `Send  /style buttons,  /style both  or  /style links\nNow: ${state.style}`); break; }
         state.style = a; save();
         await say(chat, {
-          both: 'Your first-choice court will be written out as a one-tap link, with buttons for all six below.',
-          links: 'All six courts will be written out as one-tap links.',
-          buttons: 'The courts will come as buttons only. Telegram asks "Open this link?" on each one.',
+          buttons: 'Court buttons only. Telegram asks "Open this link?" when you tap one.',
+          both: 'The buttons, plus your first-choice court written out as a link that opens in one tap.',
+          links: 'All six courts written out as links that open in one tap. No buttons.',
         }[a] + ' Send /test to see it.');
         break;
       }
@@ -248,11 +273,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
         if (!rel) { await say(chat, 'Set a day first, for example  /set thu 19:00 2h'); break; }
         const date = checkDate(t, c, rel);
         const first = M.testMessage(c, rel, date, 'wait');
-        const sent = await tg.send(chat, first.text, first.extra);
+        const sent = await sendMsg(chat, first);
         if (c.go) {
           await wait(5000);
-          const second = M.testMessage(c, rel, date, 'go');
-          await tg.edit(chat, sent.message_id, second.text, second.extra).catch(e => log(`Test GO edit failed: ${e.message}`));
+          await editMsg(chat, sent.message_id, M.testMessage(c, rel, date, 'go')).catch(e => log(`Test GO edit failed: ${e.message}`));
         }
         break;
       }
@@ -281,8 +305,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
             await tg.send(chat, m.text, m.extra);
           } else if (e.type === 'links') {
             const phase = now() >= e.rel.releaseAt ? 'go' : 'wait';
-            const m = M.linksMessage(c, e.rel, phase, now());
-            const sent = await tg.send(chat, m.text, m.extra);
+            const sent = await sendMsg(chat, M.linksMessage(c, e.rel, phase, now()));
             state.live = { night, chat, id: sent.message_id, phase };
             if (phase === 'go') state.sent[`${night}:go`] = now();   // it already says GO
           } else if (e.type === 'go') {
@@ -292,14 +315,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
               const m = M.linksMessage(c, e.rel, 'go', now());
               let edited = false;
               if (live) {
-                try { await tg.edit(live.chat, live.id, m.text, m.extra); edited = true; }
+                try { await editMsg(live.chat, live.id, m); edited = true; }
                 catch (err) {
                   if (err.code !== 400) throw err;
                   if (/not modified/i.test(err.message)) edited = true;   // an earlier try got through after all
                 }                                                         // any other 400: the message has gone, so send GO afresh
               }
               if (!edited) {
-                const sent = await tg.send(chat, m.text, m.extra);
+                const sent = await sendMsg(chat, m);
                 state.live = { night, chat, id: sent.message_id, phase: 'go' };
               } else {
                 live.phase = 'go';
