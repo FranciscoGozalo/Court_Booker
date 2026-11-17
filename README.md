@@ -28,7 +28,30 @@ The bot reads the same booking sheet you see on ClubSpark without signing in. It
 - **If no court shows as free** after the release, the card says so and offers all six anyway, in case the sheet is behind. A court that comes back, for example because someone did not finish paying, is offered again.
 - **If the sheet cannot be read**, the card is exactly what it was before this feature: all six courts in your order, with a line saying the check did not work. One failed read is not mentioned. Three in a row are, and if ClubSpark turns the server away the bot stops asking for the night.
 
-**Does it work from Railway?** ClubSpark is behind Cloudflare, which turns away some servers. After each deploy the bot's start-up message says `Free-court check: working` or `not working`, with the reason. You can also send `/free` at any time. If it does not work, nothing else changes: you get the six buttons as before. Send `/free off` to stop it trying.
+**Does it work from Railway?** Often not. ClubSpark is behind Cloudflare, which turns away cloud servers like Railway (it answers them `HTTP 403`). After each deploy the bot's start-up message says `Free-court check: working` or `not working`, with the reason, and `/free` tries it any time. If it does not work, nothing else changes: you get the six buttons as before, and `/free off` stops it trying. To get the free-court check working when Railway is blocked, read the next section.
+
+## Run the check from your home server (when Railway is blocked)
+
+Cloudflare turns away Railway, but it lets your home connection in, the same way it lets your phone in. So the booking sheet is read from a small program on a machine at home, which sends what it finds to the Railway bot. The Railway bot still does everything else and still sends every alert, so if the home machine is off you simply fall back to the six-button card.
+
+Nothing here disguises anything: the home program reads the public booking sheet the ordinary way and says honestly what it is. It never signs in and never books.
+
+**What you need:** a machine at home that is on at 22:00 on your booking nights (a Raspberry Pi, a NAS, an always-on PC) with Node 20 or later.
+
+1. **Give the Railway bot a web address.** In Railway, open the service, go to **Settings > Networking**, and choose **Generate Domain**. You get an address like `https://court-booker-production.up.railway.app`. (The bot only opens this web address once the next step is done.)
+2. **Make a shared password.** Invent one long random line — this is `AGENT_TOKEN`, and it is the only thing guarding the web address. In Railway, under **Variables**, add `AGENT_TOKEN` with that line. Railway redeploys; the log now says `Listening for the home server` and `Free-court readings will come from a home server`.
+3. **Run the home program.** On the home machine, get this repository (`git clone`, or copy the folder) and run:
+
+   ```
+   RELAY_URL=https://your-railway-address  AGENT_TOKEN=the-same-line  node home-agent.js
+   ```
+
+   It should print `Reached the Railway bot and the token works.` Leave it running. On a booking night it reads the sheet around the release and sends the results to the bot; the rest of the time it sits quietly.
+4. **Keep it running.** So it starts on its own after a reboot or power cut, run it under whatever your machine uses — a `systemd` service on Linux, `pm2`, or Task Scheduler on Windows. It needs only `RELAY_URL` and `AGENT_TOKEN`.
+
+Check it is working: send `/status` to the bot. It says `last reading from your home server at …` once a reading has arrived (that happens around the release, so on a quiet afternoon it will say it is waiting). If the home machine goes quiet mid-release, the card falls back to all six courts within half a minute and the alert still reaches you.
+
+The home program and the Railway bot must use the **same** `AGENT_TOKEN`. Do not put your Telegram token on the home machine; it does not need it.
 
 ## Set it up from a phone
 
@@ -132,6 +155,10 @@ To change a picture, replace the file in `art/` with another of the same shape, 
 | `RELEASE_TIME` | No | When the venue releases a new day. Default `22:00`. |
 | `DAYS_AHEAD` | No | How many days ahead it releases. Default `7`. |
 | `DATA_DIR` | No | Where settings are kept. Default: the volume, or `/data`. |
+| `AGENT_TOKEN` | For a home server | A long random line, the same on the Railway bot and the home program. Set it on the Railway bot to make it take readings from a home server instead of reading ClubSpark itself. |
+| `PORT` | No | The port the home-server endpoint listens on. Railway sets this for you. Default `8080`. |
+
+On the **home machine**, `home-agent.js` needs two of its own: `RELAY_URL` (the Railway bot's web address) and the same `AGENT_TOKEN`. Nothing else, and not the Telegram token.
 
 Saved settings win over `COURT_SETTINGS`, which wins over `COURT_PLAN` and `COURT_ORDER`.
 
@@ -141,10 +168,14 @@ Plain Node 20 or later, no packages. `npm test` runs the checks, including whole
 
 ```
 index.js          start-up, the Telegram message loop and the timer
+home-agent.js     the home-server program: reads the sheet, posts to Railway
 app.js            commands and the timed messages
 lib/time.js       UK-time date maths
 lib/links.js      the ClubSpark addresses
 lib/availability.js  reading the booking sheet: which courts are free
+lib/relay.js      Railway's buffer for readings a home server posts
+lib/server.js     the HTTP endpoint the home server talks to
+lib/agent.js      the home server's read-scheduling
 lib/plan.js       reading what you type
 lib/schedule.js   which messages are due when
 lib/messages.js   the words and buttons

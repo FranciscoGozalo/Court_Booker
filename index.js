@@ -8,6 +8,8 @@ const { createApp, VERSION } = require('./app');
 const { createTelegram } = require('./lib/telegram');
 const { createStore } = require('./lib/store');
 const { createCourtChecker } = require('./lib/availability');
+const { createRelay } = require('./lib/relay');
+const { createServer } = require('./lib/server');
 const { clockAt, londonWall } = require('./lib/time');
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
@@ -55,9 +57,27 @@ async function main() {
   const dataDir = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data';
   const store = createStore(dataDir, { log });
   const tg = createTelegram(token, { apiUrl: process.env.TELEGRAM_API_URL || undefined });
-  const app = createApp({ tg, store, log, env: process.env, checkCourts: createCourtChecker() });
+
+  // Where the free-court readings come from. With AGENT_TOKEN set, this server does not read
+  // ClubSpark itself (Cloudflare blocks it): a home server posts the readings over HTTP, and the
+  // bot uses the latest. Without it, the bot reads ClubSpark directly, as before.
+  const agentToken = (process.env.AGENT_TOKEN || '').trim();
+  const relay = agentToken ? createRelay() : null;
+  const checkCourts = relay ? relay.checkCourts : createCourtChecker();
+  const app = createApp({ tg, store, log, env: process.env, checkCourts, checkSource: relay ? 'home' : 'direct' });
   log(`Settings file: ${store.file}`);
+  if (relay) log('Free-court readings will come from a home server (AGENT_TOKEN is set).');
   if (!app.hasPictures) log('The banner pictures are missing (assets/banner-wait.jpg and banner-open.jpg), so the card look will come as plain text.');
+
+  // The endpoint the home server talks to. Also answers a plain /health, which lets Railway give
+  // the service a public domain. Only started when a home server is expected (AGENT_TOKEN set).
+  if (relay) {
+    const planFor = () => { const c = app.cfg(); return { plan: c.plan, order: c.order, releaseMin: c.releaseMin, daysAhead: c.daysAhead, lead: c.lead, free: app.state.free }; };
+    const server = createServer({ relay, getPlan: planFor, token: agentToken, log });
+    const port = Number(process.env.PORT) || 8080;
+    server.listen(port, () => log(`Listening for the home server on port ${port}.`));
+    server.on('error', e => log(`The home-server endpoint could not start: ${e.message}`));
+  }
 
   try {
     const me = await tg.call('getMe');

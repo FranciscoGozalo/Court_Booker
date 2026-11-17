@@ -95,7 +95,7 @@ function readBackup(text) {
 
 // `checkCourts(dateIso, start, end)` reads the booking sheet (see lib/availability.js). Without it,
 // the bot offers all six courts as it always did.
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait = ms => new Promise(r => setTimeout(r, ms)), pictures = loadPictures(), checkCourts = null }) {
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait = ms => new Promise(r => setTimeout(r, ms)), pictures = loadPictures(), checkCourts = null, checkSource = 'direct' }) {
   const fromVariable = readBackup(env.COURT_SETTINGS);
   const state = loadState(store.load() ?? fromVariable, env);
   const variableLine = fromVariable ? backupLine(loadState(fromVariable, env)) : null;
@@ -243,6 +243,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
           if (answer.stop || w.fails >= 3) {
             if (!w.failed) log(`Could not read the booking sheet: ${answer.why}${answer.stop ? '. Not trying again tonight.' : ''}`);
             w.failed = true;
+            w.answer = null;   // sustained failure (e.g. the home server went quiet): stop vouching for the last pick, fall back to all six
           }
         }
         w.nextAt = nextCheckAt(now(), rel);
@@ -329,7 +330,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
         await say(chat, next()); break;
 
       case 'status': {
-        const check = checkCourts ? { on: state.free, last: lastCheck } : null;
+        const check = checkCourts ? { on: state.free, last: lastCheck, source: checkSource } : null;
         await say(chat, M.statusMessage(c, t, { version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused, check }));
         break;
       }
@@ -539,7 +540,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
     if (chat === null) { log('No owner yet. Open the bot in Telegram and send /start.'); return; }
     let sheet = '';
     const c = cfg(), rel = checking() ? nextRelease(now(), c) : null;
-    if (rel) {
+    if (rel && checkSource === 'home') {
+      // The home server only reads during a booking-night window, so there is nothing to read at
+      // start-up. Just say where readings come from; /status shows when the last one arrived.
+      sheet = '\nFree-court readings come from your home server. It reads ClubSpark on booking nights.';
+    } else if (rel) {
       const answer = await readSheet(iso(checkDate(now(), c, rel)), rel.start, rel.end);
       log(answer.ok ? 'The booking sheet can be read from here.' : `The booking sheet cannot be read from here: ${answer.why}`);
       sheet = answer.ok ? '\nFree-court check: working.'
