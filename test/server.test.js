@@ -47,3 +47,45 @@ test('a result that cannot be passed on is a 500, so the PC tries again', async 
     assert.equal(res.status, 500);
   });
 });
+
+const crypto = require('node:crypto');
+const { signedText, readPublicKey } = require('../lib/server');
+
+// The PC's side of a signed request, as kelvingrove-court-booker does it.
+function signedHeader(privateKey, method, path, body, ms = Date.now()) {
+  const sig = crypto.sign(null, Buffer.from(signedText(ms, method, path, body)), privateKey).toString('base64url');
+  return `Signed ${ms}.${sig}`;
+}
+
+test('requests signed with the PC key are let in; anything else is not', async () => {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const other = crypto.generateKeyPairSync('ed25519');
+  const pub = readPublicKey(publicKey.export({ type: 'spki', format: 'der' }).toString('base64'));
+  const got = [];
+  const handlers = { getJobs: () => ({ jobs: [] }), onResult: async r => { got.push(r); return { ok: true }; }, publicKey: pub, token: '' };
+  await withServer(handlers, async base => {
+    const get = h => fetch(`${base}/agent/jobs`, { headers: { authorization: h } }).then(r => r.status);
+    assert.equal(await get(signedHeader(privateKey, 'GET', '/agent/jobs', '')), 200);
+    assert.equal(await get(signedHeader(other.privateKey, 'GET', '/agent/jobs', '')), 401);                       // someone else's key
+    assert.equal(await get(signedHeader(privateKey, 'GET', '/agent/jobs', '', Date.now() - 6 * 60000)), 401);    // too old
+    assert.equal(await get(signedHeader(privateKey, 'POST', '/agent/jobs', '')), 401);                          // signed for something else
+    const replay = signedHeader(privateKey, 'GET', '/agent/jobs', '');
+    assert.equal(await get(replay), 200);
+    assert.equal(await get(replay), 401);                                                                         // the same signature twice
+    assert.equal(await get('Bearer '), 401);                                                                      // no token set: no way in
+    // A result: the signature covers the body, so a changed body is refused.
+    const body = JSON.stringify({ id: '2026-11-24@16:00', status: 'booked', court: '3' });
+    const post = (h, b) => fetch(`${base}/agent/result`, { method: 'POST', headers: { authorization: h }, body: b }).then(r => r.status);
+    assert.equal(await post(signedHeader(privateKey, 'POST', '/agent/result', body), body.replace('3', '4')), 401);
+    assert.equal(await post(signedHeader(privateKey, 'POST', '/agent/result', body), body), 200);
+    assert.deepEqual(got.map(r => r.court), ['3']);
+  });
+});
+
+test('the public key can be given as one line of base64 or as PEM, and must be ed25519', () => {
+  const { publicKey } = crypto.generateKeyPairSync('ed25519');
+  assert.equal(readPublicKey(publicKey.export({ type: 'spki', format: 'pem' })).asymmetricKeyType, 'ed25519');
+  assert.equal(readPublicKey(''), null);
+  const rsa = crypto.generateKeyPairSync('rsa', { modulusLength: 1024 }).publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+  assert.throws(() => readPublicKey(rsa), /should be ed25519/);
+});

@@ -7,7 +7,7 @@
 const { createApp, VERSION } = require('./app');
 const { createTelegram } = require('./lib/telegram');
 const { createStore } = require('./lib/store');
-const { createServer } = require('./lib/server');
+const { createServer, readPublicKey } = require('./lib/server');
 const { clockAt, londonWall } = require('./lib/time');
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
@@ -54,22 +54,26 @@ async function main() {
   const store = createStore(dataDir, { log });
   const tg = createTelegram(token, { apiUrl: process.env.TELEGRAM_API_URL || undefined });
 
-  // Your PC reaches the bot over HTTP with a shared token. Without AGENT_TOKEN the bot still
-  // keeps your requests, but nothing can collect them.
+  // Your PC reaches the bot over HTTP and proves who it is by signing with its own key
+  // (AGENT_PUBLIC_KEY holds the public half) or with a shared AGENT_TOKEN. With neither, the
+  // bot still keeps your requests, but nothing can collect them.
   const agentToken = (process.env.AGENT_TOKEN || '').trim();
-  const app = createApp({ tg, store, log, env: process.env, linked: !!agentToken });
+  let publicKey = null;
+  try { publicKey = readPublicKey(process.env.AGENT_PUBLIC_KEY); } catch (e) { log(`AGENT_PUBLIC_KEY could not be read: ${e.message}`); }
+  const linked = !!(agentToken || publicKey);
+  const app = createApp({ tg, store, log, env: process.env, linked });
   log(`Settings file: ${store.file}`);
   if (!app.hasPictures) log('The banner pictures are missing (assets/banner-wait.jpg and banner-open.jpg), so cards will come as plain text.');
 
   // The endpoint your PC talks to. Also answers a plain /health, which lets Railway give the
   // service a public domain.
-  if (agentToken) {
-    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, token: agentToken, log });
+  if (linked) {
+    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, token: agentToken, publicKey, log });
     const port = Number(process.env.PORT) || 8080;
-    server.listen(port, () => log(`Listening for your PC on port ${port}.`));
+    server.listen(port, () => log(`Listening for your PC on port ${port} (${[publicKey && 'signed requests', agentToken && 'AGENT_TOKEN'].filter(Boolean).join(' or ')}).`));
     server.on('error', e => log(`The endpoint for your PC could not start: ${e.message}`));
   } else {
-    log('AGENT_TOKEN is not set, so your PC cannot collect bookings. Add it under Variables in Railway.');
+    log('Neither AGENT_PUBLIC_KEY nor AGENT_TOKEN is set, so your PC cannot collect bookings. Add one under Variables in Railway.');
   }
 
   try {
