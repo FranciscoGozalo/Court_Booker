@@ -1,11 +1,13 @@
 'use strict';
 // Court alert: a Telegram bot that sends you the Kelvingrove court links just before a new
-// day is released, and turns the message to GO at the release. You do the booking.
+// day is released, and turns the message to GO at the release. It reads the public booking
+// sheet to lead with the first free court in your order. You do the booking.
 // Needs Node 20 or later and one variable, TELEGRAM_BOT_TOKEN. See README.md.
 
 const { createApp, VERSION } = require('./app');
 const { createTelegram } = require('./lib/telegram');
 const { createStore } = require('./lib/store');
+const { createCourtChecker } = require('./lib/availability');
 const { clockAt, londonWall } = require('./lib/time');
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
@@ -17,6 +19,7 @@ const COMMANDS = [
   ['off', 'Remove a day: /off thu'],
   ['order', 'Court order: /order 4 3 5 2 6 1'],
   ['test', 'Send the courts now for an open day'],
+  ['free', 'Which courts are free now'],
   ['signin', 'Open the booking sheet to sign in'],
   ['style', 'Card, buttons, links or both'],
   ['status', 'Clock, version and settings'],
@@ -52,7 +55,7 @@ async function main() {
   const dataDir = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data';
   const store = createStore(dataDir, { log });
   const tg = createTelegram(token, { apiUrl: process.env.TELEGRAM_API_URL || undefined });
-  const app = createApp({ tg, store, log, env: process.env });
+  const app = createApp({ tg, store, log, env: process.env, checkCourts: createCourtChecker() });
   log(`Settings file: ${store.file}`);
   if (!app.hasPictures) log('The banner pictures are missing (assets/banner-wait.jpg and banner-open.jpg), so the card look will come as plain text.');
 

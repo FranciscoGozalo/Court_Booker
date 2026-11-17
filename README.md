@@ -1,8 +1,8 @@
 # Court alert
 
-A small Telegram bot for Kelvingrove Park Tennis Courts. On your booking nights it messages you a card with a button for each court just before ClubSpark releases the new day, then turns the card to **GO** at the release.
+A small Telegram bot for Kelvingrove Park Tennis Courts. On your booking nights it messages you a card just before ClubSpark releases the new day, then turns the card to **GO** at the release. It reads the public booking sheet to see which courts are free, so the card leads with one button: the first free court in your order. If that court is taken, the card moves on to the next free one.
 
-You do the booking. You tap a court, ClubSpark shows its confirm screen, and you press Confirm and pay. The bot never contacts ClubSpark, never signs in and never books anything. It only sends messages to you.
+You do the booking. You tap the court, ClubSpark shows its confirm screen, and you press Confirm and pay. The bot never signs in and never books anything. The only thing it asks ClubSpark for is the booking sheet that anyone can see without signing in.
 
 It runs on Railway, so nothing of yours needs to be switched on.
 
@@ -13,10 +13,22 @@ Kelvingrove opens each day for booking 7 days ahead at 22:00, so the alert for a
 | UK time | What arrives |
 | --- | --- |
 | 21:55:00 | A heads-up, with a button to check you are signed in to ClubSpark |
-| 21:59:30 | A card: a picture of the court with the floodlights off, your slot, and six court buttons in your order |
-| 22:00:00 | The same card turns to "GO": the words at once, then the picture, with the floodlights on |
+| 21:59:30 | A card: a picture of the court with the floodlights off, your slot, and a wide **Book Court 4** button for the first free court in your order, with the other free courts under it |
+| 22:00:00 | The same card turns to "GO · tap Court 4 now": the words at once, then the picture, with the floodlights on |
+| 22:00 to 22:05 | The bot keeps reading the sheet. When Court 4 is taken, the card changes to "tap Court 3 now", and so on |
 
-If ClubSpark says "Sorry, your booking was unsuccessful", that court has gone. Go back and tap the next one.
+If ClubSpark says "Sorry, your booking was unsuccessful", that court has gone. Go back to the card: within a few seconds it shows the next free court.
+
+## Which courts are free
+
+The bot reads the same booking sheet you see on ClubSpark without signing in. It starts 15 seconds before the card goes out and stops five minutes after the release. It reads every 2 seconds for the first half-minute after the release, then less often: about 50 reads a night, only on your booking nights.
+
+- **The card leads with the first free court in your order.** The other free courts are under it, then the whole sheet. Courts that are booked, taken by coaching or closed are left off.
+- **Nothing moves in the last three seconds before GO.** If the sheet changes then, the change arrives with GO itself.
+- **If no court shows as free** after the release, the card says so and offers all six anyway, in case the sheet is behind. A court that comes back, for example because someone did not finish paying, is offered again.
+- **If the sheet cannot be read**, the card is exactly what it was before this feature: all six courts in your order, with a line saying the check did not work. One failed read is not mentioned. Three in a row are, and if ClubSpark turns the server away the bot stops asking for the night.
+
+**Does it work from Railway?** ClubSpark is behind Cloudflare, which turns away some servers. After each deploy the bot's start-up message says `Free-court check: working` or `not working`, with the reason. You can also send `/free` at any time. If it does not work, nothing else changes: you get the six buttons as before. Send `/free off` to stop it trying.
 
 ## Set it up from a phone
 
@@ -66,6 +78,7 @@ Out of the box, Railway forgets the bot's settings each time it restarts. Do one
 | `/order 4 3 5 2 6 1` | Which courts to offer first. |
 | `/plan` | Your plan and when the next alert is due. |
 | `/test` | Send the courts now, for a day that is already open. |
+| `/free` | Which courts are free now, for your next slot on a day that is open. `/free off` shows all six courts on the night without reading the sheet; `/free on` brings the check back. |
 | `/signin` | Open the booking sheet so you can sign in. |
 | `/style card` | How the courts are shown. See below. |
 | `/lead 30` | How many seconds before the release the alert arrives (5 to 300). |
@@ -81,8 +94,8 @@ Out of the box, Railway forgets the bot's settings each time it restarts. Do one
 
 - `/style card` (the default): a picture on top, your slot and the status under it, then the court buttons. At the release the words turn to GO and the picture changes.
 - `/style buttons`: the same words and buttons as plain text, with no picture.
-- `/style both`: plain text, plus your first-choice court written out as a link.
-- `/style links`: all six courts written out as links. No buttons, and a long message.
+- `/style both`: plain text, plus the court the card leads with written out as a link.
+- `/style links`: the courts written out as links (the free ones, once the sheet has been read). No buttons, and a long message.
 
 Telegram asks "Open this link?" before it opens a button's link. An address written out in the message opens on the first tap, which is what `both` and `links` are for, but ClubSpark's addresses are long.
 
@@ -101,7 +114,8 @@ To change a picture, replace the file in `art/` with another of the same shape, 
 ## Good to know
 
 - **Sign in where the links open.** Telegram opens links in its own browser unless you have told it to use Safari, and that browser has its own ClubSpark sign-in. Use `/signin`, or the button on the heads-up, so you are signed in before the links arrive.
-- **The bot cannot see which courts are free.** It does not look at ClubSpark at all. It offers all six courts in your order.
+- **What the bot sends ClubSpark.** One plain request for the booking sheet's data for your day (`/v0/VenueBooking/KelvingroveParkTennisCourts/GetVenueSessions`), with no cookies, no sign-in and nothing about you. It says who it is in its user agent.
+- **A court leaving the card does not mean someone else got it.** When you book Court 4 yourself, the next read shows it booked and the card moves on to Court 3. That is expected.
 - **The booking code.** Each link carries a code from Kelvingrove's schedule. The one built in was taken from a real confirm screen on 16 November 2026 and opened every court, day and price band tried. If the links ever stop opening the confirm screen, tap a free slot on the sheet, press Continue booking, copy the address of the screen that follows and paste it to the bot.
 - **Timing.** The bot works on UK time and follows the clock changes. `/status` compares the server's clock with Telegram's.
 - **Restarts.** With a volume, each message is sent once per night even if the bot restarts, and a restart between the links and GO still turns the same message to GO. Without a volume, a restart in the last minute can send the links twice.
@@ -130,6 +144,7 @@ index.js          start-up, the Telegram message loop and the timer
 app.js            commands and the timed messages
 lib/time.js       UK-time date maths
 lib/links.js      the ClubSpark addresses
+lib/availability.js  reading the booking sheet: which courts are free
 lib/plan.js       reading what you type
 lib/schedule.js   which messages are due when
 lib/messages.js   the words and buttons

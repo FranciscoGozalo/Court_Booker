@@ -1,6 +1,7 @@
 'use strict';
 // The bot's behaviour: what it does with each message from its owner, and what it sends when.
-// It talks to Telegram only. It never contacts ClubSpark: it sends links for a person to tap.
+// It sends links for a person to tap. The only thing it asks ClubSpark is the public booking
+// sheet, to see which courts are free; it never signs in and never books anything.
 
 const fs = require('fs');
 const path = require('path');
@@ -8,10 +9,11 @@ const crypto = require('crypto');
 const { iso, label, hhmm, clockAt, DAY_KEYS, DAY_LONG } = require('./lib/time');
 const { DEFAULT_SID, GUID, SHEET, parseBookAddress } = require('./lib/links');
 const { parseDay, parseTime, parseHours, parseOrder, parsePlan, cleanPlan, cleanOrder, slotText } = require('./lib/plan');
-const { dueEvents, msToNextEvent, nextRelease, checkDate } = require('./lib/schedule');
+const { dueEvents, msToNextEvent, nextRelease, checkDate, checkWindows, nextCheckAt, CHECK_AFTER_MS } = require('./lib/schedule');
+const { courtView } = require('./lib/availability');
 const M = require('./lib/messages');
 
-const VERSION = '1.3';
+const VERSION = '1.4';
 const STYLES = ['card', 'buttons', 'both', 'links'];
 const STATE_VERSION = 3;
 const SENT_KEEP_MS = 3 * 86400000;
@@ -42,7 +44,7 @@ function intIn(v, lo, hi) {
 function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: DEFAULT_SID,
-    lead: 30, warnMin: 5, go: true, style: 'card', paused: false, sent: {}, live: null, pics: {},
+    lead: 30, warnMin: 5, go: true, style: 'card', free: true, paused: false, sent: {}, live: null, pics: {},
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -57,6 +59,7 @@ function loadState(raw, env = {}) {
     // Settings saved under an old default follow the new one. A look chosen on purpose since then is kept.
     const savedBy = raw.v === 2 || raw.v === 3 ? raw.v : 1;
     if ((savedBy === 1 && raw.style === 'both') || (savedBy === 2 && raw.style === 'buttons')) state.style = 'card';
+    state.free = raw.free !== false;                               // reading the sheet for free courts: on unless switched off
     state.paused = raw.paused === true;
     if (raw.sent && typeof raw.sent === 'object') {
       for (const k of Object.keys(raw.sent)) if (typeof raw.sent[k] === 'number') state.sent[k] = raw.sent[k];
@@ -80,7 +83,7 @@ function loadState(raw, env = {}) {
 function backupLine(state) {
   return JSON.stringify({
     v: STATE_VERSION, owner: state.owner, plan: cleanPlan(state.plan), order: state.order, sid: state.sid,
-    lead: state.lead, warnMin: state.warnMin, go: state.go, style: state.style,
+    lead: state.lead, warnMin: state.warnMin, go: state.go, style: state.style, free: state.free,
   });
 }
 function readBackup(text) {
@@ -90,7 +93,9 @@ function readBackup(text) {
   } catch { return null; }
 }
 
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait = ms => new Promise(r => setTimeout(r, ms)), pictures = loadPictures() }) {
+// `checkCourts(dateIso, start, end)` reads the booking sheet (see lib/availability.js). Without it,
+// the bot offers all six courts as it always did.
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait = ms => new Promise(r => setTimeout(r, ms)), pictures = loadPictures(), checkCourts = null }) {
   const fromVariable = readBackup(env.COURT_SETTINGS);
   const state = loadState(store.load() ?? fromVariable, env);
   const variableLine = fromVariable ? backupLine(loadState(fromVariable, env)) : null;
@@ -133,8 +138,21 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
     if (id && pictures && pictures[kind]) state.pics[kind] = { hash: pictures[kind].hash, id };
   }
 
+  // What each courts message on screen says now, so it is only edited when that should change.
+  const painted = new Map();
+  const keyOf = m => `${m.text}\n${JSON.stringify(m.extra.reply_markup || null)}`;
+  const paint = (id, m) => {
+    painted.set(id, keyOf(m));
+    if (painted.size > 20) painted.delete(painted.keys().next().value);
+  };
+
   // Sends the courts. Returns the message's id and whether it went as a card.
   async function deliver(chat, m, kind) {
+    const sent = await deliverOnce(chat, m, kind);
+    paint(sent.id, m);
+    return sent;
+  }
+  async function deliverOnce(chat, m, kind) {
     const pic = m.card ? picture(kind) : null;
     if (!pic) {
       const sent = await tg.send(chat, m.text, (m.card ? asText(m) : m).extra);
@@ -167,6 +185,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
       if (err.code !== 400) throw err;
       if (!unchanged(err)) return false;
     }
+    paint(live.id, m);
     if (live.card) {
       // The words change at once. The picture follows, because a phone has to fetch it.
       live.phase = 'go'; save();
@@ -194,6 +213,70 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
   }
   const next = () => M.esc(M.nextLine(cfg(), now(), state.paused));
   const toldPrivate = new Set();
+
+  // ---------- which courts are free ----------
+  // On a booking night the sheet is read from shortly before the courts go out until a few
+  // minutes after the release. Reads run alongside the timed messages and never hold them up.
+  const checking = () => !!checkCourts && state.free;
+  const watches = {};          // night -> { rel, answer, fails, failed, nextAt, busy, stopped }
+  let lastCheck = null;        // the latest read, for /status
+  async function readSheet(dateIso, start, end) {
+    const answer = await Promise.resolve().then(() => checkCourts(dateIso, start, end))
+      .catch(e => ({ ok: false, stop: false, why: (e && e.message) || String(e) }));
+    lastCheck = { at: now(), ok: answer.ok, why: answer.why };
+    return answer;
+  }
+  function startChecks(c) {
+    const t = now();
+    for (const night of Object.keys(watches)) if (t > watches[night].rel.releaseAt + CHECK_AFTER_MS + 600000) delete watches[night];
+    if (!checking()) return;
+    for (const rel of checkWindows(t, c)) {
+      const night = iso(rel.night);
+      const w = watches[night] || (watches[night] = { rel, answer: null, fails: 0, failed: false, nextAt: 0, busy: false, stopped: false });
+      if (w.busy || w.stopped || t < w.nextAt) continue;
+      w.busy = true;
+      readSheet(iso(rel.playDate), rel.start, rel.end).then(answer => {
+        w.busy = false;
+        if (answer.ok) { w.answer = { ...answer, at: t }; w.fails = 0; w.failed = false; } else {
+          w.fails++;
+          if (answer.stop) w.stopped = true;
+          if (answer.stop || w.fails >= 3) {
+            if (!w.failed) log(`Could not read the booking sheet: ${answer.why}${answer.stop ? '. Not trying again tonight.' : ''}`);
+            w.failed = true;
+          }
+        }
+        w.nextAt = nextCheckAt(now(), rel);
+      });
+    }
+  }
+  // How to offer the courts for a night's release, from the latest read of the sheet.
+  function viewFor(night, phase) {
+    const w = checking() ? watches[night] : null;
+    if (!w) return null;
+    // "Nothing free" is only believed from a read made after the release.
+    const released = phase === 'go' && !!w.answer && w.answer.at >= w.rel.releaseAt;
+    return courtView(cfg().order, w.answer, { released, failed: w.failed });
+  }
+  // Brings the courts message up to date with the sheet, if what it should say has changed.
+  // Left alone in the last seconds before the release, so it cannot get in the way of GO.
+  let repaintAfter = 0;
+  async function repaint(c) {
+    const live = state.live;
+    const w = live && watches[live.night];
+    if (!w || !checking() || now() < repaintAfter) return;
+    if (!w.answer && !w.failed) return;                              // nothing read yet (say, just after a restart): leave it as it is
+    if (live.phase === 'wait' && c.go && now() >= w.rel.releaseAt - 3000) return;
+    const m = M.linksMessage(lookOf(c, live.card), w.rel, live.phase, viewFor(live.night, live.phase));
+    if (painted.get(live.id) === keyOf(m)) return;
+    try {
+      if (live.card) await tg.editCaption(live.chat, live.id, m.text, { parse_mode: 'HTML', reply_markup: m.extra.reply_markup });
+      else await tg.edit(live.chat, live.id, m.text, m.extra);
+      paint(live.id, m);
+    } catch (err) {
+      if (err.code === 400) paint(live.id, m);                       // already says that, or gone: either way, leave it
+      else { repaintAfter = now() + (err.retryAfter ? err.retryAfter * 1000 : 1000); log(`Could not update the courts: ${err.message}`); }
+    }
+  }
 
   async function setCode(chat, text) {
     const got = parseBookAddress(text);
@@ -245,8 +328,30 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
       case 'next':
         await say(chat, next()); break;
 
-      case 'status':
-        await say(chat, M.statusMessage(c, t, { version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused })); break;
+      case 'status': {
+        const check = checkCourts ? { on: state.free, last: lastCheck } : null;
+        await say(chat, M.statusMessage(c, t, { version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused, check }));
+        break;
+      }
+
+      case 'free': {
+        const a = (args[0] || '').toLowerCase();
+        if (a === 'on' || a === 'off') {
+          state.free = a === 'on'; save();
+          await say(chat, state.free
+            ? 'On booking nights I will read the booking sheet and lead with the first free court in your order. Send /free to try it now.'
+            : 'The alerts will show all six courts, without reading the booking sheet.');
+          break;
+        }
+        if (a) { await say(chat, `Send  /free  to check now, or  /free on  /  /free off\nNow: ${state.free ? 'on' : 'off'}`); break; }
+        if (!checkCourts) { await say(chat, 'This copy of the bot cannot read the booking sheet.'); break; }
+        const rel = nextRelease(t, c);
+        if (!rel) { await say(chat, 'Set a day first, for example  /set thu 19:00 2h'); break; }
+        const date = checkDate(t, c, rel);
+        const answer = await readSheet(iso(date), rel.start, rel.end);
+        await say(chat, M.freeMessage(c, date, rel, answer, state.free));
+        break;
+      }
 
       case 'set': {
         const usage = 'Use it like this:  /set thu 19:00 2h\nDay, start time, then 1h or 2h (1h if you leave it out).';
@@ -325,7 +430,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
           buttons: 'Plain text with the court buttons.',
           card: 'A picture card that changes when booking opens.' + (pictures ? '' : ' (The pictures are missing from this build, so it will come as plain text.)'),
           both: 'The buttons, plus your first-choice court written out as a link that opens in one tap.',
-          links: 'All six courts written out as links that open in one tap. No buttons.',
+          links: 'The courts written out as links that open in one tap. No buttons.',
         }[a] + ' Send /test to see it.');
         break;
       }
@@ -354,11 +459,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
         const rel = nextRelease(t, c);
         if (!rel) { await say(chat, 'Set a day first, for example  /set thu 19:00 2h'); break; }
         const date = checkDate(t, c, rel);
-        const sent = await deliver(chat, M.testMessage(c, rel, date, 'wait'), 'wait');
+        const answer = checking() ? await readSheet(iso(date), rel.start, rel.end) : null;
+        const view = phase => courtView(c.order, answer, { released: phase === 'go', failed: !!answer && !answer.ok });
+        const sent = await deliver(chat, M.testMessage(c, rel, date, 'wait', view('wait')), 'wait');
         if (c.go) {
           await wait(5000);                                        // on purpose, so before and after can both be seen
           const live = { chat, id: sent.id, card: sent.card, phase: 'wait' };
-          await turnToGo(live, M.testMessage(lookOf(c, sent.card), rel, date, 'go')).catch(e => log(`Test GO edit failed: ${e.message}`));
+          await turnToGo(live, M.testMessage(lookOf(c, sent.card), rel, date, 'go', view('go'))).catch(e => log(`Test GO edit failed: ${e.message}`));
         }
         save();
         break;
@@ -379,6 +486,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
       const chat = owner();
       if (chat === null || state.paused) return;
       const c = cfg();
+      startChecks(c);
       for (const e of dueEvents(now(), c, state.sent)) {
         if (state.sent[e.key] || (retryAt[e.key] && now() < retryAt[e.key])) continue;
         const night = iso(e.rel.night);
@@ -388,17 +496,17 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
             await tg.send(chat, m.text, m.extra);
           } else if (e.type === 'links') {
             const phase = now() >= e.rel.releaseAt ? 'go' : 'wait';
-            const sent = await deliver(chat, M.linksMessage(c, e.rel, phase), phase === 'go' ? 'open' : 'wait');
+            const sent = await deliver(chat, M.linksMessage(c, e.rel, phase, viewFor(night, phase)), phase === 'go' ? 'open' : 'wait');
             state.live = { night, chat, id: sent.id, phase, card: sent.card };
             if (phase === 'go') state.sent[`${night}:go`] = now();   // it already says GO
           } else if (e.type === 'go') {
             if (!state.sent[`${night}:links`]) continue;             // the links are still to come and will say GO themselves
             const live = state.live && state.live.night === night ? state.live : null;
             if (!live || live.phase !== 'go') {
-              const turned = live ? await turnToGo(live, M.linksMessage(lookOf(c, live.card), e.rel, 'go')) : false;
+              const turned = live ? await turnToGo(live, M.linksMessage(lookOf(c, live.card), e.rel, 'go', viewFor(night, 'go'))) : false;
               if (turned) live.phase = 'go';
               else {                                                      // the message has gone, so GO goes out afresh
-                const sent = await deliver(chat, M.linksMessage(c, e.rel, 'go'), 'open');
+                const sent = await deliver(chat, M.linksMessage(c, e.rel, 'go', viewFor(night, 'go')), 'open');
                 state.live = { night, chat, id: sent.id, phase: 'go', card: sent.card };
               }
             }
@@ -412,6 +520,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
           log(`Could not send ${e.type}: ${err.message}. Trying again shortly.`);
         }
       }
+      await repaint(c);
     } finally {
       ticking = false;
     }
@@ -423,11 +532,20 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, wait =
     return msToNextEvent(now(), cfg());
   }
 
-  // A quiet note on start-up, so a deploy can be seen to have worked.
+  // A quiet note on start-up, so a deploy can be seen to have worked. With a plan set, it also
+  // reads the booking sheet once, so it is plain from the start whether ClubSpark lets this server in.
   async function announce() {
     const chat = owner();
     if (chat === null) { log('No owner yet. Open the bot in Telegram and send /start.'); return; }
-    await tg.send(chat, `Court alert is running (version ${VERSION}).\n${next()}${keepNote()}`, { ...html, disable_notification: true })
+    let sheet = '';
+    const c = cfg(), rel = checking() ? nextRelease(now(), c) : null;
+    if (rel) {
+      const answer = await readSheet(iso(checkDate(now(), c, rel)), rel.start, rel.end);
+      log(answer.ok ? 'The booking sheet can be read from here.' : `The booking sheet cannot be read from here: ${answer.why}`);
+      sheet = answer.ok ? '\nFree-court check: working.'
+        : `\nFree-court check: not working (${M.esc(answer.why)}). The alerts will show all six courts.`;
+    }
+    await tg.send(chat, `Court alert is running (version ${VERSION}).\n${next()}${sheet}${keepNote()}`, { ...html, disable_notification: true })
       .catch(e => log(`Start-up note not sent: ${e.message}`));
   }
 

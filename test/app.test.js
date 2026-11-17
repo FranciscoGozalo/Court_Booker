@@ -403,9 +403,9 @@ test('/signin, /status, /help and things it does not know', async () => {
   await s.app.handleUpdate(say(ME, '/signin'));
   assert.deepEqual(s.tg.last().extra.reply_markup.inline_keyboard, [[{ text: 'Open the booking sheet', url: L.SHEET }]]);
   await s.app.handleUpdate(say(ME, '/status'));
-  assert.match(s.tg.last().text, /Status<\/b>  \(version 1\.3\)[\s\S]*UK time now: 22:45:00[\s\S]*kept across restarts: yes[\s\S]*Style: buttons[\s\S]*Next alert/);
+  assert.match(s.tg.last().text, /Status<\/b>  \(version 1\.4\)[\s\S]*UK time now: 22:45:00[\s\S]*kept across restarts: yes[\s\S]*Style: buttons[\s\S]*Next alert/);
   await s.app.handleUpdate(say(ME, '/help'));
-  assert.match(s.tg.last().text, /I never contact ClubSpark myself/);
+  assert.match(s.tg.last().text, /I never sign in or book anything myself/);
   await s.app.handleUpdate(say(ME, '/dance'));
   assert.match(s.tg.last().text, /I do not know that one/);
   await s.app.handleUpdate(say(ME, 'what time is it'));
@@ -464,7 +464,7 @@ test('/backup gives one line that brings everything back on a server with no sto
   assert.equal(a.app.kept(), 'no');
   await a.app.handleUpdate(say(ME, '/backup'));
   const line = /<code>(.*)<\/code>/.exec(a.tg.last().text)[1].replace(/&amp;/g, '&');
-  assert.deepEqual(JSON.parse(line), { v: 3, owner: ME, plan: { thu: { start: 1140, hours: 2 }, fri: { start: 1080, hours: 1 } }, order: [4, 3, 5, 2, 6, 1], sid: L.DEFAULT_SID, lead: 20, warnMin: 5, go: true, style: 'links' });
+  assert.deepEqual(JSON.parse(line), { v: 3, owner: ME, plan: { thu: { start: 1140, hours: 2 }, fri: { start: 1080, hours: 1 } }, order: [4, 3, 5, 2, 6, 1], sid: L.DEFAULT_SID, lead: 20, warnMin: 5, go: true, style: 'links', free: true });
 
   const b = setup({ store: memStore(null, false), env: { COURT_SETTINGS: line } });   // after a restart: nothing saved, only the variable
   assert.equal(b.app.owner(), ME);
@@ -503,7 +503,7 @@ test('saved settings beat the COURT_SETTINGS variable, and a junk variable is ig
   }
   assert.equal(readBackup('{"a":1}').a, 1);
   assert.equal(readBackup(undefined), null);
-  assert.equal(backupLine(loadState(null)), JSON.stringify({ v: 3, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'card' }));
+  assert.equal(backupLine(loadState(null)), JSON.stringify({ v: 3, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'card', free: true }));
 });
 
 test('settings saved under an old default look move to the picture card; a look chosen on purpose stays', async () => {
@@ -532,7 +532,7 @@ test('an edit that was already applied is left alone, whatever words Telegram us
 
 test('damaged storage does not break the bot', () => {
   const st = loadState({ owner: 'me', plan: 'x', order: [9], sid: '<script>', lead: 9999, warnMin: null, go: 'no', style: 'x', paused: 'yes', sent: { a: 'b', '2026-11-19:links': 5 }, live: { night: 5 } });
-  assert.deepEqual(st, { v: 3, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'card', paused: false, sent: { '2026-11-19:links': 5 }, live: null, pics: {} });
+  assert.deepEqual(st, { v: 3, owner: null, plan: {}, order: [1, 2, 3, 4, 5, 6], sid: L.DEFAULT_SID, lead: 30, warnMin: 5, go: true, style: 'card', free: true, paused: false, sent: { '2026-11-19:links': 5 }, live: null, pics: {} });
   assert.deepEqual(loadState(null).plan, {});
   assert.deepEqual(loadState('junk').order, [1, 2, 3, 4, 5, 6]);
 });
