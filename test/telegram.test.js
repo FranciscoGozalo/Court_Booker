@@ -28,7 +28,7 @@ test('sends the right request and returns the result', async () => {
   assert.equal(f.seen[1].url, 'https://api.telegram.org/bot123:ABC/editMessageText');
   assert.deepEqual(f.seen[1].body, { chat_id: 42, message_id: 7, text: 'changed' });
   await tg.getUpdates(5, 50);
-  assert.deepEqual(f.seen[2].body, { offset: 5, timeout: 50, allowed_updates: ['message'] });
+  assert.deepEqual(f.seen[2].body, { offset: 5, timeout: 50, allowed_updates: ['message', 'callback_query'] });
 });
 
 test('only ever talks to the Telegram address it was given', async () => {

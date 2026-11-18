@@ -150,7 +150,7 @@ test('a booking result arrives as a card on the open banner with the gate code',
   const card = tg.last();
   assert.equal(card.method, 'photo');
   assert.equal(card.photo, 'upload:banner-open.jpg');
-  assert.equal(card.text, '<b>Booked · Court 3</b>\nTue 24 Nov · 16:00–18:00\nGate code: <b>2433</b>');
+  assert.equal(card.text, '<b>Booked · Court 3</b>\nTue 24 Nov · 16:00–18:00\nGate code: <code>2433</code>  (tap to copy)');
   // The same result again (the PC retrying) is not sent twice; a later failure does not undo it.
   await app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 });
   await app.resultFromAgent({ id: '2026-11-24@16:00', status: 'failed', why: 'x', end: 1080 });
@@ -162,10 +162,12 @@ test('a booking result arrives as a card on the open banner with the gate code',
   assert.match(tg.last().text, /Gate code: not shown/);
 });
 
-test('a failed booking is a plain message saying why; nonsense is refused', async () => {
+test('a failed booking is a card on the wait banner saying why; nonsense is refused', async () => {
   const { app, tg } = makeApp(`${TUE}T22:05:00Z`);
   await app.resultFromAgent({ id: '2026-11-24@19:00', status: 'none', end: 1260 });
-  assert.equal(tg.last().method, 'send');
+  assert.equal(tg.last().method, 'photo');
+  assert.equal(tg.last().photo, 'upload:banner-wait.jpg');
+  assert.deepEqual(tg.last().extra.reply_markup.inline_keyboard[0].map(b => b.callback_data), ['n:b', 'n:h']);
   assert.match(tg.last().text, /Not booked · Tue 24 Nov · 19:00–21:00<\/b>\nNo court was free for the whole slot/);
   assert.equal((await app.resultFromAgent({ id: 'nope', status: 'booked', court: 3 })).ok, false);
   assert.equal((await app.resultFromAgent({ id: '2026-11-24@19:00', status: 'booked' })).ok, false);   // no court

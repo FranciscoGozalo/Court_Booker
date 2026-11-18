@@ -14,6 +14,7 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const COMMANDS = [
+  ['menu', 'Buttons for everything'],
   ['plan', 'What is booked when'],
   ['book', 'One date: /book 25 nov 19:00 2h'],
   ['set', 'Every week: /set thu 19:00 2h'],

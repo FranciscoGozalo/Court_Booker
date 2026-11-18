@@ -69,6 +69,9 @@ function fakeTelegram(clock) {
       tg.calls.push({ at: clock.t, method: 'media', chat, text: extra.caption, extra, id, photo: nameOf(photo) });
       return { message_id: id, photo: sizesOf(photo) };
     },
+    // ---- button taps ----
+    answers: [],
+    async answer(id, text) { tg.answers.push(text ?? null); return true; },
     skewMs: () => 0,
     last: () => tg.calls[tg.calls.length - 1],
     clear: () => { tg.calls.length = 0; },

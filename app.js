@@ -7,10 +7,11 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { iso, label, hhmm, todayCivil, addDays, londonInstant, DAY_KEYS, DAY_LONG } = require('./lib/time');
+const { iso, label, hhmm, todayCivil, addDays, londonInstant, civil, DAY_KEYS, DAY_LONG } = require('./lib/time');
 const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, slotText, slotEnd } = require('./lib/plan');
 const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf } = require('./lib/schedule');
 const M = require('./lib/messages');
+const UI = require('./lib/ui');
 
 const VERSION = '2.0';
 const STATE_VERSION = 4;
@@ -133,11 +134,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // A card is a banner picture with the words as its caption. A picture must never cost a
   // message, so whatever Telegram refuses about one falls back to plain text.
   const transient = err => !err.code || err.code === 429 || err.code >= 500;
-  async function sendCard(chat, kind, caption) {
+  async function sendCard(chat, kind, caption, keyboard = null) {
+    const markup = keyboard ? { reply_markup: keyboard } : {};
     const p = pictures && pictures[kind];
-    if (!p) return say(chat, caption);
+    if (!p) return say(chat, caption, markup);
     const known = state.pics[kind];
-    const extra = { caption, parse_mode: 'HTML' };
+    const extra = { caption, parse_mode: 'HTML', ...markup };
     try {
       let sent;
       const useId = known && known.hash === p.hash ? known.id : null;
@@ -153,8 +155,101 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     } catch (err) {
       if (transient(err)) throw err;
       log(`Telegram would not take the picture (${err.message}). Sending plain text.`);
-      return say(chat, caption);
+      return say(chat, caption, markup);
     }
+  }
+
+  // ---------- the tap-through screens ----------
+  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked });
+  const statusInfo = () => ({
+    version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused,
+    linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null,
+  });
+  // Shows a screen: by changing the card the button was on, or as a new card.
+  async function show(chat, scr, messageId = null) {
+    if (messageId) {
+      try {
+        await tg.editCaption(chat, messageId, scr.caption, { parse_mode: 'HTML', reply_markup: scr.keyboard });
+        return;
+      } catch (err) {
+        if (/not modified/i.test(err.message || '')) return;
+        if (err.code !== 400) throw err;       // e.g. an old text message with no caption: a new card instead
+      }
+    }
+    await sendCard(chat, 'wait', scr.caption, scr.keyboard);
+  }
+
+  const DAY_RE = '(sun|mon|tue|wed|thu|fri|sat)';
+  // What a button does. Returns the screen to show next and a short note for the tap.
+  function route(data) {
+    let m;
+    const c = ctx();
+    if (data === 'noop') return {};
+    if (data === 'h') return { screen: UI.home(c) };
+    if (data === 'b') return { screen: UI.calendar(c) };
+    if ((m = /^cal:(\d{4})(\d{2})$/.exec(data))) return { screen: UI.calendar(c, civil(+m[1], +m[2], 1)) };
+    if ((m = /^d:(\d{8})$/.exec(data))) return { screen: UI.times(c, UI.fromD8(m[1])) };
+    if ((m = /^t:(\d{8}):(\d{4})$/.exec(data))) return { screen: UI.lengths(c, UI.fromD8(m[1]), UI.fromHm(m[2])) };
+    if ((m = /^l:(\d{8}):(\d{4}):([12])$/.exec(data))) return { screen: UI.confirmOnce(c, UI.fromD8(m[1]), UI.fromHm(m[2]), +m[3]) };
+    if ((m = /^ok:(\d{8}):(\d{4}):([12])$/.exec(data))) {
+      const dateIso = UI.fromD8(m[1]), start = UI.fromHm(m[2]), hours = +m[3];
+      const date = civilOf(dateIso), today = todayCivil(c.now);
+      if (date > addDays(today, UI.MAX_AHEAD_DAYS) || londonInstant(date, start) <= c.now || start + hours * 60 > UI.LAST_END) {
+        return { screen: UI.calendar(c), toast: 'That time is no longer available. Pick again.' };
+      }
+      if (state.once.some(o => o.date === dateIso && o.start === start)) return { screen: UI.added(c, dateIso, start, hours, true), toast: 'Already on your list' };
+      state.once = cleanOnce([...state.once, { date: dateIso, start, hours }]); save();
+      log(`Added ${dateIso} ${hhmm(start)} by button`);
+      return { screen: UI.added(ctx(), dateIso, start, hours), toast: 'Added' };
+    }
+    if ((m = /^x:(\d{8}):(\d{4})$/.exec(data))) {
+      const dateIso = UI.fromD8(m[1]), start = UI.fromHm(m[2]);
+      const gone = state.once.find(o => o.date === dateIso && o.start === start);
+      state.once = state.once.filter(o => o !== gone); save();
+      return { screen: UI.bookings(ctx(), gone ? `Removed ${label(civilOf(dateIso))} · ${slotText(gone)}` : ''), toast: gone ? 'Removed' : 'Already gone' };
+    }
+    if (data === 'w') return { screen: UI.weekly(c) };
+    if ((m = new RegExp(`^wd:${DAY_RE}$`).exec(data))) return { screen: UI.weeklyDay(c, m[1]) };
+    if ((m = new RegExp(`^wt:${DAY_RE}$`).exec(data))) return { screen: UI.weeklyTimes(c, m[1]) };
+    if ((m = new RegExp(`^wt:${DAY_RE}:(\\d{4})$`).exec(data))) return { screen: UI.weeklyLengths(c, m[1], UI.fromHm(m[2])) };
+    if ((m = new RegExp(`^wl:${DAY_RE}:(\\d{4}):([12])$`).exec(data))) {
+      const start = UI.fromHm(m[2]), hours = +m[3];
+      if (start < UI.FIRST_START || start + hours * 60 > UI.LAST_END) return { screen: UI.weekly(c), toast: 'Pick a time between 09:00 and 21:00.' };
+      state.plan[m[1]] = { start, hours }; save();
+      log(`Weekly ${m[1]} set by button`);
+      return { screen: UI.weeklySaved(ctx(), m[1]), toast: 'Saved' };
+    }
+    if ((m = new RegExp(`^woff:${DAY_RE}$`).exec(data))) {
+      delete state.plan[m[1]]; save();
+      return { screen: UI.weekly(ctx()), toast: `Stopped ${DAY_LONG[DAY_KEYS.indexOf(m[1])]}s` };
+    }
+    if (data === 'm') return { screen: UI.bookings(c) };
+    if (data === 'o') return { screen: UI.order(c) };
+    if ((m = /^o:([1-6]{1,6})$/.exec(data)) && new Set(m[1]).size === m[1].length) return { screen: UI.order(c, m[1]) };
+    if ((m = /^os:([1-6]{1,6})$/.exec(data)) && new Set(m[1]).size === m[1].length) {
+      state.order = parseOrder(m[1].split('').join(' ')); save();
+      return { screen: UI.home(ctx()), toast: `Court order: ${state.order.join(', ')}` };
+    }
+    if (data === 'p') {
+      state.paused = !state.paused; save();
+      return { screen: UI.home(ctx()), toast: state.paused ? 'Paused: nothing will be booked' : 'Booking is on' };
+    }
+    if (data === 's') return { screen: UI.status(c, statusInfo()) };
+    return { toast: 'That button is out of date. Send /menu.' };
+  }
+
+  // A button was tapped. Only the owner's taps count.
+  async function handleTap(q) {
+    const chat = q.message && q.message.chat ? q.message.chat.id : null;
+    const answer = text => Promise.resolve().then(() => tg.answer(q.id, text)).catch(() => {});
+    if (chat === null || owner() === null || chat !== owner()) { await answer('This bot is private.'); return; }
+    let data = String(q.data || '');
+    const fresh = data.startsWith('n:');                                   // on a booking message: keep it, open a new card
+    if (fresh) data = data.slice(2);
+    let result;
+    try { result = route(data); } catch (e) { log(`Button failed: ${e.message}`); result = { toast: 'That did not work. Send /menu to start again.' }; }
+    await answer(result.toast);
+    if (result.screen) await show(chat, result.screen, fresh ? null : q.message.message_id);
   }
 
   // ---------- your PC ----------
@@ -190,8 +285,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const same = prev && prev.status === r.status && prev.court === r.court;
     const chat = owner();
     if (!same && chat !== null) {
-      if (r.status === 'booked') await sendCard(chat, 'open', M.bookedCaption(r));
-      else await say(chat, M.failedText(r));
+      if (r.status === 'booked') await sendCard(chat, 'open', M.bookedCaption(r), UI.afterBooked());
+      else await sendCard(chat, 'wait', M.failedText(r), UI.afterFailed());
     }
     state.results[r.id] = { ...r, at: now() };
     for (const k of Object.keys(state.results)) if (now() - state.results[k].at > RESULTS_KEEP_MS) delete state.results[k];
@@ -202,6 +297,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
 
   // ---------- messages from the owner ----------
   async function handleUpdate(update) {
+    if (update && update.callback_query) return handleTap(update.callback_query);
     const msg = update && update.message;
     if (!msg || typeof msg.text !== 'string' || !msg.chat || msg.chat.type !== 'private') return;
     const chat = msg.chat.id;
@@ -217,7 +313,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       if (cmd !== 'start') { await say(chat, 'Send /start to set this bot up.'); return; }
       state.owner = chat; save();
       log('Owner set by /start');
-      await say(chat, `This bot is now yours, and it answers only you.\nTo lock that in for good, add the variable TELEGRAM_CHAT_ID = <code>${chat}</code> in Railway.${keepNote()}\n\n${M.HELP}`);
+      await say(chat, `This bot is now yours, and it answers only you.\nTo lock that in for good, add the variable TELEGRAM_CHAT_ID = <code>${chat}</code> in Railway.${keepNote()}`);
+      await show(chat, UI.home(ctx()));
       return;
     }
     if (chat !== owner()) {
@@ -230,24 +327,26 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
 
     switch (cmd) {
       case 'start':
+      case 'menu':
+        await show(chat, UI.home(ctx())); break;
+
       case 'help':
         await say(chat, M.HELP); break;
 
       case 'plan':
-      case 'list':
-        await say(chat, M.planMessage(c, t, state.paused, state.results) + keepNote()); break;
+      case 'list': {
+        const scr = UI.bookings(ctx());
+        await show(chat, { ...scr, caption: scr.caption + keepNote() }); break;
+      }
 
       case 'next':
         await say(chat, next()); break;
 
       case 'status':
-        await say(chat, M.statusMessage(c, t, {
-          version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused,
-          linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null,
-        }));
-        break;
+        await show(chat, UI.status(ctx(), statusInfo())); break;
 
       case 'set': {
+        if (!args.length) { await show(chat, UI.weekly(ctx())); break; }
         const usage = 'Use it like this:  /set thu 19:00 2h\nDay, start time, then 1h or 2h (1h if you leave it out).';
         const day = parseDay(args[0]);
         const slot = parseSlot(args.slice(1));
@@ -269,6 +368,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       }
 
       case 'book': {
+        if (!args.length) { await show(chat, UI.calendar(ctx())); break; }
         const usage = 'Use it like this:  /book 25 nov 19:00 2h\nA date (25 nov, 25/11, wed, tomorrow), a start time, then 1h or 2h.';
         const today = todayCivil(t);
         const got = parseBooking(args, today);
@@ -289,6 +389,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       }
 
       case 'cancel': {
+        if (!args.length) { await show(chat, UI.bookings(ctx())); break; }
         const n = intIn(args[0] ?? null, 1, state.once.length || 1);
         let gone = null;
         if (n !== null && state.once[n - 1]) gone = state.once.splice(n - 1, 1)[0];
@@ -307,6 +408,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       }
 
       case 'order': {
+        if (!rest) { await show(chat, UI.order(ctx())); break; }
         const order = parseOrder(rest);
         if (!order) { await say(chat, `Use it like this:  /order 3 4 5 2 1 6\nCourts 1 to 6, each once. Any you leave out go last.\nNow: ${state.order.join(', ')}`); break; }
         state.order = order; save();
@@ -350,7 +452,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const key = `missing:${rel.releaseAt}`;
       if (state.sent[key] || (retryAt[key] && t < retryAt[key])) return;
       try {
-        await say(chat, M.missingText(cfg(), rel));
+        await sendCard(chat, 'wait', M.missingText(cfg(), rel), UI.afterMissing());
         state.sent[key] = t;
         for (const k of Object.keys(state.sent)) if (t - state.sent[k] > SENT_KEEP_MS) delete state.sent[k];
         save();
