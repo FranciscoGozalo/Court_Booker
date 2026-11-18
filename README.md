@@ -34,7 +34,8 @@ A one-off date that is already open is booked on the PC's next run (21:55 that n
 | `/plan` | Your weekly and one-off bookings, how each stands, and the next booking run. |
 | `/order 3 4 5 2 1 6` | Which courts to try first. |
 | `/pause`, `/resume` | Stop and restart booking. |
-| `/status` | Clock check, version, your PC's state and when it was last in touch, and whether settings are kept. |
+| `/status` | Clock check, version, your PC's state and when it was last in touch, whether waking is ready, and whether settings are kept. |
+| `/wake` | Wake your PC from sleep (the same as **Wake my PC** on the menu). See [Waking your PC](#waking-your-pc). |
 | `/wide` | A trial: the menu with the banner as a large link preview, which Telegram may draw wider than a picture on a tablet. |
 | `/backup` | Your settings as one line, for the `COURT_SETTINGS` variable. |
 | `/id` | Your chat ID. |
@@ -64,6 +65,17 @@ A one-off date that is already open is booked on the PC's next run (21:55 that n
 ## Your PC's dot
 
 The menu card's banner says **Court Booker** with a dot for your PC: green **awake**, amber **asleep**, red **offline**. While you are signed in to Windows, the booker's "PC link" task tells the bot once a minute that the PC is awake (`node book.js --link`). When that stops for 3 minutes the PC counts as asleep; after a day and a half-hour without a word (so it missed its nightly run), as offline. The newest menu card changes its dot by itself when this changes.
+
+## Waking your PC
+
+While the dot is amber or red, the menu has a **Wake my PC** button (and there is `/wake`). It sends a Wake-on-LAN "magic packet" over the internet: six `FF` bytes and then your PC's network card address sixteen times, by UDP to your home's public address. Your router passes it on to the PC, and the sleeping network card wakes the PC. When the PC answers, the dot turns green by itself.
+
+- **Where home is:** the address your PC's own signed pings come from (Railway's `X-Real-IP`). It is learned on the first ping and follows your home if your internet provider changes the address. Nothing is sent until the PC has been in touch once.
+- **What it needs:**
+  - On the PC, the network card allowed to wake it, with only magic packets (Windows, as administrator): `powercfg /deviceenablewake "<card name>"` and **Wake on Pattern Match** off in the card's advanced settings.
+  - On the router, a fixed address for the PC (a DHCP reservation) and a port forward: UDP, an outside port of your choice (for example `40009`) to port `9` on the PC.
+  - On Railway, `WAKE_MAC` (the card's address) and `WAKE_PORT` (the outside port).
+- **What it can't do:** wake a PC that is shut down, or one behind a provider that shares one public address between many homes (then no port forward is possible). The packet carries no command and no data, and nothing on the PC listens on that port.
 
 ## The pictures
 
@@ -96,6 +108,8 @@ If Telegram ever refuses a picture, the message goes out as plain text instead.
 | `RELEASE_TIME` | No | When the venue releases a new day. Default `22:00`. |
 | `DAYS_AHEAD` | No | How many days ahead it releases. Default `7`. |
 | `DATA_DIR` | No | Where settings are kept. Default: the volume, or `/data`. |
+| `WAKE_MAC` | To wake your PC | The PC's network card address, for example `44:AF:28:7A:1A:5C` (`Get-NetAdapter` on the PC). |
+| `WAKE_PORT` | To wake your PC | The outside port your router forwards to the PC's port 9 (UDP). Default `9`. |
 | `PORT` | No | Railway sets this. Default `8080`. |
 
 ## For developers
@@ -112,6 +126,7 @@ lib/messages.js   the words
 lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /agent/ping, POST /agent/result),
                   and the public banner pages for /wide
 lib/ui.js         the tap-through screens and their buttons
+lib/wake.js       the Wake-on-LAN magic packet, and where it may go
 lib/telegram.js   Telegram Bot API client
 lib/store.js      the settings file
 assets/           the banners

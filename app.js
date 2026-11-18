@@ -12,8 +12,9 @@ const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cle
 const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf } = require('./lib/schedule');
 const M = require('./lib/messages');
 const UI = require('./lib/ui');
+const { readMac, publicIPv4, sendWake } = require('./lib/wake');
 
-const VERSION = '2.1';
+const VERSION = '2.2';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -72,7 +73,7 @@ function cleanResult(raw) {
 function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, once: [], order: [1, 2, 3, 4, 5, 6], paused: false,
-    results: {}, sent: {}, pics: {}, lastSeen: null,
+    results: {}, sent: {}, pics: {}, lastSeen: null, home: null,
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -91,6 +92,8 @@ function loadState(raw, env = {}) {
         }
       }
       if (typeof raw.lastSeen === 'number') state.lastSeen = raw.lastSeen;
+      const h = raw.home;                                         // where your PC last called from, for waking it
+      if (h && publicIPv4(h.ip) && typeof h.at === 'number') state.home = { ip: h.ip, at: h.at };
     }
     for (const kind of KINDS) {                                   // what Telegram calls each picture, once it has it
       const p = raw.pics && raw.pics[kind];
@@ -114,8 +117,9 @@ function readBackup(text) {
   } catch { return null; }
 }
 
-// `linked` says whether a PC can reach the bot (AGENT_TOKEN is set).
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true }) {
+// `linked` says whether a PC can reach the bot (AGENT_TOKEN is set). `wake` sends the
+// magic packet (lib/wake.js), and is swapped out in tests.
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake }) {
   const fromVariable = readBackup(env.COURT_SETTINGS);
   const state = loadState(store.load() ?? fromVariable, env);
   const variableLine = fromVariable ? backupLine(loadState(fromVariable, env)) : null;
@@ -177,6 +181,38 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
   const homeKind = () => `home-${pcState()}`;
 
+  // ---------- waking your PC (lib/wake.js) ----------
+  // Needs WAKE_MAC (the PC's network card) and a port forward on your router from WAKE_PORT to
+  // the PC. The address comes from your PC's own signed requests, so it follows your home's
+  // address when your internet provider changes it.
+  const wakeMac = readMac(env.WAKE_MAC);
+  const wakePort = intIn(env.WAKE_PORT, 1, 65535) ?? 9;
+  let wokeAt = null;                                  // when the last wake-up went (this run only)
+  const wakeState = () => (!wakeMac || !linked ? 'off' : state.home ? 'ready' : 'no-home');
+  function noteHome(from) {
+    const ip = publicIPv4(from && from.ip);
+    if (!ip) return;
+    if (!state.home || state.home.ip !== ip) log(state.home ? 'Your home\'s public address changed.' : 'Learned your home\'s public address, for waking your PC.');
+    state.home = { ip, at: now() };
+  }
+  // The Wake button and /wake. Returns a note for the tap and, when it makes sense, the menu.
+  async function wakePc() {
+    const t = now();
+    if (wakeState() === 'off') return { toast: 'Waking is not set up: add WAKE_MAC on Railway.' };
+    if (!state.home) return { toast: 'I do not know your home address yet. Your PC must be in touch once first.' };
+    if (pcState(t) === 'awake') return { toast: 'Your PC is already awake.', screen: UI.home(ctx()), view: 'h' };
+    if (wokeAt && t - wokeAt < 30000) return { toast: 'Sent a moment ago. Give it a minute.' };
+    try {
+      await wake({ host: state.home.ip, port: wakePort, mac: wakeMac });
+    } catch (err) {
+      log(`Wake-up not sent: ${err.message}`);
+      return { toast: 'The wake-up could not be sent. Try again.' };
+    }
+    wokeAt = t;
+    log('Wake-up sent to your PC.');
+    return { toast: 'Wake-up sent', screen: UI.home(ctx()), view: 'h' };
+  }
+
   // A trial of a wider banner: a text message with the banner as a large link preview (the page
   // at /card/<kind> on this server names the picture). Telegram fetches it from RAILWAY_PUBLIC_DOMAIN.
   const publicHost = String(env.PUBLIC_HOST || env.RAILWAY_PUBLIC_DOMAIN || '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
@@ -185,10 +221,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     : { is_disabled: true });
 
   // ---------- the tap-through screens ----------
-  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked, pc: pcState() });
+  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked, pc: pcState(), wake: wakeState(), wokeAt });
   const statusInfo = () => ({
     version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused,
     linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null, pc: pcState(),
+    wake: wakeState(), wokeAt,
   });
   // The menu cards sent since this start, so a tap, or a change in your PC's state, can redraw
   // them: { kind (banner), wide, caption, keyboard, view ('h' home, 's' status, or null) }.
@@ -313,7 +350,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const fresh = data.startsWith('n:');                                   // on a booking message: keep it, open a new card
     if (fresh) data = data.slice(2);
     let result;
-    try { result = route(data); } catch (e) { log(`Button failed: ${e.message}`); result = { toast: 'That did not work. Send /menu to start again.' }; }
+    try { result = data === 'wk' ? await wakePc() : route(data); } catch (e) { log(`Button failed: ${e.message}`); result = { toast: 'That did not work. Send /menu to start again.' }; }
     await answer(result.toast);
     const wide = typeof q.message.text === 'string';                      // the wide trial card is a text message
     if (result.screen) await show(chat, result.screen, fresh ? null : q.message.message_id, { view: result.view || null, wide: wide && !fresh });
@@ -322,9 +359,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // ---------- your PC ----------
   // The PC asks what to book. Asking counts as checking in; before a release it also brings a
   // heads-up card, once per release.
-  function jobsForAgent() {
+  function jobsForAgent(from = {}) {
     const t = now();
     state.lastSeen = t;
+    noteHome(from);
     const c = cfg();
     const jobs = state.paused || owner() === null ? [] : jobsFor(t, c, state.results);
     const coming = jobs.filter(j => j.releaseAt > t && j.releaseAt - t <= HEADS_UP_MS);
@@ -344,8 +382,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
 
   // The PC says it is awake: every minute from `node book.js --link`, which runs while you are
   // signed in to Windows. That is all the dot on the menu banner goes on.
-  function pingFromAgent() {
+  function pingFromAgent(from = {}) {
     state.lastSeen = now();
+    noteHome(from);
     save();
     return { ok: true };
   }
@@ -408,6 +447,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       case 'wide':                                   // the menu with a wider banner, as a trial
         if (!publicHost) { await say(chat, 'The wide card needs this server\'s public address (RAILWAY_PUBLIC_DOMAIN).'); break; }
         await show(chat, UI.home(ctx()), null, { view: 'h', wide: true }); break;
+
+      case 'wake': {                                 // the Wake button, typed
+        const r = await wakePc();
+        if (r.screen) await show(chat, r.screen, null, { view: 'h' });
+        else await say(chat, M.esc(r.toast));
+        break;
+      }
 
       case 'help':
         await say(chat, M.HELP); break;
@@ -564,7 +610,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // A banner by name, for the public /banner and /card pages (the wide trial).
   const picture = kind => (pictures && KINDS.includes(kind) ? pictures[kind] : null);
 
-  return { handleUpdate, tick, msToNext, announce, jobsForAgent, pingFromAgent, resultFromAgent, picture, pcState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
+  return { handleUpdate, tick, msToNext, announce, jobsForAgent, pingFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
 }
 
 module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, cleanResult, intIn, VERSION, KINDS };
