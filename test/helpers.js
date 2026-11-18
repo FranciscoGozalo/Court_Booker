@@ -12,11 +12,9 @@ function refuse(tg, photo) {
   else if (typeof photo === 'string' && tg.staleIds.has(photo)) message = 'Bad Request: wrong file identifier/HTTP URL specified';
   if (message) { const e = new Error(message); e.code = 400; throw e; }
 }
-// Two tiny stand-in pictures, as the app loads them from assets/.
-const PICTURES = {
-  wait: { buf: Buffer.from('waiting picture'), name: 'banner-wait.jpg', hash: 'hash-wait' },
-  open: { buf: Buffer.from('open picture'), name: 'banner-open.jpg', hash: 'hash-open' },
-};
+// Tiny stand-ins for the banner pictures, as the app loads them from assets/.
+const PICTURES = Object.fromEntries(['home-awake', 'home-asleep', 'home-offline', 'booked', 'missed']
+  .map(k => [k, { buf: Buffer.from(`${k} picture`), name: `banner-${k}.jpg`, hash: `hash-${k}` }]));
 
 function fakeTelegram(clock) {
   let nextId = 100;

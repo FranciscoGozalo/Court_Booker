@@ -82,6 +82,31 @@ test('requests signed with the PC key are let in; anything else is not', async (
   });
 });
 
+test('the PC pings to say it is awake; only it may', async () => {
+  let pings = 0;
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onPing: () => { pings++; return {}; } }, async base => {
+    assert.equal((await fetch(`${base}/agent/ping`, { method: 'POST', body: '{}' })).status, 401);
+    const res = await fetch(`${base}/agent/ping`, { method: 'POST', headers: auth, body: '{}' });
+    assert.deepEqual(await res.json(), { ok: true });
+    assert.equal(pings, 1);
+  });
+});
+
+test('the banner pictures and their preview pages are open to all, and nothing else is', async () => {
+  const pics = { 'home-awake': { buf: Buffer.from('jpeg bytes'), hash: 'abc' } };
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), picture: k => pics[k] || null }, async base => {
+    const img = await fetch(`${base}/banner/home-awake.jpg`);
+    assert.equal(img.status, 200);
+    assert.equal(img.headers.get('content-type'), 'image/jpeg');
+    assert.equal(Buffer.from(await img.arrayBuffer()).toString(), 'jpeg bytes');
+    const page = await fetch(`${base}/card/home-awake`, { headers: { 'x-forwarded-host': 'bot.example.app' } });
+    assert.match(await page.text(), /<meta property="og:image" content="https:\/\/bot\.example\.app\/banner\/home-awake\.jpg\?v=abc">/);
+    assert.equal((await fetch(`${base}/banner/nothing.jpg`)).status, 404);
+    assert.equal((await fetch(`${base}/card/home-awake.jpg`)).status, 401);          // not a page: falls through to the locked part
+    assert.equal((await fetch(`${base}/banner/../agent/jobs`)).status, 401);
+  });
+});
+
 test('the public key can be given as one line of base64 or as PEM, and must be ed25519', () => {
   const { publicKey } = crypto.generateKeyPairSync('ed25519');
   assert.equal(readPublicKey(publicKey.export({ type: 'spki', format: 'pem' })).asymmetricKeyType, 'ed25519');

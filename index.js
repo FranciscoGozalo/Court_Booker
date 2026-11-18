@@ -64,12 +64,12 @@ async function main() {
   const linked = !!(agentToken || publicKey);
   const app = createApp({ tg, store, log, env: process.env, linked });
   log(`Settings file: ${store.file}`);
-  if (!app.hasPictures) log('The banner pictures are missing (assets/banner-wait.jpg and banner-open.jpg), so cards will come as plain text.');
+  if (!app.hasPictures) log('Some banner pictures are missing from assets/ (see art/make-banners.cjs), so cards will come as plain text.');
 
   // The endpoint your PC talks to. Also answers a plain /health, which lets Railway give the
   // service a public domain.
   if (linked) {
-    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, token: agentToken, publicKey, log });
+    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, picture: app.picture, token: agentToken, publicKey, log });
     const port = Number(process.env.PORT) || 8080;
     server.listen(port, () => log(`Listening for your PC on port ${port} (${[publicKey && 'signed requests', agentToken && 'AGENT_TOKEN'].filter(Boolean).join(' or ')}).`));
     server.on('error', e => log(`The endpoint for your PC could not start: ${e.message}`));

@@ -13,19 +13,24 @@ const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf } = require('./lib/
 const M = require('./lib/messages');
 const UI = require('./lib/ui');
 
-const VERSION = '2.0';
+const VERSION = '2.1';
 const STATE_VERSION = 4;
+// Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
+const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
+const OFFLINE_MS = 24.5 * 3600 * 1000;     // not heard from since before last night's run: off, or not waking
 const SENT_KEEP_MS = 3 * 86400000;
 const RESULTS_KEEP_MS = 60 * 86400000;
 const MAX_AHEAD_DAYS = 90;
 const HEADS_UP_MS = 30 * 60 * 1000;   // the heads-up card only goes out when the PC checks in this close to a release
 const GONE = ['test', 'free', 'signin', 'style', 'lead', 'warn', 'go', 'code'];   // link-alert commands from version 1
 
-// The two banner pictures: the court before booking opens (heads-up), and with the
-// floodlights on (booked). Each carries a fingerprint, so a changed file is uploaded afresh.
+// The banner pictures (made by art/make-banners.cjs): the menu card in three versions, one for
+// each state of your PC (the coloured dot), and one each for a court booked and not booked.
+// Each carries a fingerprint, so a changed file is uploaded afresh.
+const KINDS = ['home-awake', 'home-asleep', 'home-offline', 'booked', 'missed'];
 function loadPictures(dir = path.join(__dirname, 'assets')) {
   const out = {};
-  for (const kind of ['wait', 'open']) {
+  for (const kind of KINDS) {
     const name = `banner-${kind}.jpg`;
     let buf;
     try { buf = fs.readFileSync(path.join(dir, name)); } catch { return null; }
@@ -87,7 +92,7 @@ function loadState(raw, env = {}) {
       }
       if (typeof raw.lastSeen === 'number') state.lastSeen = raw.lastSeen;
     }
-    for (const kind of ['wait', 'open']) {                       // what Telegram calls each picture, once it has it
+    for (const kind of KINDS) {                                   // what Telegram calls each picture, once it has it
       const p = raw.pics && raw.pics[kind];
       if (p && typeof p.hash === 'string' && typeof p.id === 'string') state.pics[kind] = { hash: p.hash, id: p.id };
     }
@@ -134,24 +139,29 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // A card is a banner picture with the words as its caption. A picture must never cost a
   // message, so whatever Telegram refuses about one falls back to plain text.
   const transient = err => !err.code || err.code === 429 || err.code >= 500;
+  const notModified = err => /not modified/i.test((err && err.message) || '');
+  // A picture goes to Telegram as the id it gave last time, or as the file the first time (or
+  // when Telegram no longer knows the id).
+  async function withPicture(kind, fn) {
+    const p = pictures[kind], saved = state.pics[kind];
+    const id = saved && saved.hash === p.hash ? saved.id : null;
+    const file = { buf: p.buf, name: p.name };
+    let sent;
+    try { sent = await fn(id || file); } catch (err) {
+      if (!id || transient(err) || notModified(err)) throw err;
+      delete state.pics[kind];
+      sent = await fn(file);
+    }
+    const sizes = sent && sent.photo;
+    const got = Array.isArray(sizes) && sizes.length ? sizes[sizes.length - 1].file_id : null;
+    if (got && got !== id) { state.pics[kind] = { hash: p.hash, id: got }; save(); }
+    return sent;
+  }
   async function sendCard(chat, kind, caption, keyboard = null) {
     const markup = keyboard ? { reply_markup: keyboard } : {};
-    const p = pictures && pictures[kind];
-    if (!p) return say(chat, caption, markup);
-    const known = state.pics[kind];
-    const extra = { caption, parse_mode: 'HTML', ...markup };
+    if (!pictures || !pictures[kind]) return say(chat, caption, markup);
     try {
-      let sent;
-      const useId = known && known.hash === p.hash ? known.id : null;
-      try { sent = await tg.sendPhoto(chat, useId || { buf: p.buf, name: p.name }, extra); } catch (err) {
-        if (!useId || transient(err)) throw err;
-        delete state.pics[kind];                                   // the saved name for the picture no longer works: upload it again
-        sent = await tg.sendPhoto(chat, { buf: p.buf, name: p.name }, extra);
-      }
-      const sizes = sent && sent.photo;
-      const id = Array.isArray(sizes) && sizes.length ? sizes[sizes.length - 1].file_id : null;
-      if (id) { state.pics[kind] = { hash: p.hash, id }; save(); }
-      return sent;
+      return await withPicture(kind, photo => tg.sendPhoto(chat, photo, { caption, parse_mode: 'HTML', ...markup }));
     } catch (err) {
       if (transient(err)) throw err;
       log(`Telegram would not take the picture (${err.message}). Sending plain text.`);
@@ -159,24 +169,80 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
   }
 
+  // ---------- your PC's state: the dot on the menu banner ----------
+  function pcState(t = now()) {
+    if (!linked || !state.lastSeen) return 'offline';
+    const age = t - state.lastSeen;
+    return age <= AWAKE_MS ? 'awake' : age <= OFFLINE_MS ? 'asleep' : 'offline';
+  }
+  const homeKind = () => `home-${pcState()}`;
+
+  // A trial of a wider banner: a text message with the banner as a large link preview (the page
+  // at /card/<kind> on this server names the picture). Telegram fetches it from RAILWAY_PUBLIC_DOMAIN.
+  const publicHost = String(env.PUBLIC_HOST || env.RAILWAY_PUBLIC_DOMAIN || '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  const previewOf = kind => (publicHost && pictures && pictures[kind]
+    ? { url: `https://${publicHost}/card/${kind}?v=${pictures[kind].hash}`, prefer_large_media: true, show_above_text: true }
+    : { is_disabled: true });
+
   // ---------- the tap-through screens ----------
-  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked });
+  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked, pc: pcState() });
   const statusInfo = () => ({
     version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused,
-    linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null,
+    linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null, pc: pcState(),
   });
-  // Shows a screen: by changing the card the button was on, or as a new card.
-  async function show(chat, scr, messageId = null) {
+  // The menu cards sent since this start, so a tap, or a change in your PC's state, can redraw
+  // them: { kind (banner), wide, caption, keyboard, view ('h' home, 's' status, or null) }.
+  const cards = new Map();
+  const newest = new Map();                 // chat -> id of the newest menu card
+  function track(chat, id, card, isNew) {
+    if (!id) return;
+    cards.set(`${chat}:${id}`, card);
+    if (cards.size > 100) cards.delete(cards.keys().next().value);
+    if (isNew) newest.set(chat, id);
+  }
+  // Redraws a card where it is: just the words when its banner is still right, otherwise both.
+  async function drawOn(chat, id, card) {
+    const was = cards.get(`${chat}:${id}`);
+    const extra = { parse_mode: 'HTML', reply_markup: card.keyboard };
+    try {
+      if (card.wide) await tg.edit(chat, id, card.caption, { ...extra, link_preview_options: previewOf(card.kind) });
+      else if ((!was || was.kind !== card.kind) && pictures && pictures[card.kind]) {
+        await withPicture(card.kind, photo => tg.editMedia(chat, id, photo, { caption: card.caption, ...extra }));
+      } else await tg.editCaption(chat, id, card.caption, extra);
+    } catch (err) {
+      if (!notModified(err)) throw err;
+    }
+    track(chat, id, card, false);
+  }
+  // Shows a screen: on the card the button was on, or as a new card.
+  async function show(chat, scr, messageId = null, { view = null, wide = false } = {}) {
+    const card = { kind: homeKind(), wide, caption: scr.caption, keyboard: scr.keyboard, view };
     if (messageId) {
-      try {
-        await tg.editCaption(chat, messageId, scr.caption, { parse_mode: 'HTML', reply_markup: scr.keyboard });
-        return;
-      } catch (err) {
-        if (/not modified/i.test(err.message || '')) return;
-        if (err.code !== 400) throw err;       // e.g. an old text message with no caption: a new card instead
+      try { await drawOn(chat, messageId, card); return; } catch (err) {
+        if (err.code !== 400) throw err;       // e.g. a message Telegram will not change: a new card instead
       }
     }
-    await sendCard(chat, 'wait', scr.caption, scr.keyboard);
+    const sent = wide
+      ? await say(chat, scr.caption, { link_preview_options: previewOf(card.kind), reply_markup: scr.keyboard })
+      : await sendCard(chat, card.kind, scr.caption, scr.keyboard);
+    track(chat, sent && sent.message_id, card, true);
+  }
+  // When your PC wakes or sleeps, the newest menu card gets the new dot (and, on the home and
+  // status screens, the new words).
+  let shownPc = null;
+  async function refreshNewest(t) {
+    const pc = pcState(t);
+    if (pc === shownPc) return;
+    const first = shownPc === null;
+    shownPc = pc;
+    const chat = owner();
+    const id = chat === null ? null : newest.get(chat);
+    const card = id && cards.get(`${chat}:${id}`);
+    if (first || !card || card.kind === `home-${pc}`) return;
+    const scr = card.view === 'h' ? UI.home(ctx()) : card.view === 's' ? UI.status(ctx(), statusInfo()) : card;
+    try { await drawOn(chat, id, { ...card, kind: `home-${pc}`, caption: scr.caption, keyboard: scr.keyboard }); } catch (err) {
+      log(`Could not update the menu card: ${err.message}`);
+    }
   }
 
   const DAY_RE = '(sun|mon|tue|wed|thu|fri|sat)';
@@ -185,7 +251,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     let m;
     const c = ctx();
     if (data === 'noop') return {};
-    if (data === 'h') return { screen: UI.home(c) };
+    if (data === 'h') return { screen: UI.home(c), view: 'h' };
     if (data === 'b') return { screen: UI.calendar(c) };
     if ((m = /^cal:(\d{4})(\d{2})$/.exec(data))) return { screen: UI.calendar(c, civil(+m[1], +m[2], 1)) };
     if ((m = /^d:(\d{8})$/.exec(data))) return { screen: UI.times(c, UI.fromD8(m[1])) };
@@ -228,13 +294,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if ((m = /^o:([1-6]{1,6})$/.exec(data)) && new Set(m[1]).size === m[1].length) return { screen: UI.order(c, m[1]) };
     if ((m = /^os:([1-6]{1,6})$/.exec(data)) && new Set(m[1]).size === m[1].length) {
       state.order = parseOrder(m[1].split('').join(' ')); save();
-      return { screen: UI.home(ctx()), toast: `Court order: ${state.order.join(', ')}` };
+      return { screen: UI.home(ctx()), view: 'h', toast: `Court order: ${state.order.join(', ')}` };
     }
     if (data === 'p') {
       state.paused = !state.paused; save();
-      return { screen: UI.home(ctx()), toast: state.paused ? 'Paused: nothing will be booked' : 'Booking is on' };
+      return { screen: UI.home(ctx()), view: 'h', toast: state.paused ? 'Paused: nothing will be booked' : 'Booking is on' };
     }
-    if (data === 's') return { screen: UI.status(c, statusInfo()) };
+    if (data === 's') return { screen: UI.status(c, statusInfo()), view: 's' };
     return { toast: 'That button is out of date. Send /menu.' };
   }
 
@@ -249,7 +315,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     let result;
     try { result = route(data); } catch (e) { log(`Button failed: ${e.message}`); result = { toast: 'That did not work. Send /menu to start again.' }; }
     await answer(result.toast);
-    if (result.screen) await show(chat, result.screen, fresh ? null : q.message.message_id);
+    const wide = typeof q.message.text === 'string';                      // the wide trial card is a text message
+    if (result.screen) await show(chat, result.screen, fresh ? null : q.message.message_id, { view: result.view || null, wide: wide && !fresh });
   }
 
   // ---------- your PC ----------
@@ -265,7 +332,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const key = `ready:${coming[0].releaseAt}`;
       if (!state.sent[key]) {
         state.sent[key] = t;
-        sendCard(owner(), 'wait', M.headsUp(c, coming)).catch(e => { delete state.sent[key]; log(`Heads-up not sent: ${e.message}`); });
+        sendCard(owner(), 'home-awake', M.headsUp(c, coming)).catch(e => { delete state.sent[key]; log(`Heads-up not sent: ${e.message}`); });
       }
     }
     save();
@@ -273,6 +340,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       jobs: jobs.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end, hours: j.hours, releaseAt: j.releaseAt })),
       order: c.order, releaseMin, daysAhead,
     };
+  }
+
+  // The PC says it is awake: every minute from `node book.js --link`, which runs while you are
+  // signed in to Windows. That is all the dot on the menu banner goes on.
+  function pingFromAgent() {
+    state.lastSeen = now();
+    save();
+    return { ok: true };
   }
 
   // The PC says what happened. The message goes out first: if Telegram fails, the PC is told
@@ -285,8 +360,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const same = prev && prev.status === r.status && prev.court === r.court;
     const chat = owner();
     if (!same && chat !== null) {
-      if (r.status === 'booked') await sendCard(chat, 'open', M.bookedCaption(r), UI.afterBooked());
-      else await sendCard(chat, 'wait', M.failedText(r), UI.afterFailed());
+      if (r.status === 'booked') await sendCard(chat, 'booked', M.bookedCaption(r), UI.afterBooked());
+      else await sendCard(chat, 'missed', M.failedText(r), UI.afterFailed());
     }
     state.results[r.id] = { ...r, at: now() };
     for (const k of Object.keys(state.results)) if (now() - state.results[k].at > RESULTS_KEEP_MS) delete state.results[k];
@@ -314,7 +389,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       state.owner = chat; save();
       log('Owner set by /start');
       await say(chat, `This bot is now yours, and it answers only you.\nTo lock that in for good, add the variable TELEGRAM_CHAT_ID = <code>${chat}</code> in Railway.${keepNote()}`);
-      await show(chat, UI.home(ctx()));
+      await show(chat, UI.home(ctx()), null, { view: 'h' });
       return;
     }
     if (chat !== owner()) {
@@ -328,7 +403,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     switch (cmd) {
       case 'start':
       case 'menu':
-        await show(chat, UI.home(ctx())); break;
+        await show(chat, UI.home(ctx()), null, { view: 'h' }); break;
+
+      case 'wide':                                   // the menu with a wider banner, as a trial
+        if (!publicHost) { await say(chat, 'The wide card needs this server\'s public address (RAILWAY_PUBLIC_DOMAIN).'); break; }
+        await show(chat, UI.home(ctx()), null, { view: 'h', wide: true }); break;
 
       case 'help':
         await say(chat, M.HELP); break;
@@ -343,7 +422,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         await say(chat, next()); break;
 
       case 'status':
-        await show(chat, UI.status(ctx(), statusInfo())); break;
+        await show(chat, UI.status(ctx(), statusInfo()), null, { view: 's' }); break;
 
       case 'set': {
         if (!args.length) { await show(chat, UI.weekly(ctx())); break; }
@@ -445,6 +524,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const t = now(), today = todayCivil(t);
       const pastOnce = state.once.filter(o => civilOf(o.date) < today);
       if (pastOnce.length) { state.once = state.once.filter(o => civilOf(o.date) >= today); save(); }
+      await refreshNewest(t);
       const chat = owner();
       if (chat === null || state.paused || !linked) return;
       const rel = missingFor(t, cfg(), state.lastSeen);
@@ -452,7 +532,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const key = `missing:${rel.releaseAt}`;
       if (state.sent[key] || (retryAt[key] && t < retryAt[key])) return;
       try {
-        await sendCard(chat, 'wait', M.missingText(cfg(), rel), UI.afterMissing());
+        await sendCard(chat, 'home-offline', M.missingText(cfg(), rel), UI.afterMissing());
         state.sent[key] = t;
         for (const k of Object.keys(state.sent)) if (t - state.sent[k] > SENT_KEEP_MS) delete state.sent[k];
         save();
@@ -481,7 +561,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       .catch(e => log(`Start-up note not sent: ${e.message}`));
   }
 
-  return { handleUpdate, tick, msToNext, announce, jobsForAgent, resultFromAgent, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
+  // A banner by name, for the public /banner and /card pages (the wide trial).
+  const picture = kind => (pictures && KINDS.includes(kind) ? pictures[kind] : null);
+
+  return { handleUpdate, tick, msToNext, announce, jobsForAgent, pingFromAgent, resultFromAgent, picture, pcState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
 }
 
-module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, cleanResult, intIn, VERSION };
+module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, cleanResult, intIn, VERSION, KINDS };

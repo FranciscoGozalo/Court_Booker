@@ -15,10 +15,10 @@ Kelvingrove opens each day 7 days ahead at 22:00. So a Thursday is booked on the
 
 | UK time | What happens |
 | --- | --- |
-| 21:55 | Your PC wakes, signs in and checks in with the bot. You get a card on the "Court release" banner: what it is about to book. |
+| 21:55 | Your PC wakes, signs in and checks in with the bot. You get a card with the green "PC awake" dot: what it is about to book. |
 | 21:58 | Only if your PC has **not** checked in: a warning, so you can book by hand. |
 | 22:00 | The PC books the first free court in your order for the whole slot. |
-| 22:00:10 or so | A card on the "Booking open" banner: **Booked · Court 3**, the date and time, and the gate code. If nothing was free, a message saying so. |
+| 22:00:10 or so | A card on the "Court booked" banner: **Booked · Court 3**, the date and time, and the gate code. If nothing was free, a card on the "Not booked" banner saying why. |
 
 A one-off date that is already open is booked on the PC's next run (21:55 that night), or straight away if you start the booker on the PC by hand.
 
@@ -26,6 +26,7 @@ A one-off date that is already open is booked on the PC's next run (21:55 that n
 
 | Command | What it does |
 | --- | --- |
+| `/menu` | Buttons for everything below: book a date from a calendar, set weekly days, see and remove bookings, court order, pause, status. Each tap changes the same card. |
 | `/set thu 19:00 2h` | Book Thursdays at 19:00 for two hours, every week. `1h` or `2h`. Also understands `7pm` and `19:00-21:00`. |
 | `/off thu` | Stop Thursdays. `/off all` clears every weekly booking. |
 | `/book 25 nov 19:00 2h` | Book one date. Also `25/11`, `wed` (the coming Wednesday), `tomorrow`, `2026-11-25`. |
@@ -33,7 +34,8 @@ A one-off date that is already open is booked on the PC's next run (21:55 that n
 | `/plan` | Your weekly and one-off bookings, how each stands, and the next booking run. |
 | `/order 3 4 5 2 1 6` | Which courts to try first. |
 | `/pause`, `/resume` | Stop and restart booking. |
-| `/status` | Clock check, version, when your PC was last in touch, and whether settings are kept. |
+| `/status` | Clock check, version, your PC's state and when it was last in touch, and whether settings are kept. |
+| `/wide` | A trial: the menu with the banner as a large link preview, which Telegram may draw wider than a picture on a tablet. |
 | `/backup` | Your settings as one line, for the `COURT_SETTINGS` variable. |
 | `/id` | Your chat ID. |
 
@@ -59,22 +61,34 @@ A one-off date that is already open is booked on the PC's next run (21:55 that n
 
    From then on the PC books what the bot tells it, instead of `BOOK_DAYS`. See that repository's README for the rest of the PC setup.
 
+## Your PC's dot
+
+The menu card's banner says **Court Booker** with a dot for your PC: green **awake**, amber **asleep**, red **offline**. While you are signed in to Windows, the booker's "PC link" task tells the bot once a minute that the PC is awake (`node book.js --link`). When that stops for 3 minutes the PC counts as asleep; after a day and a half-hour without a word (so it missed its nightly run), as offline. The newest menu card changes its dot by itself when this changes.
+
 ## The pictures
 
-The cards use the two banners in `assets/`: `banner-wait.jpg` ("Court release", floodlights off) for the heads-up, and `banner-open.jpg` ("Booking open", floodlights on) for a booking made. They are made from the pictures in `art/`:
+The banners in `assets/` are made from the two pictures in `art/` (the court at night, and with the floodlights on):
+
+| Banner | Used for |
+| --- | --- |
+| `banner-home-awake.jpg`, `-asleep`, `-offline` | "Court Booker", with your PC's dot: the menu, the heads-up, the PC-missing warning |
+| `banner-booked.jpg` | "Court booked": a booking made, with the gate code |
+| `banner-missed.jpg` | "Not booked" |
+
+To change the words or a picture, edit `art/make-banners.cjs` and run it with Chrome and the PC booker's `selenium-webdriver`:
 
 ```
-NODE_PATH=$(npm root -g) node art/make-banners.cjs
+NODE_PATH="<kelvingrove-court-booker folder>/node_modules" node art/make-banners.cjs
 ```
 
-That needs Playwright with Chrome and the Inter typeface. If Telegram ever refuses a picture, the message goes out as plain text instead.
+If Telegram ever refuses a picture, the message goes out as plain text instead.
 
 ## Variables
 
 | Variable | Needed | What it is |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Yes | The token from @BotFather. |
-| `AGENT_TOKEN` | Yes, to link your PC | A long random line, the same here and in the PC's `.env`. |
+| `AGENT_PUBLIC_KEY` | Yes, to link your PC | The public key the PC prints with `node book.js --make-key`. (Or `AGENT_TOKEN`: a long random line, the same here and in the PC's `.env`.) |
 | `TELEGRAM_CHAT_ID` | Recommended | Your chat ID. Locks the bot to you. |
 | `COURT_SETTINGS` | If no volume | The line from `/backup`. |
 | `COURT_PLAN` | No | Weekly bookings to start from, for example `thu 19:00 2h, fri 19:00 2h`. |
@@ -95,10 +109,12 @@ lib/time.js       UK-time date maths
 lib/plan.js       reading what you type: days, dates, times, court order
 lib/schedule.js   which days open when, and what the PC should book now
 lib/messages.js   the words
-lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /agent/result)
+lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /agent/ping, POST /agent/result),
+                  and the public banner pages for /wide
+lib/ui.js         the tap-through screens and their buttons
 lib/telegram.js   Telegram Bot API client
 lib/store.js      the settings file
-assets/           the two banners
+assets/           the banners
 art/              the pictures the banners are made from, and the script that makes them
 ```
 

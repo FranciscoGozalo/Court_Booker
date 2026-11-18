@@ -123,7 +123,7 @@ test('/set, /book, /plan and /cancel', async () => {
   assert.match(tg.last().text, /old link alerts/);
 });
 
-test('the PC checking in gets its jobs and a heads-up card on the wait banner, once', async () => {
+test('the PC checking in gets its jobs and a heads-up card on the awake banner, once', async () => {
   const { app, tg, clock } = makeApp(`${TUE}T21:55:00Z`, { state: { owner: OWNER, plan: { tue: { start: 960, hours: 2 } }, order: [3, 4, 5, 2, 1, 6] } });
   const got = app.jobsForAgent();
   assert.deepEqual(got.jobs.map(j => j.id), ['2026-11-24@16:00']);
@@ -131,7 +131,7 @@ test('the PC checking in gets its jobs and a heads-up card on the wait banner, o
   await new Promise(r => setImmediate(r));
   const card = tg.last();
   assert.equal(card.method, 'photo');
-  assert.equal(card.photo, 'upload:banner-wait.jpg');
+  assert.equal(card.photo, 'upload:banner-home-awake.jpg');
   assert.match(card.text, /Booking at 22:00\n<b>Tue 24 Nov · 16:00–18:00<\/b>/);
   clock.t += 30000;
   app.jobsForAgent();                                                             // asking again: no second card
@@ -143,13 +143,13 @@ test('the PC checking in gets its jobs and a heads-up card on the wait banner, o
   assert.equal(tg.calls.length, 1);
 });
 
-test('a booking result arrives as a card on the open banner with the gate code', async () => {
+test('a booking result arrives as a card on the booked banner with the gate code', async () => {
   const { app, tg } = makeApp(`${TUE}T22:00:10Z`);
   const r = await app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 });
   assert.deepEqual(r, { ok: true });
   const card = tg.last();
   assert.equal(card.method, 'photo');
-  assert.equal(card.photo, 'upload:banner-open.jpg');
+  assert.equal(card.photo, 'upload:banner-booked.jpg');
   assert.equal(card.text, '<b>Booked · Court 3</b>\nTue 24 Nov · 16:00–18:00\nGate code: <code>2433</code>  (tap to copy)');
   // The same result again (the PC retrying) is not sent twice; a later failure does not undo it.
   await app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 });
@@ -158,15 +158,15 @@ test('a booking result arrives as a card on the open banner with the gate code',
   assert.equal(app.state.results['2026-11-24@16:00'].court, '3');
   // The second time Telegram is given the picture's id, not the file.
   await app.resultFromAgent({ id: '2026-11-25@19:00', status: 'booked', court: 4, end: 1260 });
-  assert.equal(tg.last().photo, 'id:banner-open.jpg');
+  assert.equal(tg.last().photo, 'id:banner-booked.jpg');
   assert.match(tg.last().text, /Gate code: not shown/);
 });
 
-test('a failed booking is a card on the wait banner saying why; nonsense is refused', async () => {
+test('a failed booking is a card on the not-booked banner saying why; nonsense is refused', async () => {
   const { app, tg } = makeApp(`${TUE}T22:05:00Z`);
   await app.resultFromAgent({ id: '2026-11-24@19:00', status: 'none', end: 1260 });
   assert.equal(tg.last().method, 'photo');
-  assert.equal(tg.last().photo, 'upload:banner-wait.jpg');
+  assert.equal(tg.last().photo, 'upload:banner-missed.jpg');
   assert.deepEqual(tg.last().extra.reply_markup.inline_keyboard[0].map(b => b.callback_data), ['n:b', 'n:h']);
   assert.match(tg.last().text, /Not booked · Tue 24 Nov · 19:00–21:00<\/b>\nNo court was free for the whole slot/);
   assert.equal((await app.resultFromAgent({ id: 'nope', status: 'booked', court: 3 })).ok, false);
@@ -210,14 +210,14 @@ test('paused: the PC is told there is nothing to book', () => {
   assert.deepEqual(app.jobsForAgent().jobs, []);
 });
 
-test('settings saved by version 1 keep the owner, weekly plan, order and pictures', () => {
-  const old = { v: 3, owner: OWNER, plan: { thu: { start: 1140, hours: 2 } }, order: [4, 3, 5, 2, 6, 1], sid: 'x', style: 'card', live: { night: 'x' }, pics: { open: { hash: 'h', id: 'i' } } };
+test('settings saved by version 1 keep the owner, weekly plan and order; old banners are dropped', () => {
+  const old = { v: 3, owner: OWNER, plan: { thu: { start: 1140, hours: 2 } }, order: [4, 3, 5, 2, 6, 1], sid: 'x', style: 'card', live: { night: 'x' }, pics: { open: { hash: 'h', id: 'i' }, booked: { hash: 'h2', id: 'i2' } } };
   const s = loadState(old);
   assert.equal(s.owner, OWNER);
   assert.deepEqual(s.plan, { thu: { start: 1140, hours: 2 } });
   assert.deepEqual(s.order, [4, 3, 5, 2, 6, 1]);
   assert.deepEqual(s.once, []);
-  assert.deepEqual(s.pics.open, { hash: 'h', id: 'i' });
+  assert.deepEqual(s.pics, { booked: { hash: 'h2', id: 'i2' } });     // "open" was a banner of version 2.0
   assert.equal(s.style, undefined);
   assert.match(backupLine(s), /"once":\[\]/);
 });

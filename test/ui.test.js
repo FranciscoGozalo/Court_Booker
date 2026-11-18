@@ -59,8 +59,8 @@ test('booking a date by tapping: menu, calendar, day, time, length, add', async 
   await app.handleUpdate(say(OWNER, '/menu'));
   const menu = tg.last();
   assert.equal(menu.method, 'photo');
-  assert.equal(menu.photo, 'upload:banner-wait.jpg');
-  assert.match(menu.text, /Court booker/);
+  assert.equal(menu.photo, 'upload:banner-home-offline.jpg');                         // no word from the PC yet: red dot
+  assert.match(menu.text, /^<b>Court Booker<\/b>[\s\S]*Your PC has not been in touch yet\.$/);
   const card = menu.id;
   await tap(app, find(menu, 'Book a date').callback_data, card);
   assert.equal(tg.last().method, 'caption');                                          // the same card changes
@@ -155,7 +155,77 @@ test('taps from anyone else are refused, and an old text message gets a new card
   await tap(app, 'p', 5, 999);
   assert.equal(app.state.paused, false);
   assert.equal(tg.answers.at(-1), 'This bot is private.');
-  tg.failEdit = { code: 400, message: 'Bad Request: there is no caption in the message to edit', once: true };
+  // A card from before a restart: its banner is redrawn too, in case your PC's state changed.
   await tap(app, 'h', 7);
+  assert.equal(tg.last().method, 'media');
+  assert.equal(tg.last().id, 7);
+  // One Telegram will not change gets a new card.
+  tg.failMedia = { code: 400, message: 'Bad Request: message to edit not found' };
+  await tap(app, 'h', 8);
   assert.equal(tg.last().method, 'photo');
+});
+
+// ---------- your PC's state ----------
+
+test('the dot follows your PC: awake while it checks in, asleep after, offline after a day', async () => {
+  const { app, tg, clock } = makeApp(`${TUE}T12:00:00Z`);
+  app.pingFromAgent();
+  await app.tick();
+  await app.handleUpdate(say(OWNER, '/menu'));
+  const card = tg.last();
+  assert.equal(card.photo, 'upload:banner-home-awake.jpg');
+  assert.match(card.text, /Your PC is awake\.$/);
+  // Still awake a minute later: no change, so nothing is redrawn.
+  clock.t += 60000; app.pingFromAgent(); await app.tick();
+  assert.equal(tg.calls.length, 1);
+  // It stops checking in (asleep): the menu card gets the amber dot and new words, in place.
+  clock.t += 4 * 60000; await app.tick();
+  assert.equal(tg.last().method, 'media');
+  assert.equal(tg.last().id, card.id);
+  assert.equal(tg.last().photo, 'upload:banner-home-asleep.jpg');
+  assert.match(tg.last().text, /Your PC is asleep \(last in touch today at 12:01\)\. It wakes at 21:55 to book\./);
+  await app.tick();
+  assert.equal(tg.calls.length, 2);                                                  // once, not every tick
+  // Tapping on it now edits only the words: the banner is already right.
+  await tap(app, 'b', card.id);
+  assert.equal(tg.last().method, 'caption');
+  // Over a day without a word: red dot (the card shows the calendar, so only the banner changes).
+  clock.t = at('2026-11-18T12:32:00Z'); await app.tick();
+  assert.equal(tg.last().photo, 'upload:banner-home-offline.jpg');
+  assert.match(tg.last().text, /^<b>Book a date<\/b>/);
+  await app.handleUpdate(say(OWNER, '/menu'));
+  assert.match(tg.last().text, /Your PC has not been in touch since yesterday at 12:01\. It may be off\./);
+  // It wakes: green again.
+  app.pingFromAgent(); await app.tick();
+  assert.equal(tg.last().photo, 'id:banner-home-awake.jpg');                          // Telegram has it already
+  assert.match(tg.last().text, /Your PC is awake\./);
+  assert.equal(app.pcState(), 'awake');
+});
+
+test('booking messages get their own banners, and the heads-up shows the PC awake', async () => {
+  const { app, tg } = makeApp(`${TUE}T22:00:10Z`);
+  await app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 });
+  assert.equal(tg.last().photo, 'upload:banner-booked.jpg');
+  await app.resultFromAgent({ id: '2026-11-24@19:00', status: 'none', end: 1260 });
+  assert.equal(tg.last().photo, 'upload:banner-missed.jpg');
+});
+
+test('the wide trial: the menu as a text message with the banner as a large link preview', async () => {
+  const clock = { t: at(`${TUE}T12:00:00Z`) };
+  const tg = fakeTelegram(clock);
+  const app = createApp({ now: () => clock.t, tg, store: memStore({ owner: OWNER }), pictures: PICTURES, linked: true, env: { RAILWAY_PUBLIC_DOMAIN: 'bot.example.app' } });
+  await app.handleUpdate(say(OWNER, '/wide'));
+  const card = tg.last();
+  assert.equal(card.method, 'send');
+  assert.deepEqual(card.extra.link_preview_options, { url: 'https://bot.example.app/card/home-offline?v=hash-home-offline', prefer_large_media: true, show_above_text: true });
+  // A tap on it edits the text, keeping the preview.
+  await app.handleUpdate({ update_id: 1, callback_query: { id: 'w1', data: 'b', from: { id: OWNER }, message: { message_id: card.id, text: 'x', chat: { id: OWNER, type: 'private' } } } });
+  assert.equal(tg.last().method, 'edit');
+  assert.equal(tg.last().id, card.id);
+  assert.equal(tg.last().extra.link_preview_options.url, 'https://bot.example.app/card/home-offline?v=hash-home-offline');
+  assert.match(tg.last().text, /^<b>Book a date<\/b>/);
+  // Without a public address there is nothing for Telegram to fetch.
+  const { app: plain, tg: tg2 } = makeApp(`${TUE}T12:00:00Z`);
+  await plain.handleUpdate(say(OWNER, '/wide'));
+  assert.match(tg2.last().text, /needs this server's public address/);
 });
