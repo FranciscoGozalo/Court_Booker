@@ -37,7 +37,9 @@ The bot goes no further than that, and here is why. Glasgow Club takes a card pa
 
 Each day opens for booking a week ahead, at midnight. A day that has not opened yet is shown with the time it opens and what is free as it stands.
 
-The bot reads the free courts with a visitor's session, never your login, at most once a minute for a day. If Glasgow Club's site answers with a "checking your browser" page, the bot says so, still hands you the link, and does not ask again for ten minutes. `/status` says when the free courts were last read.
+Glasgow Club's site turns cloud servers away with a "checking your browser" page, as ClubSpark does, so the bot on Railway cannot read the free courts itself. **Your PC reads them** while it is awake: the bot asks on the PC link's ping, the PC makes the two requests any visitor's browser makes (a visitor's session, then the day's sheet; never your login) and passes the sheet on. A day is read at most once a minute, and an answer usually takes a second or two.
+
+If your PC is asleep, the card says so and offers **Wake my PC** (when waking is set up); the link to the sheet is there either way. From ten minutes before a Kelvingrove booking to ten minutes after, nothing is asked of the PC. If the site ever checks visitors from your home connection too, the PC says so and is not asked again for an hour. Nothing, on the bot or the PC, tries to get round such a check. `/status` says when the free courts were last read, and by which way.
 
 ## Commands
 
@@ -152,11 +154,13 @@ lib/plan.js       reading what you type: days, dates, times, court order
 lib/schedule.js   which days open when, and what the PC should book now
 lib/messages.js   the words
 lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /agent/ping, which may wait
-                  for an instruction such as sleep, POST /agent/progress, POST /agent/result),
+                  for an instruction such as sleep or a look at Glasgow Club, POST /agent/look,
+                  POST /agent/progress, POST /agent/result),
                   and the public banner pages for /wide
 lib/ui.js         the tap-through screens and their buttons
 lib/wake.js       the Wake-on-LAN magic packet, and where it may go
-lib/glasgowclub.js  Glasgow Club's free indoor courts, read as a visitor; never books or pays
+lib/glasgowclub.js  Glasgow Club's free indoor courts, read as a visitor (by your PC, or from here
+                  where the site allows it); never books or pays
 lib/telegram.js   Telegram Bot API client
 lib/store.js      the settings file
 assets/           the banners

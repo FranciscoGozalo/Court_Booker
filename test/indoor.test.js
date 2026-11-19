@@ -111,7 +111,7 @@ test('reading a day: a visitor\'s session first, then the sheet, and not again w
   assert.equal(site.calls[1].headers.cookie, 'Jwt=visitor1; SERVERID=web2');           // the visitor's session, nothing of yours
   assert.ok(site.calls[0].signal instanceof AbortSignal);
   assert.equal(site.calls[0].signal, site.calls[1].signal);                           // one time limit for the whole read
-  assert.deepEqual(gc.health(), { ok: true, at: clock.t });
+  assert.deepEqual(gc.health(), { ok: true, at: clock.t, via: 'direct' });
   // Asked again within the minute: what it already knows.
   clock.t += 30000;
   assert.equal(await gc.day('g', TUE), got);
@@ -156,21 +156,23 @@ test('the visitor\'s session: one read for two asks, renewed once when it has ru
   assert.equal(none.calls.length, 1);
 });
 
-test('a "checking your browser" page, or "too many requests", stops all asking for ten minutes; nothing gets round it', async () => {
+test('a "checking your browser" page, or "too many requests", stops all asking for an hour; nothing gets round it', async () => {
   for (const [answer, kind] of [
     [() => html(403, '<html><title>Just a moment...</title></html>'), 'challenge'],
     [() => html(503, '<html><script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script></html>'), 'challenge'],
     [() => new Response('{}', { status: 403, headers: { 'cf-mitigated': 'challenge', 'content-type': 'application/json' } }), 'challenge'],
+    [() => new Response('{"message":"Forbidden"}', { status: 403, headers: { 'content-type': 'application/json' } }), 'challenge'],     // a plain refusal
+    [() => html(403, '<html>Access denied</html>'), 'challenge'],
     [() => new Response('slow down', { status: 429 }), 'limit'],
   ]) {
     const clock = { t: at(`${TUE}T12:00:00Z`) };
     const site = fakeSite([answer(), sheet(TUE, {})]);
     const logs = [];
     const gc = G.createGlasgowClub({ fetchImpl: site.fetchImpl, now: () => clock.t, log: l => logs.push(l) });
-    await assert.rejects(gc.day('g', TUE), e => e.kind === kind, kind);
-    assert.deepEqual(gc.health(), { ok: false, at: clock.t, why: kind });
+    await assert.rejects(gc.day('g', TUE), e => e.kind === kind && e.route === 'direct', kind);
+    assert.deepEqual(gc.health(), { ok: false, at: clock.t, via: 'direct', why: kind });
     const asked = site.calls.length;
-    clock.t += 9 * 60 * 1000;
+    clock.t += 59 * 60 * 1000;
     await assert.rejects(gc.day('g', TUE), e => e.kind === kind);
     await assert.rejects(gc.day('s', '2026-11-18'), e => e.kind === kind);                // the other centre and other days too
     await assert.rejects(gc.day('g', TUE, { fresh: true }), e => e.kind === kind);        // and Refresh
@@ -179,8 +181,10 @@ test('a "checking your browser" page, or "too many requests", stops all asking f
     assert.deepEqual((await gc.day('g', TUE)).slots, []);
     assert.equal(logs.length, 1);
   }
-  assert.match(G.whyText({ kind: 'challenge' }), /checking its visitors[\s\S]*ten minutes/);
-  assert.match(G.whyText({ kind: 'limit' }), /asked too often[\s\S]*ten minutes/);
+  assert.match(G.whyText({ kind: 'challenge' }), /turns this server away[\s\S]*an hour/);
+  assert.match(G.whyText({ kind: 'challenge', route: 'pc' }), /from your home connection[\s\S]*your PC cannot read[\s\S]*an hour/);
+  assert.match(G.whyText({ kind: 'limit' }), /asked too often[\s\S]*an hour/);
+  assert.equal(G.whyText({ kind: 'challenge', say: 'In other words.' }), 'In other words.');
 });
 
 test('a site that does not answer is left alone for half a minute, whichever day is asked for', async () => {
@@ -219,7 +223,58 @@ test('other failures are about the one read: named, and not repeated at once', a
   assert.match(G.whyText({ kind: 'http', message: 'HTTP 500' }), /\(HTTP 500\)/);
   clock.t += 11000;
   assert.deepEqual((await gc.day('g', TUE)).slots, []);
-  assert.deepEqual(gc.health(), { ok: true, at: clock.t });
+  assert.deepEqual(gc.health(), { ok: true, at: clock.t, via: 'direct' });
+});
+
+// What your PC sends for a day (lib/indoor.js in the booker): each court as { n, s }, a slot as
+// [startTime, endTime, bookableFrom, bookableUntil, not open yet, status].
+const fromPc = (date, courts) => Object.entries(courts).map(([n, slots]) => ({ n, s: slots.map(s => [s.startTime, s.endTime, s.bookableFrom, s.bookableUntil, s.isBeforeTimetableSlotBookablePeriod ? 1 : 0, s.status]) }));
+
+test('a sheet passed on by your PC reads exactly as one read from here', () => {
+  const now = at(`${TUE}T12:00:00Z`);
+  const courts = {
+    'Tennis Hall Court 3': [slot(TUE, 18), slot(TUE, 9), slot(TUE, 19, { status: 'Unavailable' })],
+    'Tennis Hall Court 1': [slot(TUE, 18), slot('2026-11-18', 8), slot(TUE, 20, { before: true, from: '2026-11-18T00:00:00Z' })],
+    'Reception': [slot(TUE, 18)],
+  };
+  assert.deepEqual(G.readDay(G.sheetFromPc(fromPc(TUE, courts)), TUE, now), read(TUE, courts, now));
+  assert.deepEqual(G.readDay(G.sheetFromPc([]), TUE, now), { slots: [], listed: 0 });
+  for (const bad of [null, 'x', {}, [null], [{ n: 'Court 1' }], [{ n: 'Court 1', s: [{}] }], Array.from({ length: 61 }, () => ({ n: 'Court 1', s: [] }))]) {
+    assert.throws(() => G.sheetFromPc(bad), e => e.kind === 'odd', JSON.stringify(bad).slice(0, 40));
+  }
+  // Slots that say nothing readable are a sheet that no longer reads, not "nothing free".
+  assert.throws(() => G.readDay(G.sheetFromPc([{ n: 'Tennis Court 1', s: [[null, null, null, null, 0, null]] }]), TUE, now), e => e.kind === 'odd');
+});
+
+test('reading by way of your PC: the same cache, its own back-off, and no request from here', async () => {
+  const clock = { t: at(`${TUE}T12:00:00Z`) };
+  const site = fakeSite([html(403, '<html><title>Just a moment...</title></html>')]);
+  const logs = [];
+  const gc = G.createGlasgowClub({ fetchImpl: site.fetchImpl, now: () => clock.t, log: l => logs.push(l) });
+  const asked = [];
+  const answers = [G.sheetFromPc(fromPc(TUE, { 'Tennis Hall Court 3': [slot(TUE, 18)] })), G.problem('challenge', 'the site is checking its visitors'), G.sheetFromPc([])];
+  const via = async (centre, dateIso) => { asked.push(`${centre.key}:${dateIso}`); const a = answers.shift(); if (a instanceof Error) throw a; return a; };
+  const got = await gc.day('g', TUE, { via });
+  assert.deepEqual(got.slots.map(s => [s.start, s.court]), [[1080, 3]]);
+  assert.deepEqual(gc.health(), { ok: true, at: clock.t, via: 'pc' });
+  assert.equal(await gc.day('g', TUE), got);                                               // known now, whichever way it is asked for
+  assert.deepEqual([asked, site.calls.length], [[`g:${TUE}`], 0]);
+  // The site turns this server away: that stops asking from here, not by way of the PC.
+  await assert.rejects(gc.day('s', TUE), e => e.kind === 'challenge' && e.route === 'direct');
+  const direct = site.calls.length;
+  // And when it turns the PC away, the PC is left alone for an hour, for every day and centre.
+  await assert.rejects(gc.day('s', TUE, { via }), e => e.kind === 'challenge' && e.route === 'pc');
+  assert.deepEqual(gc.health(), { ok: false, at: clock.t, via: 'pc', why: 'challenge' });
+  clock.t += 59 * 60 * 1000;
+  await assert.rejects(gc.day('g', '2026-11-18', { via }), e => e.kind === 'challenge' && e.route === 'pc');
+  assert.equal(asked.length, 2);
+  assert.equal(site.calls.length, direct);
+  clock.t += 2 * 60 * 1000;
+  assert.deepEqual((await gc.day('g', '2026-11-18', { via })).slots, []);
+  // Anything the PC says that is not a known kind of failure is just "odd".
+  await assert.rejects(gc.day('s', '2026-11-19', { via: async () => { throw new Error('boom'); } }), e => e.kind === 'odd' && e.route === 'pc');
+  assert.match(logs.join('\n'), /could not be read by your PC: the site is checking its visitors/);
+  assert.match(logs.join('\n'), /could not be read from here: the site is checking its visitors/);
 });
 
 // ---------- the screens ----------
@@ -432,14 +487,21 @@ test('when Glasgow Club cannot be read the card says why and still carries the l
   assert.ok(buttons(t.tg.last()).filter(b => b.callback_data.startsWith('gd:')).every(b => b.callback_data.startsWith('gd:s:')));
   const card = t.tg.last().id;
   await tap(t.app, 'gd:s:20261120', card);
-  assert.match(t.tg.last().text, /^<b>Scotstoun · Fri 20 Nov<\/b>\nGlasgow Club's site is checking its visitors just now, so I cannot read the free courts\. I will not ask it again for ten minutes\.\nThe sheet itself still opens from the button below\.$/);
+  // The PC is not awake, and the site turns this server away: said as that, with the link.
+  assert.match(t.tg.last().text, /^<b>Scotstoun · Fri 20 Nov<\/b>\nGlasgow Club's site turns this server away, so your PC reads the free courts for me, and your PC is not awake\. Wake it and try again, or open the sheet\.\nThe sheet itself still opens from the button below\.$/);
   assert.equal(find(t.tg.last(), 'Open the sheet').url, `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${FRI}T00:00:00.000Z`);
+  assert.deepEqual(buttons(t.tg.last()).map(b => b.text), ['Try again', 'Open the sheet', 'Back', 'Menu']);       // waking is not set up here, so no Wake button
   // A time tapped on an old card, with the site unreadable: the same card, no crash.
   await tap(t.app, 'gt:s:20261120:1800', card);
-  assert.match(t.tg.last().text, /checking its visitors/);
+  assert.match(t.tg.last().text, /your PC is not awake/);
   // /status says how the last look went.
   await t.app.handleUpdate(say(OWNER, '/status'));
-  assert.match(t.tg.last().text, /\nIndoor courts \(Glasgow Club\): could not be read at 12:00:00 \(its site was checking visitors\)\n/);
+  assert.match(t.tg.last().text, /\nIndoor courts \(Glasgow Club\): could not be read from this server at 12:00:00 \(its site was checking visitors\)\n/);
+  // Any other failure keeps its own words.
+  const slow = makeApp(`${TUE}T12:00:00Z`, { [`g:${FRI}`]: G.problem('timeout', 'aborted') });
+  await slow.app.handleUpdate(say(OWNER, '/gorbals'));
+  await tap(slow.app, 'gd:g:20261120', slow.tg.last().id);
+  assert.match(slow.tg.last().text, /\nGlasgow Club's site did not answer in time\.\n/);
 });
 
 test('days that are no longer on offer, and taps that make no sense, lead back to the list of days', async () => {
@@ -541,7 +603,7 @@ test('Kelvingrove is one tap further on, and everything about it is as before', 
   await t.app.handleUpdate(say(OWNER, '/help'));
   assert.match(t.tg.last().text, /\/gorbals {2}and {2}\/scotstoun/);
   await t.app.handleUpdate(say(OWNER, '/status'));
-  assert.match(t.tg.last().text, /\(version 2\.5\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
+  assert.match(t.tg.last().text, /\(version 2\.6\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
 });
 
 test('the look at Glasgow Club on start-up is said in the log, whichever way it goes, and /status has it', async () => {
@@ -550,8 +612,197 @@ test('the look at Glasgow Club on start-up is said in the log, whichever way it 
   assert.equal(await ok.app.checkIndoor(), true);
   assert.deepEqual(ok.logs, ['Glasgow Club answers from here: Gorbals on Wed 18 Nov has 2 start times with a free court.']);
   await ok.app.handleUpdate(say(OWNER, '/status'));
-  assert.match(ok.tg.last().text, /\nIndoor courts \(Glasgow Club\): last read at 12:00:00\n/);
+  assert.match(ok.tg.last().text, /\nIndoor courts \(Glasgow Club\): last read from this server at 12:00:00\n/);
   const bad = makeApp(`${TUE}T12:00:00Z`, { 'g:2026-11-18': G.problem('challenge', 'x') });
   assert.equal(await bad.app.checkIndoor(), false);
-  assert.match(bad.logs[0], /^Glasgow Club does not answer from here \(challenge\)\./);
+  assert.equal(bad.logs[0], 'Glasgow Club does not answer from here (challenge). Your PC reads its free courts instead, while it is awake.');
+});
+
+// ---------- your PC does the reading ----------
+
+// The bot with the real reader: from here the site answers with a "checking your browser" page
+// (as it does to Railway), so the only way to the sheet is your PC.
+function makePcApp(t0, { pcLookMs = 2000, env = {}, state = {} } = {}) {
+  const clock = { t: at(t0) };
+  const tg = fakeTelegram(clock);
+  const site = fakeSite([]);
+  const fetchImpl = async (url, init) => { site.calls.push({ path: url.replace(G.BASE, ''), headers: (init && init.headers) || {} }); return html(403, '<html><title>Just a moment...</title></html>'); };
+  const logs = [];
+  const glasgow = G.createGlasgowClub({ fetchImpl, now: () => clock.t, log: l => logs.push(l) });
+  const app = createApp({ now: () => clock.t, tg, store: memStore({ owner: OWNER, order: [3, 4, 5, 2, 1, 6], ...state }), pictures: PICTURES, linked: true, glasgow, log: l => logs.push(l), env, pcLookMs });
+  return { app, tg, clock, site, logs };
+}
+const fridayFromPc = () => fromPc(FRI, { 'Tennis Hall Court 1': [slot(FRI, 18)], 'Tennis Hall Court 3': [slot(FRI, 18), slot(FRI, 19)] });
+
+test('while your PC is awake it reads Glasgow Club for the bot: asked on its ping, answered on /agent/look', async () => {
+  const t = makePcApp(`${TUE}T12:00:00Z`);
+  await t.app.pingFromAgent({ ip: '81.2.69.142' });                     // the PC is in touch: awake
+  await t.app.handleUpdate(say(OWNER, '/gorbals'));
+  const card = t.tg.last().id;
+  t.tg.clear();
+  const ping = t.app.pingFromAgent({ ip: '81.2.69.142' }, { wait: 5 });  // the PC's ping, held open for something to do
+  const tapped = tap(t.app, 'gd:g:20261120', card);
+  const order = await ping;
+  assert.deepEqual(Object.keys(order).sort(), ['look', 'ok']);
+  assert.deepEqual([order.look.key, order.look.date], ['g', FRI]);
+  assert.match(order.look.id, /^[0-9a-f]{12}$/);
+  assert.deepEqual(t.app.lookFromAgent({ id: order.look.id, ok: true, sheet: fridayFromPc() }), { ok: true });
+  await tapped;
+  assert.deepEqual(t.tg.calls.map(second), ['Reading Glasgow Club\'s sheet…', 'Free start times, as Glasgow Club showed it at 12:00. Each is one hour. Pick one.']);
+  assert.deepEqual(buttons(t.tg.last()).filter(b => (b.callback_data || '').startsWith('gt:')).map(b => b.text), ['18:00', '19:00']);
+  assert.equal(t.site.calls.length, 0);                                 // nothing was asked of the site from here
+  // The time's screen comes from what the PC read; no second look within the minute.
+  const idle = t.app.pingFromAgent({}, { wait: 0 });
+  await tap(t.app, 'gt:g:20261120:1800', card);
+  assert.match(t.tg.last().text, /^<b>Gorbals · Fri 20 Nov · 18:00–19:00<\/b>\nFree: courts 1 and 3/);
+  assert.deepEqual(await idle, { ok: true });
+  await t.app.handleUpdate(say(OWNER, '/status'));
+  assert.match(t.tg.last().text, /\nIndoor courts \(Glasgow Club\): last read by your PC at 12:00:00\n/);
+  // An answer nobody is waiting for is dropped without fuss.
+  assert.deepEqual(t.app.lookFromAgent({ id: order.look.id, ok: true, sheet: [] }), { ok: true, late: true });
+  assert.deepEqual(t.app.lookFromAgent(null), { ok: true, late: true });
+});
+
+test('a look goes before a request to sleep, and each is handed over once', async () => {
+  const t = makePcApp(`${TUE}T12:00:00Z`);
+  await t.app.pingFromAgent();
+  await t.app.handleUpdate(say(OWNER, '/sleep'));
+  const tapped = tap(t.app, 'gd:s:20261120', 1);
+  await new Promise(r => setTimeout(r, 20));                            // the tap has got as far as asking the PC
+  const first = await t.app.pingFromAgent({}, { wait: 5 });
+  assert.deepEqual([first.look.key, first.look.date, first.sleep], ['s', FRI, undefined]);
+  t.app.lookFromAgent({ id: first.look.id, ok: true, sheet: [] });
+  await tapped;
+  assert.deepEqual(await t.app.pingFromAgent({}, { wait: 5 }), { ok: true, sleep: true });
+  assert.deepEqual(await t.app.pingFromAgent(), { ok: true });
+});
+
+test('your PC does not answer, or is turned away itself: said as that, with the link, and it is not asked again at once', async () => {
+  const t = makePcApp(`${TUE}T12:00:00Z`, { pcLookMs: 30 });
+  await t.app.pingFromAgent();
+  await t.app.handleUpdate(say(OWNER, '/gorbals'));
+  const card = t.tg.last().id;
+  await tap(t.app, 'gd:g:20261120', card);                              // no ping collects it within the 30 ms it gets here
+  assert.match(t.tg.last().text, /^<b>Gorbals · Fri 20 Nov<\/b>\nYour PC did not answer in time, so I could not read Glasgow Club's free courts\.\nThe sheet itself still opens from the button below\.$/);
+  assert.deepEqual(buttons(t.tg.last()).map(b => b.text), ['Try again', 'Open the sheet', 'Back', 'Menu']);
+  assert.deepEqual(await t.app.pingFromAgent(), { ok: true });          // the look that ran out is not handed over later
+  await t.app.handleUpdate(say(OWNER, '/status'));
+  assert.match(t.tg.last().text, /\nIndoor courts \(Glasgow Club\): could not be read by your PC at 12:00:00 \(your PC did not answer in time\)\n/);
+  // For the next half minute another day gets the same answer at once, with no second wait.
+  t.clock.t += 20000;
+  await t.app.pingFromAgent();
+  const waiting = t.app.pingFromAgent({}, { wait: 0.05 });
+  const before = Date.now();
+  await tap(t.app, 'gd:s:20261121', card);
+  assert.ok(Date.now() - before < 25, 'no second wait');
+  assert.match(t.tg.last().text, /^<b>Scotstoun · Sat 21 Nov<\/b>\nYour PC did not answer in time/);
+  assert.deepEqual(await waiting, { ok: true });
+  // The PC answers that the site turned it away: your home connection is left alone for an hour.
+  t.clock.t += 11000;
+  const ping = t.app.pingFromAgent({}, { wait: 5 });
+  const tapped = tap(t.app, 'gd:g:20261120', card);
+  const order = await ping;
+  t.app.lookFromAgent({ id: order.look.id, ok: false, kind: 'challenge', why: 'the site is checking its visitors' });
+  await tapped;
+  assert.match(t.tg.last().text, /\nGlasgow Club's site is checking visitors from your home connection just now, so your PC cannot read the free courts\. It will not be asked again for an hour\.\n/);
+  t.clock.t += 30 * 60 * 1000;
+  await t.app.pingFromAgent();
+  const later = t.app.pingFromAgent({}, { wait: 1 });
+  await tap(t.app, 'gd:s:20261121', card);
+  assert.match(t.tg.last().text, /from your home connection/);
+  assert.deepEqual(await later, { ok: true });                          // no look was asked of the PC
+  assert.equal(t.site.calls.length, 0);
+  // A reason the PC makes up is still only text.
+  t.clock.t += 31 * 60 * 1000;
+  await t.app.pingFromAgent();
+  const ping2 = t.app.pingFromAgent({}, { wait: 5 });
+  const tapped2 = tap(t.app, 'gd:g:20261120', card);
+  t.app.lookFromAgent({ id: (await ping2).look.id, ok: false, kind: 'pc', why: '<b>x</b>' });
+  await tapped2;
+  assert.match(t.tg.last().text, /did not give me the free courts \(&lt;b&gt;x&lt;\/b&gt;\)/);
+});
+
+test('close to a Kelvingrove booking nothing is asked of your PC', async () => {
+  const t = makePcApp(`${TUE}T21:52:00Z`, { state: { plan: { tue: { start: 960, hours: 2 } } } });      // Tuesdays are booked tonight at 22:00
+  await t.app.pingFromAgent();
+  const held = t.app.pingFromAgent({}, { wait: 1 });
+  await t.app.handleUpdate(say(OWNER, '/gorbals'));
+  await tap(t.app, 'gd:g:20261120', t.tg.last().id);
+  assert.match(t.tg.last().text, /^<b>Gorbals · Fri 20 Nov<\/b>\nYour PC's nightly booking run is at 22:00, so I am asking nothing else of it until 22:10\.\nThe sheet itself still opens from the button below\.$/);
+  assert.deepEqual(await held, { ok: true });
+  assert.equal(t.site.calls.length, 0);
+  // The same on a night when no day opens: the run still starts at 21:55.
+  const quietNight = makePcApp(`${TUE}T21:56:00Z`);
+  await quietNight.app.pingFromAgent();
+  await tap(quietNight.app, 'gd:g:20261120', 1);
+  assert.match(quietNight.tg.last().text, /nightly booking run is at 22:00/);
+  // Before and after that window it is asked as usual.
+  for (const when of [`${TUE}T21:49:00Z`, `${TUE}T22:10:30Z`]) {
+    const u = makePcApp(when, { state: { plan: { tue: { start: 960, hours: 2 } } } });
+    await u.app.pingFromAgent();
+    const ping = u.app.pingFromAgent({}, { wait: 5 });
+    const tapped = tap(u.app, 'gd:g:20261120', 1);
+    u.app.lookFromAgent({ id: (await ping).look.id, ok: true, sheet: fridayFromPc() });
+    await tapped;
+    assert.match(u.tg.last().text, /Free start times/, when);
+  }
+});
+
+test('after a start, when this server is turned away, the way by your PC is tried once and said in the log', async () => {
+  const t = makePcApp(`${TUE}T12:00:00Z`);
+  // Before the look from here has been made, a ping that could carry the question carries none.
+  assert.deepEqual(await t.app.pingFromAgent({}, { wait: 0.05 }), { ok: true });
+  assert.equal(await t.app.checkIndoor(), false);                       // from here: turned away
+  const order = await t.app.pingFromAgent({}, { wait: 5 });              // the PC's next ping carries the question
+  assert.deepEqual([order.look.key, order.look.date], ['g', '2026-11-18']);
+  t.app.lookFromAgent({ id: order.look.id, ok: true, sheet: fromPc('2026-11-18', { 'Tennis Hall Court 1': [slot('2026-11-18', 18), slot('2026-11-18', 19)] }) });
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(t.logs.at(-1), 'Your PC read Glasgow Club for me: Gorbals on Wed 18 Nov has 2 start times with a free court.');
+  // Only once: the next pings are left in peace, also after this server has been turned away again.
+  assert.deepEqual(await t.app.pingFromAgent({}, { wait: 0.05 }), { ok: true });
+  t.clock.t += 10 * 60 * 1000;                                          // the PC has been quiet: it counts as asleep
+  await tap(t.app, 'gd:s:20261120', 1);                                  // so this look goes from here, and is turned away
+  assert.match(t.tg.last().text, /your PC is not awake/);
+  assert.deepEqual(await t.app.pingFromAgent({}, { wait: 0.05 }), { ok: true });
+  // And when the PC cannot either, that is said too.
+  const u = makePcApp(`${TUE}T12:00:00Z`);
+  await u.app.checkIndoor();
+  const o = await u.app.pingFromAgent({}, { wait: 5 });
+  u.app.lookFromAgent({ id: o.look.id, ok: false, kind: 'timeout', why: 'The operation was aborted due to timeout' });
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(u.logs.at(-1), 'Your PC could not read Glasgow Club for me (timeout): The operation was aborted due to timeout.');
+  // Close to a booking it waits for a later ping.
+  const v = makePcApp(`${TUE}T21:55:00Z`, { state: { plan: { tue: { start: 960, hours: 2 } } } });
+  await v.app.checkIndoor();
+  assert.deepEqual(await v.app.pingFromAgent({}, { wait: 0.05 }), { ok: true });
+  // A request to sleep that is waiting for the PC goes alone; the look waits for a later ping.
+  const w = makePcApp(`${TUE}T12:00:00Z`);
+  await w.app.pingFromAgent();
+  await w.app.handleUpdate(say(OWNER, '/sleep'));
+  await w.app.checkIndoor();
+  assert.deepEqual(await w.app.pingFromAgent({}, { wait: 0.05 }), { ok: true, sleep: true });
+  w.clock.t += 1000;
+  assert.deepEqual(Object.keys(await w.app.pingFromAgent({}, { wait: 5 })).sort(), ['look', 'ok']);
+});
+
+test('with your PC asleep the card offers to wake it, when waking is set up', async () => {
+  const t = makePcApp(`${TUE}T12:00:00Z`, { env: { WAKE_MAC: 'AA:BB:CC:DD:EE:FF' } });
+  await t.app.pingFromAgent({ ip: '81.2.69.142' });                     // in touch once: home is known
+  t.clock.t += 10 * 60 * 1000;                                          // and then quiet: asleep
+  await t.app.handleUpdate(say(OWNER, '/gorbals'));
+  await tap(t.app, 'gd:g:20261120', t.tg.last().id);
+  assert.match(t.tg.last().text, /your PC reads the free courts for me, and your PC is not awake\. Wake it and try again, or open the sheet\./);
+  assert.deepEqual(buttons(t.tg.last()).map(b => [b.text, b.callback_data || 'link']), [['Wake my PC', 'wk'], ['Try again', 'gr:g:20261120'], ['Open the sheet', 'link'], ['Back', 'g:g'], ['Menu', 'h']]);
+  assert.equal(t.site.calls.length, 1);                                 // one try from here, turned away
+  // Asked again within the hour: no second request from here.
+  t.clock.t += 20 * 60 * 1000;
+  await tap(t.app, 'gr:g:20261120', t.tg.last().id);
+  assert.match(t.tg.last().text, /your PC is not awake/);
+  assert.equal(t.site.calls.length, 1);
+  // A PC that still counts as awake but does not answer gets the same offer.
+  const u = makePcApp(`${TUE}T12:00:00Z`, { env: { WAKE_MAC: 'AA:BB:CC:DD:EE:FF' }, pcLookMs: 30 });
+  await u.app.pingFromAgent({ ip: '81.2.69.142' });
+  await tap(u.app, 'gd:g:20261120', 1);
+  assert.match(u.tg.last().text, /Your PC did not answer in time/);
+  assert.deepEqual(buttons(u.tg.last()).map(b => b.text), ['Wake my PC', 'Try again', 'Open the sheet', 'Back', 'Menu']);
 });

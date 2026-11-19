@@ -5,6 +5,7 @@
 // the time and the gate code.
 // For the indoor courts at Gorbals and Scotstoun (Glasgow Club) it only looks up what is free
 // and hands you the page to book and pay on (lib/glasgowclub.js says why it goes no further).
+// Glasgow Club's site turns Railway away too, so while your PC is awake it does that reading.
 
 const fs = require('fs');
 const path = require('path');
@@ -17,7 +18,7 @@ const UI = require('./lib/ui');
 const { readMac, publicIPv4, sendWake } = require('./lib/wake');
 const G = require('./lib/glasgowclub');
 
-const VERSION = '2.5';
+const VERSION = '2.6';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -127,8 +128,9 @@ function readBackup(text) {
 
 // `linked` says whether a PC can reach the bot (AGENT_TOKEN is set). `wake` sends the
 // magic packet (lib/wake.js), and `glasgow` reads Glasgow Club's free indoor courts
-// (lib/glasgowclub.js); both are swapped out in tests.
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null }) {
+// (lib/glasgowclub.js); both are swapped out in tests. `pcLookMs` is how long your PC gets to
+// answer when it is asked to read Glasgow Club's sheet.
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000 }) {
   const indoor = glasgow || G.createGlasgowClub({ now, log });
   const fromVariable = readBackup(env.COURT_SETTINGS);
   const state = loadState(store.load() ?? fromVariable, env);
@@ -251,8 +253,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     log('Asked your PC to sleep.');
     return { toast: 'Sleep sent', screen: UI.home(ctx()), view: 'h' };
   }
-  // What the PC should do now, collected by its ping: { sleep: true } once, or nothing.
+  // What the PC should do now, collected by its ping: { look } (read a day of Glasgow Club's
+  // sheet: someone is waiting for it, so it goes first) or { sleep: true }, each once, or nothing.
   function takeOrder(t) {
+    if (lookAsk && !lookAsk.taken) {
+      lookAsk.taken = true;
+      return { look: { id: lookAsk.id, key: lookAsk.key, date: lookAsk.date } };
+    }
     if (sleepAsk === null) return {};
     const fresh = t - sleepAsk <= SLEEP_ASK_MS && !sleepBlocker(t);
     sleepAsk = null;
@@ -267,6 +274,71 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       w.timer = setTimeout(w.wake, ms);
       waiters.add(w);
     });
+  }
+
+  // ---------- your PC reads Glasgow Club ----------
+  // Glasgow Club's site turns this server away (as ClubSpark does), so while your PC is awake
+  // it does the reading, from your own connection: the request rides on its ping, like Sleep,
+  // and the day's sheet comes back on POST /agent/look. One look at a time; the PC gets
+  // `pcLookMs` to answer (its pings leave a gap of up to ten seconds, and the read takes a few).
+  let lookAsk = null;                                 // the look being waited for: { id, key, date, taken, done }
+  function askPc(centre, dateIso) {
+    return new Promise((resolve, reject) => {
+      if (lookAsk) lookAsk.done(G.problem('odd', 'another look took its place'));
+      const ask = { id: crypto.randomBytes(6).toString('hex'), key: centre.key, date: dateIso, taken: false };
+      const timer = setTimeout(() => ask.done(G.problem('pc', 'your PC did not answer in time')), pcLookMs);
+      if (timer.unref) timer.unref();
+      ask.done = (err, json) => {
+        clearTimeout(timer);
+        if (lookAsk === ask) lookAsk = null;
+        ask.done = () => {};
+        if (err) reject(err); else resolve(json);
+      };
+      lookAsk = ask;
+      // The newest ping first: an older one may be left over from a connection that has gone
+      // (Wi-Fi dropping, the link restarting), and would take the look to nowhere.
+      for (const w of [...waiters].reverse()) w.wake();
+    });
+  }
+  // The PC's answer to a look: the day's sheet as the site sent it (in short form), or why not.
+  // An answer nobody is waiting for any more (it came too late) is dropped.
+  function lookFromAgent(raw) {
+    const ask = lookAsk;
+    if (!raw || typeof raw !== 'object' || !ask || raw.id !== ask.id) return { ok: true, late: true };
+    if (raw.ok === true) {
+      try { ask.done(null, G.sheetFromPc(raw.sheet)); } catch (err) { ask.done(err); }
+    } else {
+      const kind = G.KINDS.includes(raw.kind) && raw.kind !== 'pc' ? raw.kind : 'odd';
+      ask.done(G.problem(kind, String(raw.why || 'no reason given').replace(/\s+/g, ' ').slice(0, 200)));
+    }
+    return { ok: true };
+  }
+  // A day's sheet, by the way that can work: your PC while it is awake, otherwise from here
+  // (which Glasgow Club lets through only if this server is not in a cloud). Around the PC's
+  // nightly booking run nothing is asked of it: ten minutes either side of the release time,
+  // every night, whether or not a day opens then (the run starts five minutes before).
+  const LOOK_GUARD_MS = 10 * 60 * 1000;
+  const nearRun = t => [-1, 0, 1].some(d => Math.abs(t - londonInstant(addDays(todayCivil(t), d), releaseMin)) <= LOOK_GUARD_MS);
+  async function readIndoor(key, dateIso, fresh) {
+    const t = now();
+    if (linked && pcState(t) === 'awake') {
+      if (!indoor.peek(key, dateIso, { fresh }) && nearRun(t)) {
+        const busy = G.problem('odd', 'the PC is at its booking run');
+        busy.say = `Your PC's nightly booking run is at ${hhmm(releaseMin)}, so I am asking nothing else of it until ${hhmm((releaseMin + LOOK_GUARD_MS / 60000) % 1440)}.`;
+        throw busy;
+      }
+      try { return await indoor.day(key, dateIso, { fresh, via: askPc }); } catch (err) {
+        if (err.kind === 'pc') err.wake = wakeState() === 'ready';      // it may have gone to sleep: offer to wake it
+        throw err;
+      }
+    }
+    try { return await indoor.day(key, dateIso, { fresh }); } catch (err) {
+      if (!linked || err.kind !== 'challenge') throw err;
+      const asleep = G.problem('challenge', err.message);
+      asleep.say = 'Glasgow Club\'s site turns this server away, so your PC reads the free courts for me, and your PC is not awake. Wake it and try again, or open the sheet.';
+      asleep.wake = wakeState() === 'ready';
+      throw asleep;
+    }
   }
 
   // A trial of a wider banner: a text message with the banner as a large link preview (the page
@@ -434,7 +506,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const again = kind === 'r';
     if (!indoor.peek(key, dateIso, { fresh: again })) await draw(UI.indoorWait(ctx(), key, dateIso));
     let got = null, err = null;
-    try { got = await indoor.day(key, dateIso, { fresh: again }); } catch (e) { err = e; }
+    try { got = await readIndoor(key, dateIso, again); } catch (e) { err = e; }
     if (kind === 't' && got) {
       const start = UI.fromHm(hmText);
       const scr = UI.indoorSlot(ctx(), key, dateIso, start, got);
@@ -443,7 +515,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     await draw(UI.indoorDay(ctx(), key, dateIso, got, err));
   }
-  // On start-up: can this server read Glasgow Club at all? One read, said in the log.
+  // On start-up: can this server itself read Glasgow Club? One read, said in the log.
   async function checkIndoor() {
     const dateIso = iso(addDays(todayCivil(now()), 1));
     try {
@@ -451,9 +523,25 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       log(`Glasgow Club answers from here: Gorbals on ${label(civilOf(dateIso))} has ${new Set(got.slots.map(s => s.start)).size} start times with a free court.`);
       return true;
     } catch (err) {
-      log(`Glasgow Club does not answer from here (${err.kind || 'odd'}). The indoor screens will still hand over the link to its sheet, without the free courts.`);
+      log(`Glasgow Club does not answer from here (${err.kind || 'odd'}). ${linked ? 'Your PC reads its free courts instead, while it is awake' : 'The indoor screens still hand over the link to its sheet, without the free courts'}.`);
       return false;
     }
+  }
+  // Once after each start: when this server cannot read Glasgow Club itself, try the way by
+  // your PC, on the first of its pings that can carry the question, and say in the log how it
+  // went. Nothing is asked while you are waiting on a look of your own, while a request to
+  // sleep is waiting for the PC, or around its nightly booking run.
+  let pcTried = false;
+  function tryPcOnce(t) {
+    if (pcTried || lookAsk || sleepAsk !== null || !linked || pcState(t) !== 'awake') return;
+    const direct = indoor.health();
+    if (!direct || direct.ok || direct.via === 'pc') return;                 // not looked from here yet, or no need
+    if (nearRun(t)) return;
+    pcTried = true;
+    const dateIso = iso(addDays(todayCivil(t), 1));
+    indoor.day('g', dateIso, { via: askPc }).then(
+      got => log(`Your PC read Glasgow Club for me: Gorbals on ${label(civilOf(dateIso))} has ${new Set(got.slots.map(s => s.start)).size} start times with a free court.`),
+      err => log(`Your PC could not read Glasgow Club for me (${err.kind || 'odd'}): ${err.message}.`));
   }
 
   // A button was tapped. Only the owner's taps count.
@@ -533,8 +621,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const chat = owner();
       if (chat !== null) say(chat, `<b>Your PC stayed awake</b>\nIt did not go to sleep: ${M.esc(refused)}.`).catch(e => log(`Could not say so: ${e.message}`));
     }
+    if (wait > 0) tryPcOnce(now());
     let order = takeOrder(now());
-    if (!order.sleep && wait > 0) {
+    if (!order.sleep && !order.look && wait > 0) {
       await waitForOrder(wait * 1000);
       order = takeOrder(now());
     }
@@ -873,7 +962,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // A banner by name, for the public /banner and /card pages (the wide trial).
   const picture = kind => (pictures && KINDS.includes(kind) ? pictures[kind] : null);
 
-  return { handleUpdate, tick, msToNext, announce, checkIndoor, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
+  return { handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
 }
 
 module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, cleanResult, intIn, VERSION, KINDS };

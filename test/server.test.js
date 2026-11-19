@@ -114,3 +114,47 @@ test('the public key can be given as one line of base64 or as PEM, and must be e
   const rsa = crypto.generateKeyPairSync('rsa', { modulusLength: 1024 }).publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
   assert.throws(() => readPublicKey(rsa), /should be ed25519/);
 });
+
+test('a look from the PC needs the token, and a whole day\'s sheet fits', async () => {
+  const got = [];
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onLook: raw => { got.push(raw); return raw.id === 'late' ? { late: true } : {}; } }, async base => {
+    const post = (body, headers = auth) => fetch(`${base}/agent/look`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body });
+    assert.equal((await post(JSON.stringify({ id: 'x' }), {})).status, 401);
+    assert.equal((await post('not json')).status, 400);
+    // A real day (six courts, sixteen hours) is about 10 KB. This one is larger than any, and past the old 16 KB limit.
+    const slot = h => [`2026-11-25T${h}:00:00Z`, `2026-11-25T${h}:59:59Z`, '2026-11-18T00:00:00Z', `2026-11-25T${h}:00:00Z`, 0, 'Unavailable'];
+    const sheet = Array.from({ length: 10 }, (_, c) => ({ n: `Tennis Hall Court ${c + 1}`, s: Array.from({ length: 20 }, (_, h) => slot(String(4 + h).padStart(2, '0'))) }));
+    const body = JSON.stringify({ id: 'abc123def456', ok: true, sheet });
+    assert.ok(body.length > 16 * 1024 && body.length < 64 * 1024);
+    const res = await post(body);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+    assert.deepEqual(await (await post(JSON.stringify({ id: 'late', ok: false, kind: 'timeout', why: 'x' }))).json(), { ok: true, late: true });
+    assert.deepEqual(got.map(r => [r.id, r.ok]), [['abc123def456', true], ['late', false]]);
+  });
+  // A handler that fails is a 500, as for a result.
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onLook: () => { throw new Error('boom'); } }, async base => {
+    assert.equal((await fetch(`${base}/agent/look`, { method: 'POST', headers: auth, body: '{}' })).status, 500);
+  });
+});
+
+test('a signed body that arrives in pieces, cut inside a letter, is still the PC\'s', async () => {
+  const http = require('node:http');
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const pub = readPublicKey(publicKey.export({ type: 'spki', format: 'der' }).toString('base64'));
+  const got = [];
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onLook: raw => { got.push(raw); return {}; }, publicKey: pub, token: '' }, async base => {
+    const body = JSON.stringify({ id: 'abc', ok: false, kind: 'odd', why: 'café fermé – naïve' });
+    const bytes = Buffer.from(body);
+    const cut = bytes.indexOf(Buffer.from('é')) + 1;                 // between the two bytes of the first é
+    assert.equal(bytes[cut - 1], 0xc3);
+    const status = await new Promise((resolve, reject) => {
+      const req = http.request(`${base}/agent/look`, { method: 'POST', headers: { authorization: signedHeader(privateKey, 'POST', '/agent/look', body), 'content-type': 'application/json', 'content-length': bytes.length } }, res => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+      req.on('error', reject);
+      req.write(bytes.subarray(0, cut));
+      setTimeout(() => req.end(bytes.subarray(cut)), 30);
+    });
+    assert.equal(status, 200);
+    assert.deepEqual(got.map(r => r.why), ['café fermé – naïve']);
+  });
+});
