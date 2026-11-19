@@ -23,6 +23,7 @@ const COMMANDS = [
   ['order', 'Court order: /order 3 4 5 2 1 6'],
   ['status', 'Clock, your PC and settings'],
   ['wake', 'Wake your PC from sleep'],
+  ['sleep', 'Put your PC to sleep'],
   ['pause', 'Stop booking'],
   ['resume', 'Start booking again'],
   ['help', 'Everything I understand'],

@@ -9,12 +9,12 @@ const path = require('path');
 const crypto = require('crypto');
 const { iso, label, hhmm, todayCivil, addDays, londonInstant, civil, DAY_KEYS, DAY_LONG } = require('./lib/time');
 const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, slotText, slotEnd } = require('./lib/plan');
-const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf } = require('./lib/schedule');
+const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf, upcoming } = require('./lib/schedule');
 const M = require('./lib/messages');
 const UI = require('./lib/ui');
 const { readMac, publicIPv4, sendWake } = require('./lib/wake');
 
-const VERSION = '2.2';
+const VERSION = '2.3';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -174,10 +174,16 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
 
   // ---------- your PC's state: the dot on the menu banner ----------
+  // Sleeping it from Telegram (Sleep my PC, /sleep): the request waits here until the PC's next
+  // ping collects it, and after that the PC counts as asleep until it pings again.
+  let sleepAsk = null;                                // when you asked (not yet collected)
+  let sleptAt = null;                                 // when the PC collected it
   function pcState(t = now()) {
     if (!linked || !state.lastSeen) return 'offline';
     const age = t - state.lastSeen;
-    return age <= AWAKE_MS ? 'awake' : age <= OFFLINE_MS ? 'asleep' : 'offline';
+    if (age > OFFLINE_MS) return 'offline';
+    if (sleptAt && state.lastSeen <= sleptAt) return 'asleep';
+    return age <= AWAKE_MS ? 'awake' : 'asleep';
   }
   const homeKind = () => `home-${pcState()}`;
 
@@ -213,6 +219,46 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return { toast: 'Wake-up sent', screen: UI.home(ctx()), view: 'h' };
   }
 
+  // ---------- sleeping your PC ----------
+  // A request no ping has collected within this long is dropped, so the PC never falls asleep
+  // the next time it wakes because of an old tap.
+  const SLEEP_ASK_MS = 2 * 60 * 1000;
+  const SLEEP_GUARD_MS = 30 * 60 * 1000;              // no sleeping in the half hour before a booking
+  const waiters = new Set();                          // pings waiting for something to do
+  function sleepBlocker(t) {
+    if (state.paused || owner() === null) return null;
+    const [rel] = upcoming(t, cfg(), 1);
+    return rel && t >= rel.releaseAt - SLEEP_GUARD_MS ? rel : null;
+  }
+  function requestSleep() {
+    const t = now();
+    if (!linked) return { toast: 'Your PC is not linked to me.' };
+    if (pcState(t) !== 'awake') return { toast: 'Your PC is not awake.', screen: UI.home(ctx()), view: 'h' };
+    const rel = sleepBlocker(t);
+    if (rel) return { toast: `Your PC books at ${hhmm(releaseMin)}, so it stays awake until then.`, screen: UI.home(ctx()), view: 'h' };
+    sleepAsk = t;
+    for (const w of waiters) w.wake();
+    log('Asked your PC to sleep.');
+    return { toast: 'Sleep sent', screen: UI.home(ctx()), view: 'h' };
+  }
+  // What the PC should do now, collected by its ping: { sleep: true } once, or nothing.
+  function takeOrder(t) {
+    if (sleepAsk === null) return {};
+    const fresh = t - sleepAsk <= SLEEP_ASK_MS && !sleepBlocker(t);
+    sleepAsk = null;
+    if (!fresh) return {};
+    sleptAt = t;
+    log('Your PC collected the request to sleep.');
+    return { sleep: true };
+  }
+  function waitForOrder(ms) {
+    return new Promise(resolve => {
+      const w = { wake: () => { clearTimeout(w.timer); waiters.delete(w); resolve(); } };
+      w.timer = setTimeout(w.wake, ms);
+      waiters.add(w);
+    });
+  }
+
   // A trial of a wider banner: a text message with the banner as a large link preview (the page
   // at /card/<kind> on this server names the picture). Telegram fetches it from RAILWAY_PUBLIC_DOMAIN.
   const publicHost = String(env.PUBLIC_HOST || env.RAILWAY_PUBLIC_DOMAIN || '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
@@ -221,7 +267,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     : { is_disabled: true });
 
   // ---------- the tap-through screens ----------
-  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked, pc: pcState(), wake: wakeState(), wokeAt });
+  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked, pc: pcState(), wake: wakeState(), wokeAt, sleepAsk });
   const statusInfo = () => ({
     version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused,
     linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null, pc: pcState(),
@@ -338,6 +384,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       return { screen: UI.home(ctx()), view: 'h', toast: state.paused ? 'Paused: nothing will be booked' : 'Booking is on' };
     }
     if (data === 's') return { screen: UI.status(c, statusInfo()), view: 's' };
+    if (data === 'sl') return { screen: UI.sleepConfirm(c) };
+    if (data === 'sl:ok') return requestSleep();
     return { toast: 'That button is out of date. Send /menu.' };
   }
 
@@ -382,11 +430,24 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
 
   // The PC says it is awake: every minute from `node book.js --link`, which runs while you are
   // signed in to Windows. That is all the dot on the menu banner goes on.
-  function pingFromAgent(from = {}) {
+  // With `wait` (seconds) the answer waits until there is something for the PC to do, so a
+  // Sleep tap reaches it within seconds instead of at its next ping.
+  async function pingFromAgent(from = {}, { wait = 0, refused = null } = {}) {
     state.lastSeen = now();
     noteHome(from);
     save();
-    return { ok: true };
+    if (refused) {                                    // asked to sleep, it would not: say why
+      sleptAt = null;
+      log(`Your PC stayed awake: ${refused}`);
+      const chat = owner();
+      if (chat !== null) say(chat, `<b>Your PC stayed awake</b>\nIt did not go to sleep: ${M.esc(refused)}.`).catch(e => log(`Could not say so: ${e.message}`));
+    }
+    let order = takeOrder(now());
+    if (!order.sleep && wait > 0) {
+      await waitForOrder(wait * 1000);
+      order = takeOrder(now());
+    }
+    return { ok: true, ...order };
   }
 
   // The PC says what happened. The message goes out first: if Telegram fails, the PC is told
@@ -447,6 +508,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       case 'wide':                                   // the menu with a wider banner, as a trial
         if (!publicHost) { await say(chat, 'The wide card needs this server\'s public address (RAILWAY_PUBLIC_DOMAIN).'); break; }
         await show(chat, UI.home(ctx()), null, { view: 'h', wide: true }); break;
+
+      case 'sleep': {                                // Sleep my PC, typed (no "are you sure?")
+        const r = requestSleep();
+        if (r.toast === 'Sleep sent') await show(chat, r.screen, null, { view: 'h' });
+        else await say(chat, M.esc(r.toast));
+        break;
+      }
 
       case 'wake': {                                 // the Wake button, typed
         const r = await wakePc();

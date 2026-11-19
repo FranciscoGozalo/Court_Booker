@@ -36,6 +36,7 @@ A one-off date that is already open is booked on the PC's next run (21:55 that n
 | `/pause`, `/resume` | Stop and restart booking. |
 | `/status` | Clock check, version, your PC's state and when it was last in touch, whether waking is ready, and whether settings are kept. |
 | `/wake` | Wake your PC from sleep (the same as **Wake my PC** on the menu). See [Waking your PC](#waking-your-pc). |
+| `/sleep` | Put your PC to sleep (the same as **Sleep my PC** on the menu, without the "are you sure?"). See [Sleeping your PC](#sleeping-your-pc). |
 | `/wide` | A trial: the menu with the banner as a large link preview, which Telegram may draw wider than a picture on a tablet. |
 | `/backup` | Your settings as one line, for the `COURT_SETTINGS` variable. |
 | `/id` | Your chat ID. |
@@ -76,6 +77,15 @@ While the dot is amber or red, the menu has a **Wake my PC** button (and there i
   - On the router, a fixed address for the PC (a DHCP reservation) and a port forward: UDP, an outside port of your choice (for example `40009`) to port `9` on the PC.
   - On Railway, `WAKE_MAC` (the card's address) and `WAKE_PORT` (the outside port).
 - **What it can't do:** wake a PC that is shut down, or one behind a provider that shares one public address between many homes (then no port forward is possible). The packet carries no command and no data, and nothing on the PC listens on that port.
+
+## Sleeping your PC
+
+While the dot is green, the same place on the menu has **Sleep my PC** (and there is `/sleep`). The bot cannot reach into your PC, so it hands the request to the PC's next ping: the PC link's ping waits up to 50 seconds for an answer, so the request arrives within seconds of your tap. The PC then goes to ordinary sleep (not hibernate), and the dot turns amber straight away.
+
+- **Never before a booking:** from 30 minutes before a release, the bot refuses, and the PC itself refuses while its nightly booking task is running.
+- **Only when it can wake for the booking:** the PC sleeps only if its booking task (21:55 each night, 5 minutes before the 22:00 release) is there, switched on, set to wake the computer and due to run, and wake timers are allowed. Otherwise it stays awake and you get a message saying why.
+- **Never late:** a request that no ping collects within 2 minutes is dropped, so the PC doesn't fall asleep the next time it wakes.
+- Nothing open on the PC is closed. Wake it again with **Wake my PC**.
 
 ## The pictures
 
@@ -123,7 +133,8 @@ lib/time.js       UK-time date maths
 lib/plan.js       reading what you type: days, dates, times, court order
 lib/schedule.js   which days open when, and what the PC should book now
 lib/messages.js   the words
-lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /agent/ping, POST /agent/result),
+lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /agent/ping, which may wait
+                  for an instruction such as sleep, POST /agent/result),
                   and the public banner pages for /wide
 lib/ui.js         the tap-through screens and their buttons
 lib/wake.js       the Wake-on-LAN magic packet, and where it may go
