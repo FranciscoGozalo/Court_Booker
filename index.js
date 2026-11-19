@@ -2,6 +2,8 @@
 // Court booker: a Telegram bot that keeps your Kelvingrove booking requests. At each release
 // your PC at home signs in to ClubSpark and books (Cloudflare turns Railway away), reports
 // back here, and the bot sends you the court, the time and the gate code on a banner card.
+// For Glasgow Club's indoor courts (Gorbals, Scotstoun) it shows what is free and hands you the
+// page to book and pay on.
 // Needs Node 20 or later, TELEGRAM_BOT_TOKEN, and AGENT_TOKEN for your PC. See README.md.
 
 const { createApp, VERSION } = require('./app');
@@ -17,6 +19,8 @@ const COMMANDS = [
   ['menu', 'Buttons for everything'],
   ['plan', 'What is booked when'],
   ['book', 'One date: /book 25 nov 19:00 2h'],
+  ['gorbals', 'Indoor courts free at Gorbals'],
+  ['scotstoun', 'Indoor courts free at Scotstoun'],
   ['set', 'Every week: /set thu 19:00 2h'],
   ['cancel', 'Remove a one-off: /cancel 2'],
   ['off', 'Stop a weekday: /off thu'],
@@ -94,6 +98,9 @@ async function main() {
   }
   if (app.kept() === 'no') log('Settings are NOT kept across restarts. Add a Railway volume mounted at /data, or send the bot /backup.');
   await app.announce();
+  // Can this server read Glasgow Club's free indoor courts? One look, said in the log; the
+  // rest of the start-up does not wait for it.
+  app.checkIndoor().catch(e => log(`The look at Glasgow Club failed: ${e.message}`));
 
   // Timed messages: look every 100 ms, and wake exactly on time when one is nearly due.
   let stopping = false, timer = null;

@@ -189,10 +189,10 @@ test('the dot follows your PC: awake while it checks in, asleep after, offline a
   // Tapping on it now edits only the words: the banner is already right.
   await tap(app, 'b', card.id);
   assert.equal(tg.last().method, 'caption');
-  // Over a day without a word: red dot (the card shows the calendar, so only the banner changes).
+  // Over a day without a word: red dot (the card shows "where?", so only the banner changes).
   clock.t = at('2026-11-18T12:32:00Z'); await app.tick();
   assert.equal(tg.last().photo, 'upload:banner-home-offline.jpg');
-  assert.match(tg.last().text, /^<b>Book a date<\/b>/);
+  assert.match(tg.last().text, /^<b>Book a court<\/b>/);
   await app.handleUpdate(say(OWNER, '/menu'));
   assert.match(tg.last().text, /Your PC has not been in touch since yesterday at 12:01\. It may be off\./);
   // It wakes: green again.
@@ -223,7 +223,7 @@ test('the wide trial: the menu as a text message with the banner as a large link
   assert.equal(tg.last().method, 'edit');
   assert.equal(tg.last().id, card.id);
   assert.equal(tg.last().extra.link_preview_options.url, 'https://bot.example.app/card/home-offline?v=hash-home-offline');
-  assert.match(tg.last().text, /^<b>Book a date<\/b>/);
+  assert.match(tg.last().text, /^<b>Book a court<\/b>/);
   // Without a public address there is nothing for Telegram to fetch.
   const { app: plain, tg: tg2 } = makeApp(`${TUE}T12:00:00Z`);
   await plain.handleUpdate(say(OWNER, '/wide'));

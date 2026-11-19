@@ -9,6 +9,8 @@ The work is split in two because ClubSpark sits behind Cloudflare, which turns c
 
 Your ClubSpark password stays on your PC. The bot never sees it and never touches ClubSpark.
 
+It also finds free **indoor courts at Gorbals and Scotstoun** (Glasgow Club) and hands you the page to book and pay on; see [Indoor courts](#indoor-courts-glasgow-club).
+
 ## What a booking night looks like
 
 Kelvingrove opens each day 7 days ahead at 22:00. So a Thursday is booked on the Thursday before.
@@ -27,6 +29,16 @@ If the PC hits a problem before the booking (Chrome will not start, ClubSpark wi
 
 A one-off date that is already open is booked on the PC's next run (21:55 that night), or straight away if you start the booker on the PC by hand.
 
+## Indoor courts (Glasgow Club)
+
+**Book a date** on the menu first asks where: Kelvingrove Park, Gorbals or Scotstoun. For the two indoor centres the bot shows a day's free start times, read from Glasgow Club's booking site as any visitor sees them, then which courts are free at the time you pick, and a button that opens that day's sheet on Glasgow Club's own page. You book and pay there.
+
+The bot goes no further than that, and here is why. Glasgow Club takes a card payment with each booking. Its site keeps the basket in the browser tab that filled it, so a court put in a basket on one device cannot be paid for on another. And its own settings have saved cards and pay-by-link switched off (`GladstonePay_AllowMemberWallet` and `PayByLink_Enabled`, as read on 19 Nov 2026). So there is nothing a bot or a PC could hold for you to pay for later from your phone: the booking and the payment happen together, in your own browser.
+
+Each day opens for booking a week ahead, at midnight. A day that has not opened yet is shown with the time it opens and what is free as it stands.
+
+The bot reads the free courts with a visitor's session, never your login, at most once a minute for a day. If Glasgow Club's site answers with a "checking your browser" page, the bot says so, still hands you the link, and does not ask again for ten minutes. `/status` says when the free courts were last read.
+
 ## Commands
 
 | Command | What it does |
@@ -34,8 +46,9 @@ A one-off date that is already open is booked on the PC's next run (21:55 that n
 | `/menu` | Buttons for everything below: book a date from a calendar, set weekly days, see and remove bookings, court order, pause, status. Each tap changes the same card. |
 | `/set thu 19:00 2h` | Book Thursdays at 19:00 for two hours, every week. `1h` or `2h`. Also understands `7pm` and `19:00-21:00`. |
 | `/off thu` | Stop Thursdays. `/off all` clears every weekly booking. |
-| `/book 25 nov 19:00 2h` | Book one date. Also `25/11`, `wed` (the coming Wednesday), `tomorrow`, `2026-11-25`. |
+| `/book 25 nov 19:00 2h` | Book one Kelvingrove date. `/book` alone asks where first. Also `25/11`, `wed` (the coming Wednesday), `tomorrow`, `2026-11-25`. |
 | `/cancel 2` | Remove one-off number 2 from `/plan`. `/cancel 25 nov` removes that date's. |
+| `/gorbals`, `/scotstoun` | The free indoor courts at that centre: pick a day, then a start time, then open Glasgow Club's page to book and pay. See [Indoor courts](#indoor-courts-glasgow-club). |
 | `/plan` | Your weekly and one-off bookings, how each stands, and the next booking run. |
 | `/order 3 4 5 2 1 6` | Which courts to try first. |
 | `/pause`, `/resume` | Stop and restart booking. |
@@ -143,6 +156,7 @@ lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /age
                   and the public banner pages for /wide
 lib/ui.js         the tap-through screens and their buttons
 lib/wake.js       the Wake-on-LAN magic packet, and where it may go
+lib/glasgowclub.js  Glasgow Club's free indoor courts, read as a visitor; never books or pays
 lib/telegram.js   Telegram Bot API client
 lib/store.js      the settings file
 assets/           the banners

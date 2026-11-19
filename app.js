@@ -3,6 +3,8 @@
 // messages about it. The bot itself never touches ClubSpark: your PC signs in and books
 // (Cloudflare turns Railway away), then reports back here, and the bot tells you the court,
 // the time and the gate code.
+// For the indoor courts at Gorbals and Scotstoun (Glasgow Club) it only looks up what is free
+// and hands you the page to book and pay on (lib/glasgowclub.js says why it goes no further).
 
 const fs = require('fs');
 const path = require('path');
@@ -13,8 +15,9 @@ const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf, upcoming, releaseA
 const M = require('./lib/messages');
 const UI = require('./lib/ui');
 const { readMac, publicIPv4, sendWake } = require('./lib/wake');
+const G = require('./lib/glasgowclub');
 
-const VERSION = '2.4';
+const VERSION = '2.5';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -123,8 +126,10 @@ function readBackup(text) {
 }
 
 // `linked` says whether a PC can reach the bot (AGENT_TOKEN is set). `wake` sends the
-// magic packet (lib/wake.js), and is swapped out in tests.
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake }) {
+// magic packet (lib/wake.js), and `glasgow` reads Glasgow Club's free indoor courts
+// (lib/glasgowclub.js); both are swapped out in tests.
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null }) {
+  const indoor = glasgow || G.createGlasgowClub({ now, log });
   const fromVariable = readBackup(env.COURT_SETTINGS);
   const state = loadState(store.load() ?? fromVariable, env);
   const variableLine = fromVariable ? backupLine(loadState(fromVariable, env)) : null;
@@ -276,7 +281,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const statusInfo = () => ({
     version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused,
     linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null, pc: pcState(),
-    wake: wakeState(), wokeAt,
+    wake: wakeState(), wokeAt, indoor: indoor.health(),
   });
   // The menu cards sent since this start, so a tap, or a change in your PC's state, can redraw
   // them: { kind (banner), wide, caption, keyboard, view ('h' home, 's' status, or null) }.
@@ -311,18 +316,21 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     track(chat, id, card, false);
   }
-  // Shows a screen: on the card the button was on, or as a new card.
+  // Shows a screen: on the card the button was on, or as a new card. Returns the id of the card
+  // it is on now, so a second screen can follow on the same one.
   async function show(chat, scr, messageId = null, { view = null, wide = false } = {}) {
     const card = { kind: homeKind(), wide, caption: scr.caption, keyboard: scr.keyboard, view };
     if (messageId) {
-      try { await drawOn(chat, messageId, card); return; } catch (err) {
+      try { await drawOn(chat, messageId, card); return messageId; } catch (err) {
         if (err.code !== 400) throw err;       // e.g. a message Telegram will not change: a new card instead
       }
     }
     const sent = wide
       ? await say(chat, scr.caption, { link_preview_options: previewOf(card.kind), reply_markup: scr.keyboard })
       : await sendCard(chat, card.kind, scr.caption, scr.keyboard);
-    track(chat, sent && sent.message_id, card, true);
+    const id = (sent && sent.message_id) || null;
+    track(chat, id, card, true);
+    return id;
   }
   // When your PC wakes or sleeps, the newest menu card gets the new dot (and, on the home and
   // status screens, the new words).
@@ -349,7 +357,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const c = ctx();
     if (data === 'noop') return {};
     if (data === 'h') return { screen: UI.home(c), view: 'h' };
-    if (data === 'b') return { screen: UI.calendar(c) };
+    if (data === 'b') return { screen: UI.venues() };
+    if (data === 'bk') return { screen: UI.calendar(c) };
+    if ((m = /^g:([gs])$/.exec(data))) return { screen: UI.indoorDays(c, m[1]) };
     if ((m = /^cal:(\d{4})(\d{2})$/.exec(data))) return { screen: UI.calendar(c, civil(+m[1], +m[2], 1)) };
     if ((m = /^d:(\d{8})$/.exec(data))) return { screen: UI.times(c, UI.fromD8(m[1])) };
     if ((m = /^t:(\d{8}):(\d{4})$/.exec(data))) return { screen: UI.lengths(c, UI.fromD8(m[1]), UI.fromHm(m[2])) };
@@ -403,6 +413,49 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return { toast: 'That button is out of date. Send /menu.' };
   }
 
+  // ---------- indoor courts (Glasgow Club) ----------
+  // A day at a centre (gd, or gr to read it afresh) or one start time on it (gt). These wait
+  // for Glasgow Club's site (twelve seconds at the very most), so the tap is answered first and
+  // the card says it is reading. `newCard`: leave the tapped message as it is and open a card.
+  async function indoorTap(q, chat, m, answer, newCard) {
+    const [, kind, key, d, hmText] = m;
+    const dateIso = UI.fromD8(d), date = civilOf(dateIso), today = todayCivil(now());
+    const wide = typeof q.message.text === 'string' && !newCard;
+    // The card being drawn on. If Telegram will not change it, a new card takes over, and what
+    // follows goes on that one.
+    let id = newCard ? null : q.message.message_id;
+    const draw = async scr => { id = await show(chat, scr, id, { wide }); };
+    if (iso(date) !== dateIso || date < today || date > addDays(today, UI.INDOOR_DAYS - 1) || (kind === 't') !== !!hmText) {
+      await answer('That day is no longer on offer. Pick again.');
+      await draw(UI.indoorDays(ctx(), key));
+      return;
+    }
+    await answer();
+    const again = kind === 'r';
+    if (!indoor.peek(key, dateIso, { fresh: again })) await draw(UI.indoorWait(ctx(), key, dateIso));
+    let got = null, err = null;
+    try { got = await indoor.day(key, dateIso, { fresh: again }); } catch (e) { err = e; }
+    if (kind === 't' && got) {
+      const start = UI.fromHm(hmText);
+      const scr = UI.indoorSlot(ctx(), key, dateIso, start, got);
+      await draw(scr || UI.indoorDay(ctx(), key, dateIso, got, null, `No court is free at ${hhmm(start)} any more.`));
+      return;
+    }
+    await draw(UI.indoorDay(ctx(), key, dateIso, got, err));
+  }
+  // On start-up: can this server read Glasgow Club at all? One read, said in the log.
+  async function checkIndoor() {
+    const dateIso = iso(addDays(todayCivil(now()), 1));
+    try {
+      const got = await indoor.day('g', dateIso);
+      log(`Glasgow Club answers from here: Gorbals on ${label(civilOf(dateIso))} has ${new Set(got.slots.map(s => s.start)).size} start times with a free court.`);
+      return true;
+    } catch (err) {
+      log(`Glasgow Club does not answer from here (${err.kind || 'odd'}). The indoor screens will still hand over the link to its sheet, without the free courts.`);
+      return false;
+    }
+  }
+
   // A button was tapped. Only the owner's taps count.
   async function handleTap(q) {
     const chat = q.message && q.message.chat ? q.message.chat.id : null;
@@ -411,6 +464,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     let data = String(q.data || '');
     const fresh = data.startsWith('n:');                                   // on a booking message: keep it, open a new card
     if (fresh) data = data.slice(2);
+    const indoorMatch = /^g([drt]):([gs]):(\d{8})(?::(\d{4}))?$/.exec(data);
+    if (indoorMatch) {
+      // A tap can be answered once. If something fails after that, the word goes as a message.
+      let answered = false;
+      const once = text => { if (answered) return Promise.resolve(); answered = true; return answer(text); };
+      try { await indoorTap(q, chat, indoorMatch, once, fresh); } catch (e) {
+        log(`Indoor button failed: ${e.message}`);
+        if (!answered) await once('That did not work. Send /menu to start again.');
+        else await say(chat, 'That did not work: I could not update the card. Send /menu to start again.').catch(() => {});
+      }
+      return;
+    }
     let result;
     try { result = data === 'wk' ? await wakePc() : route(data); } catch (e) { log(`Button failed: ${e.message}`); result = { toast: 'That did not work. Send /menu to start again.' }; }
     await answer(result.toast);
@@ -622,8 +687,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         break;
       }
 
+      case 'gorbals':                                // the indoor courts (Glasgow Club): pick a day
+      case 'scotstoun':
+        await show(chat, UI.indoorDays(ctx(), cmd[0])); break;
+
       case 'book': {
-        if (!args.length) { await show(chat, UI.calendar(ctx())); break; }
+        if (!args.length) { await show(chat, UI.venues()); break; }
         const usage = 'Use it like this:  /book 25 nov 19:00 2h\nA date (25 nov, 25/11, wed, tomorrow), a start time, then 1h or 2h.';
         const today = todayCivil(t);
         const got = parseBooking(args, today);
@@ -804,7 +873,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // A banner by name, for the public /banner and /card pages (the wide trial).
   const picture = kind => (pictures && KINDS.includes(kind) ? pictures[kind] : null);
 
-  return { handleUpdate, tick, msToNext, announce, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
+  return { handleUpdate, tick, msToNext, announce, checkIndoor, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
 }
 
 module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, cleanResult, intIn, VERSION, KINDS };
