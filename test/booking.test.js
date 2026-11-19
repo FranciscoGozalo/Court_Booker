@@ -183,7 +183,8 @@ test('if Telegram fails, the result is not recorded, so the PC can send it again
 });
 
 test('a PC that has not checked in is warned about once, two minutes before', async () => {
-  const { app, tg, clock } = makeApp(`${TUE}T21:57:00Z`, { state: { owner: OWNER, plan: { tue: { start: 960, hours: 2 } } } });
+  // Last heard from at tea time: asleep or off. (The check 20 minutes before is in safety.test.js.)
+  const { app, tg, clock } = makeApp(`${TUE}T21:57:00Z`, { state: { v: 4, owner: OWNER, plan: { tue: { start: 960, hours: 2 } }, lastSeen: at(`${TUE}T18:00:00Z`) } });
   await app.tick();
   assert.equal(tg.calls.length, 0);
   clock.t = at(`${TUE}T21:58:00Z`);

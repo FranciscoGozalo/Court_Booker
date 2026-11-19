@@ -15,10 +15,15 @@ Kelvingrove opens each day 7 days ahead at 22:00. So a Thursday is booked on the
 
 | UK time | What happens |
 | --- | --- |
-| 21:55 | Your PC wakes, signs in and checks in with the bot. You get a card with the green "PC awake" dot: what it is about to book. |
-| 21:58 | Only if your PC has **not** checked in: a warning, so you can book by hand. |
+| 21:40 | The bot checks your PC is in touch. If it is asleep, the bot wakes it (see [Waking your PC](#waking-your-pc)). |
+| 21:43 | Only if the PC did **not** answer that wake-up: **Your PC is not answering**, with a Wake button. Usually it restarted and is waiting for you to sign in to Windows, or it is switched off. |
+| 21:55 | Your PC starts its booking run and asks the bot what to book. You get a card with the green "PC awake" dot: what it is about to book, and "Your PC is awake and signing in". Once it has signed in to ClubSpark the card changes to "Signed in. Waiting for 22:00." |
+| 21:58 | Only if the booking run has **not** started: a warning, so you can book by hand. It says whether the PC itself is awake (then its task is the problem) or not in touch at all. |
 | 22:00 | The PC books the first free court in your order for the whole slot. |
 | 22:00:10 or so | A card on the "Court booked" banner: **Booked · Court 3**, the date and time, and the gate code. If nothing was free, a card on the "Not booked" banner saying why. |
+| 22:08 | Only if the run started but **no result** came back: **No word from your PC**, so you can check ClubSpark. |
+
+If the PC hits a problem before the booking (Chrome will not start, ClubSpark will not load), it tries again, up to three times, and you get **Trouble before the booking** with the reason while there are still minutes to spare.
 
 A one-off date that is already open is booked on the PC's next run (21:55 that night), or straight away if you start the booker on the PC by hand.
 
@@ -134,7 +139,7 @@ lib/plan.js       reading what you type: days, dates, times, court order
 lib/schedule.js   which days open when, and what the PC should book now
 lib/messages.js   the words
 lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /agent/ping, which may wait
-                  for an instruction such as sleep, POST /agent/result),
+                  for an instruction such as sleep, POST /agent/progress, POST /agent/result),
                   and the public banner pages for /wide
 lib/ui.js         the tap-through screens and their buttons
 lib/wake.js       the Wake-on-LAN magic packet, and where it may go

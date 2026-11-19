@@ -9,12 +9,12 @@ const path = require('path');
 const crypto = require('crypto');
 const { iso, label, hhmm, todayCivil, addDays, londonInstant, civil, DAY_KEYS, DAY_LONG } = require('./lib/time');
 const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, slotText, slotEnd } = require('./lib/plan');
-const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf, upcoming } = require('./lib/schedule');
+const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf, upcoming, releaseAround, MISSING_MS, SEEN_FRESH_MS } = require('./lib/schedule');
 const M = require('./lib/messages');
 const UI = require('./lib/ui');
 const { readMac, publicIPv4, sendWake } = require('./lib/wake');
 
-const VERSION = '2.3';
+const VERSION = '2.4';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -23,6 +23,10 @@ const SENT_KEEP_MS = 3 * 86400000;
 const RESULTS_KEEP_MS = 60 * 86400000;
 const MAX_AHEAD_DAYS = 90;
 const HEADS_UP_MS = 30 * 60 * 1000;   // the heads-up card only goes out when the PC checks in this close to a release
+const PREFLIGHT_MS = 20 * 60 * 1000;       // this long before a release, make sure the PC answers (waking it if asleep)
+const PREFLIGHT_WAIT_MS = 3 * 60 * 1000;   // how long the PC gets to answer that wake-up before you are told
+const NO_WORD_MS = 8 * 60 * 1000;          // a run that started should have reported by this long after the release
+const NO_WORD_FOR_MS = 60 * 60 * 1000;     // ...and after this the bot stops watching for it
 const GONE = ['test', 'free', 'signin', 'style', 'lead', 'warn', 'go', 'code'];   // link-alert commands from version 1
 
 // The banner pictures (made by art/make-banners.cjs): the menu card in three versions, one for
@@ -73,7 +77,7 @@ function cleanResult(raw) {
 function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, once: [], order: [1, 2, 3, 4, 5, 6], paused: false,
-    results: {}, sent: {}, pics: {}, lastSeen: null, home: null,
+    results: {}, sent: {}, pics: {}, lastSeen: null, lastRun: null, home: null,
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -92,6 +96,7 @@ function loadState(raw, env = {}) {
         }
       }
       if (typeof raw.lastSeen === 'number') state.lastSeen = raw.lastSeen;
+      if (typeof raw.lastRun === 'number') state.lastRun = raw.lastRun;     // when the PC's booking run last started, or said how it is going
       const h = raw.home;                                         // where your PC last called from, for waking it
       if (h && publicIPv4(h.ip) && typeof h.at === 'number') state.home = { ip: h.ip, at: h.at };
     }
@@ -284,7 +289,16 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (isNew) newest.set(chat, id);
   }
   // Redraws a card where it is: just the words when its banner is still right, otherwise both.
+  // One edit at a time per card: a tap and the PC's dot changing can both redraw the same card
+  // in the same moment, and Telegram cancels one of two edits that overlap.
+  const editing = new Map();
   async function drawOn(chat, id, card) {
+    const key = `${chat}:${id}`;
+    const mine = (editing.get(key) || Promise.resolve()).catch(() => {}).then(() => drawNow(chat, id, card));
+    editing.set(key, mine);
+    try { await mine; } finally { if (editing.get(key) === mine) editing.delete(key); }
+  }
+  async function drawNow(chat, id, card) {
     const was = cards.get(`${chat}:${id}`);
     const extra = { parse_mode: 'HTML', reply_markup: card.keyboard };
     try {
@@ -405,20 +419,32 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
 
   // ---------- your PC ----------
-  // The PC asks what to book. Asking counts as checking in; before a release it also brings a
-  // heads-up card, once per release.
-  function jobsForAgent(from = {}) {
+  // The PC asks what to book. `run` says whether this is a booking run starting (the nightly
+  // task) or only a look (`node book.js --jobs`); an older PC says neither, and counts as a run.
+  // A run starting is what the "has not started" warning watches for, and before a release it
+  // brings the heads-up card, once per release.
+  let headsUp = null;                       // tonight's heads-up card, so "signed in" can be written on it
+  // What has been said is remembered for a few days, so nothing is said twice; then forgotten.
+  const forgetOld = t => { for (const k of Object.keys(state.sent)) if (t - state.sent[k] > SENT_KEEP_MS) delete state.sent[k]; };
+  function jobsForAgent(from = {}, { run } = {}) {
     const t = now();
+    const starting = run !== false;
     state.lastSeen = t;
+    if (starting) state.lastRun = t;
     noteHome(from);
     const c = cfg();
     const jobs = state.paused || owner() === null ? [] : jobsFor(t, c, state.results);
     const coming = jobs.filter(j => j.releaseAt > t && j.releaseAt - t <= HEADS_UP_MS);
-    if (coming.length) {
+    if (starting && coming.length) {
       const key = `ready:${coming[0].releaseAt}`;
       if (!state.sent[key]) {
+        forgetOld(t);
         state.sent[key] = t;
-        sendCard(owner(), 'home-awake', M.headsUp(c, coming)).catch(e => { delete state.sent[key]; log(`Heads-up not sent: ${e.message}`); });
+        const card = { chat: owner(), coming, id: null, photo: false, ready: false };
+        card.sent = sendCard(card.chat, 'home-awake', M.headsUp(c, coming))
+          .then(sent => { card.id = (sent && sent.message_id) || null; card.photo = !!(sent && sent.photo); })
+          .catch(e => { delete state.sent[key]; log(`Heads-up not sent: ${e.message}`); });
+        headsUp = card;
       }
     }
     save();
@@ -448,6 +474,42 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       order = takeOrder(now());
     }
     return { ok: true, ...order };
+  }
+
+  // The PC says how tonight's run is going, before there is a result: "ready" once it has signed
+  // in to ClubSpark (written on the heads-up card), or "trouble" when an attempt failed and it is
+  // about to try again (a message, so you know with minutes to spare).
+  let lastTrouble = 0;
+  async function progressFromAgent(raw) {
+    const stage = raw && raw.stage;
+    const chat = owner();
+    if (stage !== 'ready' && stage !== 'trouble') return { ok: false, why: 'that is not a stage I know (ready or trouble)' };
+    state.lastSeen = state.lastRun = now();           // the run is going: the wait for its result starts again
+    save();
+    if (chat === null) return { ok: true };
+    if (stage === 'ready') {
+      const card = headsUp;
+      if (!card || card.ready) return { ok: true };
+      card.ready = true;
+      await card.sent;                                  // the card itself may still be on its way
+      if (!card.id) return { ok: true };
+      const caption = M.headsUp(cfg(), card.coming, true);
+      try {
+        if (card.photo) await tg.editCaption(card.chat, card.id, caption, { parse_mode: 'HTML' });
+        else await tg.edit(card.chat, card.id, caption, html);
+      } catch (err) {
+        if (!notModified(err)) log(`Could not write "signed in" on the heads-up: ${err.message}`);
+      }
+      log('Your PC has signed in and is waiting for the release.');
+      return { ok: true };
+    }
+    const t = now();
+    if (t - lastTrouble < 15000) return { ok: true };            // never a flood of these
+    lastTrouble = t;
+    const why = String(raw.why || 'no reason given').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '').slice(0, 300);
+    await say(chat, M.troubleText(why, intIn(raw.attempt, 2, 9), intIn(raw.of, 2, 9)));
+    log(`Your PC reported trouble before the booking: ${why}`);
+    return { ok: true };
   }
 
   // The PC says what happened. The message goes out first: if Telegram fails, the PC is told
@@ -628,9 +690,84 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
 
   // ---------- the timer ----------
-  // Warns you if your PC has not checked in shortly before a release, and tidies up.
+  // Watches each booking night from 20 minutes before the release to an hour after, and speaks
+  // up when something is not as it should be. Three checks, each said once:
+  //   20 minutes before   the PC is not awake: wake it; three minutes on, still silent: say so
+  //    2 minutes before   the PC's booking run has not started
+  //    8 minutes after    the run started, but no result has come back
   let ticking = false;
   const retryAt = {};
+  // Sends a warning once (trying again after a failed send), and notes that it went.
+  async function warnOnce(key, t, send, noted) {
+    if (state.sent[key] || (retryAt[key] && t < retryAt[key])) return;
+    try {
+      await send();
+      forgetOld(t);
+      state.sent[key] = t;
+      save();
+      log(noted);
+    } catch (err) {
+      retryAt[key] = t + (err.retryAfter ? err.retryAfter * 1000 : 5000);
+      log(`Could not send the warning: ${err.message}`);
+    }
+  }
+
+  async function checkAhead(t, chat) {
+    const rel = releaseAround(t, cfg(), PREFLIGHT_MS, -MISSING_MS);
+    if (!rel) return;
+    const key = `pre:${rel.releaseAt}`, warned = `prewarn:${rel.releaseAt}`;
+    const tried = state.sent[key];
+    if (!tried) {
+      const pc = pcState(t);
+      if (pc === 'awake' || (retryAt[key] && t < retryAt[key])) return;
+      if (wakeState() !== 'ready') {
+        // Nothing to wake it with from here: speak up only if it has been silent for over a day.
+        if (pc === 'offline') {
+          await warnOnce(warned, t, () => sendCard(chat, 'home-offline', M.notAnsweringText(cfg(), rel, null, !!state.lastSeen), UI.afterNotAnswering(false)),
+            `Warned ahead of ${label(rel.playDate)}'s booking that the PC has been out of touch for over a day`);
+        }
+        return;
+      }
+      try {
+        await wake({ host: state.home.ip, port: wakePort, mac: wakeMac });
+      } catch (err) {
+        retryAt[key] = t + 30000;
+        log(`Wake-up ahead of the booking not sent: ${err.message}`);
+        return;
+      }
+      state.sent[key] = wokeAt = t;
+      save();
+      log(`Ahead of ${label(rel.playDate)}'s booking your PC was not awake, so I sent it a wake-up.`);
+      return;
+    }
+    if (t - tried < PREFLIGHT_WAIT_MS || (state.lastSeen && state.lastSeen > tried)) return;     // still waiting, or it answered
+    await warnOnce(warned, t, () => sendCard(chat, 'home-offline', M.notAnsweringText(cfg(), rel, tried), UI.afterNotAnswering(true)),
+      `Warned that the PC did not answer a wake-up ahead of ${label(rel.playDate)}'s booking`);
+  }
+
+  async function checkStarted(t, chat) {
+    const rel = missingFor(t, cfg(), state.lastRun);
+    if (!rel) return;
+    const awake = pcState(t) === 'awake';
+    await warnOnce(`missing:${rel.releaseAt}`, t, () => sendCard(chat, 'home-offline', M.missingText(cfg(), rel, awake), UI.afterMissing()),
+      `Warned that the booking run has not started for ${label(rel.playDate)}${awake ? ' (the PC is awake)' : ''}`);
+  }
+
+  async function checkReported(t, chat) {
+    const rel = releaseAround(t, cfg(), 0, NO_WORD_FOR_MS);
+    // No run for this release at all: the "has not started" warning has already said so.
+    if (!rel || !state.lastRun || state.lastRun < rel.releaseAt - SEEN_FRESH_MS) return;
+    // The eight minutes run from the release, or from the last sign of life after it: the run
+    // starting (or starting over), or the result for another of tonight's bookings.
+    const results = rel.requests.map(r => (state.results[r.id] && state.results[r.id].at) || 0);
+    if (t < Math.max(rel.releaseAt, state.lastRun, ...results) + NO_WORD_MS) return;
+    const heard = r => { const got = state.results[r.id]; return !!got && (got.status === 'booked' || got.at >= rel.releaseAt - SEEN_FRESH_MS); };
+    const silent = rel.requests.filter(r => !heard(r));
+    if (!silent.length) return;
+    await warnOnce(`noword:${rel.releaseAt}`, t, () => sendCard(chat, 'missed', M.noWordText(silent), UI.afterFailed()),
+      `Said there is no word from the PC about ${silent.map(r => r.id).join(', ')}`);
+  }
+
   async function tick() {
     if (ticking) return;
     ticking = true;
@@ -641,20 +778,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       await refreshNewest(t);
       const chat = owner();
       if (chat === null || state.paused || !linked) return;
-      const rel = missingFor(t, cfg(), state.lastSeen);
-      if (!rel) return;
-      const key = `missing:${rel.releaseAt}`;
-      if (state.sent[key] || (retryAt[key] && t < retryAt[key])) return;
-      try {
-        await sendCard(chat, 'home-offline', M.missingText(cfg(), rel), UI.afterMissing());
-        state.sent[key] = t;
-        for (const k of Object.keys(state.sent)) if (t - state.sent[k] > SENT_KEEP_MS) delete state.sent[k];
-        save();
-        log(`Warned that the PC has not checked in for ${label(rel.playDate)}`);
-      } catch (err) {
-        retryAt[key] = t + (err.retryAfter ? err.retryAfter * 1000 : 5000);
-        log(`Could not send the warning: ${err.message}`);
-      }
+      await checkAhead(t, chat);
+      await checkStarted(t, chat);
+      await checkReported(t, chat);
     } finally {
       ticking = false;
     }
@@ -678,7 +804,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // A banner by name, for the public /banner and /card pages (the wide trial).
   const picture = kind => (pictures && KINDS.includes(kind) ? pictures[kind] : null);
 
-  return { handleUpdate, tick, msToNext, announce, jobsForAgent, pingFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
+  return { handleUpdate, tick, msToNext, announce, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
 }
 
 module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, cleanResult, intIn, VERSION, KINDS };
