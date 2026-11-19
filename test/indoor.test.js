@@ -381,17 +381,25 @@ test('one start time: which courts are free, whether the next hour is too, and t
     '<b>Gorbals · Fri 20 Nov · 18:00–19:00</b>',
     'Free: courts 1, 3 and 4, as Glasgow Club showed it at 12:00.',
     'Free for the hour after as well, to 20:00: courts 3 and 4.',
-    'To book it: open the sheet, press 18:00 under a free court, then Book and Continue to payment, and pay by card there. It asks you to sign in.',
+    '<b>Hold</b> one and your PC signs in to Glasgow Club, puts it in your basket and opens the payment page. Paying is yours: I never can.',
+    'Or book it yourself: open the sheet, press 18:00 under a free court, then Book and Continue to payment, and pay by card there. It asks you to sign in.',
     'The price shows before you pay. The court is yours once the payment has gone through.',
   ].join('\n'));
   assert.deepEqual(flat(s).map(b => [b.text, b.callback_data || b.url]), [
+    ['Hold court 1', 'gh:g:20261120:1800:1'], ['Hold court 3', 'gh:g:20261120:1800:3'], ['Hold court 4', 'gh:g:20261120:1800:4'],
     ['Open the Gorbals sheet', 'https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=2026-11-20T00:00:00.000Z'],
     ['Other times', 'gd:g:20261120'], ['Menu', 'h'],
   ]);
+  assert.deepEqual(s.keyboard.inline_keyboard.map(r => r.length), [2, 1, 1, 2]);       // two holds to a row
   fits(s);
   // One court, and nothing after it.
   const one = UI.indoorSlot(ctx, 'g', '2026-11-20', 1260, got);
-  assert.match(one.caption, /\nFree: court 4, as Glasgow Club showed it at 12:00\.\nTo book it/);
+  assert.match(one.caption, /\nFree: court 4, as Glasgow Club showed it at 12:00\.\n<b>Hold<\/b> one/);
+  assert.deepEqual(flat(one).map(b => b.text), ['Hold court 4', 'Open the Gorbals sheet', 'Other times', 'Menu']);
+  // With no PC linked there is nothing that could hold a court: the link alone, as before.
+  const alone = UI.indoorSlot({ ...ctx, linked: false }, 'g', '2026-11-20', 1260, got);
+  assert.match(alone.caption, /\nFree: court 4, as Glasgow Club showed it at 12:00\.\nTo book it: open the sheet/);
+  assert.deepEqual(flat(alone).map(b => b.text), ['Open the Gorbals sheet', 'Other times', 'Menu']);
   assert.equal(UI.indoorSlot(ctx, 'g', '2026-11-20', 1200, got), null);                    // nothing free at 20:00
 });
 
@@ -451,7 +459,8 @@ test('booking an indoor court by tapping: menu, where, Gorbals, day, time, and t
   assert.deepEqual(glasgow.answeredFirst, [answered + 1]);
   await tap(app, find(tg.last(), '18:00').callback_data, card);
   assert.match(tg.last().text, /^<b>Gorbals · Fri 20 Nov · 18:00–19:00<\/b>\nFree: courts 1 and 3, as Glasgow Club showed it at 12:00\.\nFree for the hour after as well, to 20:00: court 3\./);
-  assert.equal(buttons(tg.last())[0].url, `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${FRI}T00:00:00.000Z`);
+  assert.equal(find(tg.last(), 'Open the Gorbals sheet').url, `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${FRI}T00:00:00.000Z`);
+  assert.deepEqual(buttons(tg.last()).slice(0, 2).map(b => b.callback_data), ['gh:g:20261120:1800:1', 'gh:g:20261120:1800:3']);
   assert.equal(tg.answers.length, answered + 2);
   // Only the one card throughout, and nothing was added to the Kelvingrove requests.
   assert.equal(tg.calls.filter(c => c.method === 'photo').length, 0);
@@ -603,7 +612,7 @@ test('Kelvingrove is one tap further on, and everything about it is as before', 
   await t.app.handleUpdate(say(OWNER, '/help'));
   assert.match(t.tg.last().text, /\/gorbals {2}and {2}\/scotstoun/);
   await t.app.handleUpdate(say(OWNER, '/status'));
-  assert.match(t.tg.last().text, /\(version 2\.6\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
+  assert.match(t.tg.last().text, /\(version 2\.7\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
 });
 
 test('the look at Glasgow Club on start-up is said in the log, whichever way it goes, and /status has it', async () => {

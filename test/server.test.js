@@ -158,3 +158,22 @@ test('a signed body that arrives in pieces, cut inside a letter, is still the PC
     assert.deepEqual(got.map(r => r.why), ['café fermé – naïve']);
   });
 });
+
+test('a note about a hold needs the token, and its answer carries your order back to the PC', async () => {
+  const got = [];
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onHold: raw => { got.push(raw); return raw.stage === 'held' ? { order: 'release' } : {}; } }, async base => {
+    const post = (body, headers = auth) => fetch(`${base}/agent/hold`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body });
+    assert.equal((await post(JSON.stringify({ id: 'a1b2c3d4e5f6', stage: 'held' }), {})).status, 401);
+    assert.equal((await post('not json')).status, 400);
+    assert.deepEqual(await (await post(JSON.stringify({ id: 'a1b2c3d4e5f6', stage: 'signing-in' }))).json(), { ok: true });
+    assert.deepEqual(await (await post(JSON.stringify({ id: 'a1b2c3d4e5f6', stage: 'held', price: '£23.00' }))).json(), { ok: true, order: 'release' });
+    assert.deepEqual(got.map(r => [r.id, r.stage, r.price]), [['a1b2c3d4e5f6', 'signing-in', undefined], ['a1b2c3d4e5f6', 'held', '£23.00']]);
+  });
+  // A handler that fails is a 500; one that is not there at all (an older bot) answers ok and no more.
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onHold: () => { throw new Error('boom'); } }, async base => {
+    assert.equal((await fetch(`${base}/agent/hold`, { method: 'POST', headers: auth, body: '{}' })).status, 500);
+  });
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }) }, async base => {
+    assert.deepEqual(await (await fetch(`${base}/agent/hold`, { method: 'POST', headers: auth, body: '{}' })).json(), { ok: true });
+  });
+});

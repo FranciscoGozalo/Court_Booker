@@ -2,8 +2,8 @@
 // Court booker: a Telegram bot that keeps your Kelvingrove booking requests. At each release
 // your PC at home signs in to ClubSpark and books (Cloudflare turns Railway away), reports
 // back here, and the bot sends you the court, the time and the gate code on a banner card.
-// For Glasgow Club's indoor courts (Gorbals, Scotstoun) it shows what is free and hands you the
-// page to book and pay on.
+// For Glasgow Club's indoor courts (Gorbals, Scotstoun) it shows what is free, has your PC put
+// one in your basket when you tap Hold, and leaves the paying to you.
 // Needs Node 20 or later, TELEGRAM_BOT_TOKEN, and AGENT_TOKEN for your PC. See README.md.
 
 const { createApp, VERSION } = require('./app');
@@ -75,7 +75,7 @@ async function main() {
   // The endpoint your PC talks to. Also answers a plain /health, which lets Railway give the
   // service a public domain.
   if (linked) {
-    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onLook: app.lookFromAgent, onProgress: app.progressFromAgent, picture: app.picture, token: agentToken, publicKey, log });
+    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onLook: app.lookFromAgent, onHold: app.holdFromAgent, onProgress: app.progressFromAgent, picture: app.picture, token: agentToken, publicKey, log });
     const port = Number(process.env.PORT) || 8080;
     server.listen(port, () => log(`Listening for your PC on port ${port} (${[publicKey && 'signed requests', agentToken && 'AGENT_TOKEN'].filter(Boolean).join(' or ')}).`));
     server.on('error', e => log(`The endpoint for your PC could not start: ${e.message}`));

@@ -9,7 +9,7 @@ The work is split in two because ClubSpark sits behind Cloudflare, which turns c
 
 Your ClubSpark password stays on your PC. The bot never sees it and never touches ClubSpark.
 
-It also finds free **indoor courts at Gorbals and Scotstoun** (Glasgow Club) and hands you the page to book and pay on; see [Indoor courts](#indoor-courts-glasgow-club).
+It also finds free **indoor courts at Gorbals and Scotstoun** (Glasgow Club), and can have your PC put one in your basket for you to pay for; see [Indoor courts](#indoor-courts-glasgow-club).
 
 ## What a booking night looks like
 
@@ -31,9 +31,13 @@ A one-off date that is already open is booked on the PC's next run (21:55 that n
 
 ## Indoor courts (Glasgow Club)
 
-**Book a date** on the menu first asks where: Kelvingrove Park, Gorbals or Scotstoun. For the two indoor centres the bot shows a day's free start times, read from Glasgow Club's booking site as any visitor sees them, then which courts are free at the time you pick, and a button that opens that day's sheet on Glasgow Club's own page. You book and pay there.
+**Book a date** on the menu first asks where: Kelvingrove Park, Gorbals or Scotstoun. For the two indoor centres the bot shows a day's free start times, read from Glasgow Club's booking site as any visitor sees them, then which courts are free at the time you pick. Under them are a **Hold** button for each free court, and a button that opens that day's sheet on Glasgow Club's own page, where you can book and pay yourself.
 
-The bot goes no further than that, and here is why. Glasgow Club takes a card payment with each booking. Its site keeps the basket in the browser tab that filled it, so a court put in a basket on one device cannot be paid for on another. And its own settings have saved cards and pay-by-link switched off (`GladstonePay_AllowMemberWallet` and `PayByLink_Enabled`, as read on 19 Nov 2026). So there is nothing a bot or a PC could hold for you to pay for later from your phone: the booking and the payment happen together, in your own browser.
+**Hold** has your PC do the first half of the booking. It signs in to Glasgow Club with the login kept on the PC, puts that court in your basket, presses "Continue to payment" and stops there, with the payment page open in a Chrome window on the PC. The card in Telegram follows each step, then shows the price and three buttons: **Open my basket** (Glasgow Club's basket page, opened on the device you are holding), **I have paid** and **Let it go**. Paying is yours: nothing on the bot or the PC types a card or presses Pay. Unpaid, the PC takes the court out of the basket again after 12 minutes (it waits up to five more while your bank's own page is showing). It takes out only a court that is still in the basket, and it calls a court booked only when your Bookings page lists it more often than it did just after signing in; anything else is said as "I could not see it", with what the basket showed.
+
+Whether a court held this way also shows in the basket on your phone had not been tried when this was written. Glasgow Club takes a card payment with each booking, and its own settings have saved cards and pay-by-link switched off (`GladstonePay_AllowMemberWallet` and `PayByLink_Enabled`, as read on 19 Nov 2026). As read that day, its site also keeps a basket in the browser that filled it. If your phone's basket comes up empty after you sign in, the court is only in the browser on the PC: pay in the Chrome window there, or let it go and book from the sheet on your phone.
+
+One court is held at a time and at most six holds are started in an hour. None is started from 35 minutes before the release time to 15 minutes after, every night, and the PC itself refuses over the same stretch by its own clock, and whenever its nightly booking is running. The PC is not put to sleep while it holds a court. If Glasgow Club's site ever answers the PC with a "checking your browser" page, the hold stops there, and for an hour no hold is started and the PC is not asked to read the sheet either. While a court is held its card has no Menu button, so the card stays where its buttons are; tapping **Hold** on any other card brings it there.
 
 Each day opens for booking a week ahead, at midnight. A day that has not opened yet is shown with the time it opens and what is free as it stands.
 
@@ -50,7 +54,7 @@ If your PC is asleep, the card says so and offers **Wake my PC** (when waking is
 | `/off thu` | Stop Thursdays. `/off all` clears every weekly booking. |
 | `/book 25 nov 19:00 2h` | Book one Kelvingrove date. `/book` alone asks where first. Also `25/11`, `wed` (the coming Wednesday), `tomorrow`, `2026-11-25`. |
 | `/cancel 2` | Remove one-off number 2 from `/plan`. `/cancel 25 nov` removes that date's. |
-| `/gorbals`, `/scotstoun` | The free indoor courts at that centre: pick a day, then a start time, then open Glasgow Club's page to book and pay. See [Indoor courts](#indoor-courts-glasgow-club). |
+| `/gorbals`, `/scotstoun` | The free indoor courts at that centre: pick a day, then a start time, then **Hold** a court (your PC puts it in your basket, and you pay) or open Glasgow Club's page to book and pay yourself. See [Indoor courts](#indoor-courts-glasgow-club). |
 | `/plan` | Your weekly and one-off bookings, how each stands, and the next booking run. |
 | `/order 3 4 5 2 1 6` | Which courts to try first. |
 | `/pause`, `/resume` | Stop and restart booking. |
@@ -154,7 +158,8 @@ lib/plan.js       reading what you type: days, dates, times, court order
 lib/schedule.js   which days open when, and what the PC should book now
 lib/messages.js   the words
 lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /agent/ping, which may wait
-                  for an instruction such as sleep or a look at Glasgow Club, POST /agent/look,
+                  for an instruction such as sleep, a look at Glasgow Club or a court to hold there,
+                  POST /agent/look, POST /agent/hold,
                   POST /agent/progress, POST /agent/result),
                   and the public banner pages for /wide
 lib/ui.js         the tap-through screens and their buttons

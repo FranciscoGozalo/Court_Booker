@@ -3,14 +3,15 @@
 // messages about it. The bot itself never touches ClubSpark: your PC signs in and books
 // (Cloudflare turns Railway away), then reports back here, and the bot tells you the court,
 // the time and the gate code.
-// For the indoor courts at Gorbals and Scotstoun (Glasgow Club) it only looks up what is free
-// and hands you the page to book and pay on (lib/glasgowclub.js says why it goes no further).
-// Glasgow Club's site turns Railway away too, so while your PC is awake it does that reading.
+// For the indoor courts at Gorbals and Scotstoun (Glasgow Club) it looks up what is free, and
+// "Hold" has your PC sign in there and put a court in your basket; paying is always yours
+// (lib/glasgowclub.js says why it goes no further). Glasgow Club's site turns Railway away too,
+// so while your PC is awake it does the reading as well.
 
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { iso, label, hhmm, todayCivil, addDays, londonInstant, civil, DAY_KEYS, DAY_LONG } = require('./lib/time');
+const { iso, label, hhmm, todayCivil, addDays, londonInstant, londonWall, civil, DAY_KEYS, DAY_LONG } = require('./lib/time');
 const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, slotText, slotEnd } = require('./lib/plan');
 const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf, upcoming, releaseAround, MISSING_MS, SEEN_FRESH_MS } = require('./lib/schedule');
 const M = require('./lib/messages');
@@ -18,7 +19,7 @@ const UI = require('./lib/ui');
 const { readMac, publicIPv4, sendWake } = require('./lib/wake');
 const G = require('./lib/glasgowclub');
 
-const VERSION = '2.6';
+const VERSION = '2.7';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -129,8 +130,9 @@ function readBackup(text) {
 // `linked` says whether a PC can reach the bot (AGENT_TOKEN is set). `wake` sends the
 // magic packet (lib/wake.js), and `glasgow` reads Glasgow Club's free indoor courts
 // (lib/glasgowclub.js); both are swapped out in tests. `pcLookMs` is how long your PC gets to
-// answer when it is asked to read Glasgow Club's sheet.
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000 }) {
+// answer when it is asked to read Glasgow Club's sheet, and `pcHoldMs` how long it gets to
+// collect a court to hold.
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000, pcHoldMs = 25000 }) {
   const indoor = glasgow || G.createGlasgowClub({ now, log });
   const fromVariable = readBackup(env.COURT_SETTINGS);
   const state = loadState(store.load() ?? fromVariable, env);
@@ -248,17 +250,26 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (pcState(t) !== 'awake') return { toast: 'Your PC is not awake.', screen: UI.home(ctx()), view: 'h' };
     const rel = sleepBlocker(t);
     if (rel) return { toast: `Your PC books at ${hhmm(releaseMin)}, so it stays awake until then.`, screen: UI.home(ctx()), view: 'h' };
+    if (holdLive(t)) return { toast: 'Your PC is holding a court for you. Let it go first.', screen: UI.home(ctx()), view: 'h' };
     sleepAsk = t;
     for (const w of waiters) w.wake();
     log('Asked your PC to sleep.');
     return { toast: 'Sleep sent', screen: UI.home(ctx()), view: 'h' };
   }
   // What the PC should do now, collected by its ping: { look } (read a day of Glasgow Club's
-  // sheet: someone is waiting for it, so it goes first) or { sleep: true }, each once, or nothing.
+  // sheet: someone is waiting for it, so it goes first), { hold } (put a court in your basket)
+  // or { sleep: true }, each once, or nothing.
   function takeOrder(t) {
     if (lookAsk && !lookAsk.taken) {
       lookAsk.taken = true;
       return { look: { id: lookAsk.id, key: lookAsk.key, date: lookAsk.date } };
+    }
+    if (hold && !hold.end && !hold.taken) {
+      hold.taken = true;
+      hold.heard = hold.takenAt = t;
+      log('Your PC collected the court to hold.');
+      drawHold(hold);
+      return { hold: { id: hold.id, key: hold.key, date: hold.date, start: hold.start, court: hold.court } };
     }
     if (sleepAsk === null) return {};
     const fresh = t - sleepAsk <= SLEEP_ASK_MS && !sleepBlocker(t);
@@ -338,6 +349,217 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       asleep.say = 'Glasgow Club\'s site turns this server away, so your PC reads the free courts for me, and your PC is not awake. Wake it and try again, or open the sheet.';
       asleep.wake = wakeState() === 'ready';
       throw asleep;
+    }
+  }
+
+  // ---------- your PC holds a court at Glasgow Club ----------
+  // "Hold" under a free court: your PC signs in to Glasgow Club, puts that court in your basket
+  // and stops at the payment page, in a Chrome window on the PC (tools/glasgow-club-book.js
+  // there). The request rides on the PC's ping, like a look. The tool then says each step on
+  // POST /agent/hold, and every note of its is answered with what you have tapped since: "Let it
+  // go" or "I have paid". Paying is always yours: neither the bot nor the PC can do it.
+  // One court at a time, never around the PC's nightly booking run, at most HOLD_PER_HOUR an hour.
+  const HOLD_STAGES = ['signing-in', 'signed-in', 'adding', 'held'];
+  const HOLD_ENDS = ['failed', 'refused', 'released', 'booked', 'left', 'unsure', 'closed', 'slept', 'gone'];
+  const HOLD_OURS = ['timeout', 'nostart'];           // endings this bot decided on itself: the PC's own word replaces them
+  const HOLD_BEFORE_MS = 35 * 60 * 1000;              // none is started this long before the release time...
+  const HOLD_AFTER_MS = 15 * 60 * 1000;               // ...or this long after it (the run starts five minutes before)
+  const HOLD_START_MS = 90 * 1000;                    // collected by the PC, yet no step heard for this long: it never started
+  const HOLD_SETUP_MS = 8 * 60 * 1000;                // from the tap to the basket takes under a minute; by now it is not coming
+  const HOLD_AFTER_END_MS = 7 * 60 * 1000;            // ...and this long after its time was up a hold is over, whatever was heard
+  const HOLD_SILENT_MS = 75 * 1000;                   // no word from the PC for this long: the card says so
+  const HOLD_LOST_MS = 4 * 60 * 1000;                 // ...and for this long: another hold may be started
+  const HOLD_PER_HOUR = 6;                            // each is a sign-in to Glasgow Club
+  const HOLD_QUIET_MS = 60 * 60 * 1000;               // after Glasgow Club's site checked visitors from home
+  const HOLD_REDRAW_MS = 5000;                        // a card Telegram would not redraw is tried again after this
+  let hold = null;                                    // the hold being followed, or the last one
+  const gaveUp = new Set();                           // holds given up on here: a PC that still has one is told to let it go
+  let holdStarts = [];
+  let holdQuiet = 0;
+  const clock = ms => { const w = londonWall(ms); return hhmm(w.hh * 60 + w.mm); };
+  const holdLive = (t = now()) => !!hold && !hold.end && t - hold.heard < HOLD_LOST_MS;
+  const holdName = h => `${G.CENTRES[h.key].name} ${h.date} ${hhmm(h.start)} court ${h.court}`;
+  const nearHoldGuard = t => [-1, 0, 1].some(d => {
+    const rel = londonInstant(addDays(todayCivil(t), d), releaseMin);
+    return t >= rel - HOLD_BEFORE_MS && t <= rel + HOLD_AFTER_MS;
+  });
+  function giveUpOn(h, end) {
+    h.end = end;
+    gaveUp.add(h.id);
+    if (gaveUp.size > 50) gaveUp.delete(gaveUp.values().next().value);
+  }
+  // Until when Glasgow Club's site is to be left alone by your PC: it met a "checking your
+  // browser" page there, holding a court or reading the sheet. 0 when it is not.
+  function siteQuietUntil(t) {
+    const seen = indoor.health();
+    const look = seen && !seen.ok && seen.via === 'pc' && (seen.why === 'challenge' || seen.why === 'limit') ? seen.at + HOLD_QUIET_MS : 0;
+    const until = Math.max(holdQuiet, look);
+    return t < until ? until : 0;
+  }
+  // What stands in the way of a new hold: { toast, say, wake, busy }, or null.
+  function holdBlocker(t) {
+    if (!linked) return { toast: 'Your PC is not linked to me.', say: 'Your PC is not linked to me, and it is your PC that signs in and holds the court.' };
+    if (holdLive(t)) return { toast: 'Your PC is already holding a court.', busy: true };
+    if (pcState(t) !== 'awake') {
+      return { toast: 'Your PC is not awake.', say: 'Your PC is not awake, and it is your PC that signs in to Glasgow Club and holds the court. Wake it and try again.', wake: wakeState() === 'ready' };
+    }
+    if (nearHoldGuard(t)) {
+      const from = (releaseMin - HOLD_BEFORE_MS / 60000 + 1440) % 1440, to = (releaseMin + HOLD_AFTER_MS / 60000) % 1440;
+      return { toast: 'Not around the nightly booking run.', say: `Your PC's nightly booking run is at ${hhmm(releaseMin)}, so it holds nothing else from ${hhmm(from)} to ${hhmm(to)}. The sheet below still opens.` };
+    }
+    const quietUntil = siteQuietUntil(t);
+    if (quietUntil) return { toast: 'Glasgow Club is checking visitors.', say: `Glasgow Club's site was checking visitors from your home connection, so your PC is leaving it alone until ${clock(quietUntil)}.` };
+    holdStarts = holdStarts.filter(at => t - at < 60 * 60 * 1000);
+    if (holdStarts.length >= HOLD_PER_HOUR) {
+      return { toast: 'Too many holds this hour.', say: `That is ${HOLD_PER_HOUR} holds within an hour, and each is a sign-in to Glasgow Club. The next can start at ${clock(holdStarts[0] + 60 * 60 * 1000)}.` };
+    }
+    return null;
+  }
+  // Redraws a hold's card as the hold stands now. One at a time, in order; never throws.
+  function drawHold(h) {
+    h.draws = (h.draws || Promise.resolve()).then(async () => {
+      h.redrawAt = null;
+      h.card = await show(h.chat, UI.indoorHold(ctx(), h), h.card, { wide: h.wide });
+    }).catch(err => {
+      h.redrawAt = now() + (err && err.retryAfter ? err.retryAfter * 1000 : HOLD_REDRAW_MS);     // checkHold tries again then
+      log(`Could not update the hold's card: ${err.message}`);
+    });
+    return h.draws;
+  }
+  // "Hold court N" was tapped (gh). The tap is answered, the PC's waiting ping is woken, and
+  // the card says what is going on; everything after that comes from the PC.
+  async function holdTap(q, chat, m, answer, newCard) {
+    const [, key, d, hmText, courtText] = m;
+    const dateIso = UI.fromD8(d), start = UI.fromHm(hmText), court = Number(courtText);
+    const t = now(), date = civilOf(dateIso), today = todayCivil(t);
+    const wide = typeof q.message.text === 'string' && !newCard;
+    const card = newCard ? null : q.message.message_id;
+    if (iso(date) !== dateIso || date < today || date > addDays(today, UI.INDOOR_DAYS - 1) || !(court >= 1 && court <= 20)
+      || !(start >= 0 && start <= 23 * 60 && start % 5 === 0) || londonInstant(date, start) <= t) {
+      await answer('That time is no longer on offer. Pick again.');
+      await show(chat, UI.indoorDays(ctx(), key), card, { wide });
+      return;
+    }
+    const no = holdBlocker(t);
+    if (no) {
+      await answer(no.toast);
+      if (!no.busy) await show(chat, UI.indoorHoldNo(ctx(), key, dateIso, start, court, no), card, { wide });
+      else if (hold.card !== card) {                                     // the hold's own card may be far up the chat by now: it moves here
+        hold.card = card;
+        hold.wide = wide;
+        await drawHold(hold);
+      }
+      return;
+    }
+    if (hold && !hold.end) {                                             // one that went silent long ago: it is over, and a PC that still has it lets go
+      giveUpOn(hold, 'timeout');
+      drawHold(hold);
+    }
+    const h = { id: crypto.randomBytes(6).toString('hex'), chat, card, wide, key, date: dateIso, start, court, at: t, heard: t,
+      taken: false, takenAt: null, stage: 'asked', end: null, order: null, price: '', heldAt: null, until: null, why: '', basket: '', removed: null, words: '', checked: false, silent: false, draws: null, redrawAt: null };
+    hold = h;
+    holdStarts.push(t);
+    log(`Hold asked for: ${holdName(h)}.`);
+    for (const w of [...waiters].reverse()) w.wake();                    // the newest ping first, as for a look
+    await answer('Asking your PC');
+    await drawHold(h);
+  }
+  // "Let it go" or "Stop" (gx: release) and "I have paid" (gp: done) on a hold's card. The PC
+  // hears of it on its next note, a few seconds on.
+  function holdOrder(id, what) {
+    const h = hold;
+    if (!h || h.id !== id) return { toast: 'I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up.' };
+    if (h.end) return { toast: 'That hold is over.' };
+    if (!h.taken) {                                                      // the PC has not collected it: nothing to undo
+      giveUpOn(h, 'stopped');
+      log('Hold stopped before the PC collected it.');
+      drawHold(h);
+      return { toast: 'Stopped' };
+    }
+    if (what === 'done' && h.stage !== 'held') return { toast: 'It is not in your basket yet.' };
+    if (h.order) return { toast: h.order === 'release' ? 'Already letting it go.' : 'Already checking.' };
+    h.order = what;
+    log(`Hold: you tapped ${what === 'done' ? 'I have paid' : 'Let it go'}.`);
+    drawHold(h);
+    return { toast: what === 'done' ? 'Checking your Bookings page' : 'Letting it go' };
+  }
+  // A note from the PC's tool about a hold: a step, or how it ended. The answer carries what
+  // you have tapped since. A hold given up on here is told to let go; one this bot does not
+  // know (it restarted meanwhile) is left to run out by itself on the PC.
+  function holdFromAgent(raw) {
+    const t = now();
+    const id = raw && typeof raw === 'object' && typeof raw.id === 'string' ? raw.id : null;
+    const stage = raw && typeof raw === 'object' && typeof raw.stage === 'string' ? raw.stage : '';
+    const h = hold;
+    if (!id || !h || id !== h.id) return id && gaveUp.has(id) ? { ok: true, order: 'release' } : { ok: true, unknown: true };
+    const ending = HOLD_ENDS.includes(stage);
+    // Over already. What the PC itself says of the ending replaces one this bot only assumed.
+    if (h.end && !(ending && stage !== 'gone' && HOLD_OURS.includes(h.end))) return gaveUp.has(id) && !ending ? { ok: true, order: 'release' } : { ok: true };
+    state.lastSeen = t;                                                  // a note from the PC shows it is awake, as a ping does
+    h.heard = t;
+    const text = v => String(v ?? '').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '').slice(0, 300);
+    let redraw = h.silent;
+    h.silent = false;
+    if (ending) {
+      h.end = stage;
+      h.why = text(raw.why);
+      h.words = text(raw.words);
+      h.basket = ['empty', 'items', 'unclear', 'untouched', 'gone', 'still'].includes(raw.basket) ? raw.basket : '';
+      h.removed = Number.isInteger(raw.removed) && raw.removed >= 0 ? raw.removed : null;
+      h.checked = raw.checked === true;
+      if (raw.kind === 'challenge') {                                    // the site was checking visitors: no holds, and no looks by the PC, for an hour
+        holdQuiet = t + HOLD_QUIET_MS;
+        if (indoor.turnedAway) indoor.turnedAway('pc', 'the site was checking its visitors when your PC went to hold a court');
+      }
+      log(`Hold ${stage}: ${holdName(h)}${h.why ? ` (${h.why})` : ''}.`);
+      drawHold(h);
+      return { ok: true };
+    }
+    if (HOLD_STAGES.indexOf(stage) > HOLD_STAGES.indexOf(h.stage)) {      // forwards only ("asked" comes before them all)
+      h.stage = stage;
+      redraw = true;
+      if (stage === 'held') {
+        h.price = typeof raw.price === 'string' && /^£\d{1,4}(\.\d\d)?$/.test(raw.price) ? raw.price : '';
+        const left = Number(raw.left);
+        h.heldAt = t;
+        h.until = t + (left > 0 && left <= 30 * 60 * 1000 ? left : 12 * 60 * 1000);
+        log(`Hold: ${holdName(h)} is in the basket${h.price ? ` (${h.price})` : ''}.`);
+      }
+    }
+    if (redraw) drawHold(h);
+    return h.order ? { ok: true, order: h.order } : { ok: true };
+  }
+  // Looked at by the timer: a hold the PC never collected, one it has gone silent on, and one
+  // that has run past any time it could still be going.
+  async function checkHold(t) {
+    const h = hold;
+    if (!h) return;
+    if (h.redrawAt && t >= h.redrawAt) await drawHold(h);                // the last redraw did not get through
+    if (h.end) return;
+    if (!h.taken) {
+      if (t - h.at < pcHoldMs) return;
+      giveUpOn(h, 'nopickup');
+      log('Your PC did not collect the court to hold in time.');
+      await drawHold(h);
+      return;
+    }
+    if (h.stage === 'asked' && t - h.takenAt >= HOLD_START_MS) {         // collected, and then nothing: the tool never started
+      giveUpOn(h, 'nostart');
+      log(`Hold: your PC collected ${holdName(h)} but never started on it.`);
+      await drawHold(h);
+      return;
+    }
+    if (t >= (h.until ? h.until + HOLD_AFTER_END_MS : h.at + HOLD_SETUP_MS)) {
+      giveUpOn(h, 'timeout');
+      log(`Hold: nothing more was heard about ${holdName(h)}.`);
+      await drawHold(h);
+      return;
+    }
+    const silent = h.stage !== 'asked' && t - h.heard >= HOLD_SILENT_MS;        // before its first step, "never started" covers it
+    if (silent !== h.silent) {
+      h.silent = silent;
+      if (silent) log('Hold: no word from your PC for over a minute.');
+      await drawHold(h);
     }
   }
 
@@ -482,6 +704,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (data === 's') return { screen: UI.status(c, statusInfo()), view: 's' };
     if (data === 'sl') return { screen: UI.sleepConfirm(c) };
     if (data === 'sl:ok') return requestSleep();
+    if ((m = /^g([xp]):([0-9a-f]{12})$/.exec(data))) return holdOrder(m[2], m[1] === 'x' ? 'release' : 'done');
     return { toast: 'That button is out of date. Send /menu.' };
   }
 
@@ -553,11 +776,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const fresh = data.startsWith('n:');                                   // on a booking message: keep it, open a new card
     if (fresh) data = data.slice(2);
     const indoorMatch = /^g([drt]):([gs]):(\d{8})(?::(\d{4}))?$/.exec(data);
-    if (indoorMatch) {
+    const holdMatch = /^gh:([gs]):(\d{8}):(\d{4}):(\d{1,2})$/.exec(data);
+    if (indoorMatch || holdMatch) {
       // A tap can be answered once. If something fails after that, the word goes as a message.
       let answered = false;
       const once = text => { if (answered) return Promise.resolve(); answered = true; return answer(text); };
-      try { await indoorTap(q, chat, indoorMatch, once, fresh); } catch (e) {
+      try { await (holdMatch ? holdTap(q, chat, holdMatch, once, fresh) : indoorTap(q, chat, indoorMatch, once, fresh)); } catch (e) {
         log(`Indoor button failed: ${e.message}`);
         if (!answered) await once('That did not work. Send /menu to start again.');
         else await say(chat, 'That did not work: I could not update the card. Send /menu to start again.').catch(() => {});
@@ -623,7 +847,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     if (wait > 0) tryPcOnce(now());
     let order = takeOrder(now());
-    if (!order.sleep && !order.look && wait > 0) {
+    if (!order.sleep && !order.look && !order.hold && wait > 0) {
       await waitForOrder(wait * 1000);
       order = takeOrder(now());
     }
@@ -934,6 +1158,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const pastOnce = state.once.filter(o => civilOf(o.date) < today);
       if (pastOnce.length) { state.once = state.once.filter(o => civilOf(o.date) >= today); save(); }
       await refreshNewest(t);
+      await checkHold(t);
       const chat = owner();
       if (chat === null || state.paused || !linked) return;
       await checkAhead(t, chat);
@@ -962,7 +1187,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // A banner by name, for the public /banner and /card pages (the wide trial).
   const picture = kind => (pictures && KINDS.includes(kind) ? pictures[kind] : null);
 
-  return { handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
+  return { handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, holdFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
 }
 
 module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, cleanResult, intIn, VERSION, KINDS };
