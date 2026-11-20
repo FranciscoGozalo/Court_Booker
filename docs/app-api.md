@@ -1213,7 +1213,7 @@ phone's push token: the phone stays linked, and gets notifications again once th
   at its midnight or, for a one-off, once its day is open; each booking once at most, at most `GLASGOW_AUTO_PAY_MAX` (£30), and
   within the PC's daily limit (`GLASGOW_PAY_PER_DAY`, 2). It can also keep one from the PC.
   To stop them all, do it on the PC itself, where no bot can come between: set `GLASGOW_PAY_PER_DAY=0`
-  in its `.env` (no automatic payment at all), or delete `vaultauto.json` (the kept security code).
+  in its `.env` (no automatic payment at all), or delete `vault\auto.json` (the kept security code).
   Forgetting the card, or switching automatic payments off in the app, works too when the bot is
   what it should be, but both orders travel through it.
 - A bot that is not what it should be can still start holds, drop or delay what the app sends, or
