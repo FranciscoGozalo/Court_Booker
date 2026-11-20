@@ -19,7 +19,7 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.9 (`api: 2`). `api: 2` adds the card and Pay
+This file describes the API as built in version 2.9.1 (`api: 2`; 2.9.1 adds `card.tag`, see `card`). `api: 2` adds the card and Pay
 (`pc.cardKey`, `card`, `hold.can.pay`, the hold stages `"paying"` and `"approve"`, `POST /app/card`,
 `POST /app/card/forget` and `what: "pay"` in `POST /app/hold/order`), and Glasgow Life's seven parks
 on ClubSpark (`POST /app/clubspark/look` and `/book`, `state.clubspark`), with every venue and its
@@ -89,7 +89,7 @@ week's 7 sessions and 14 hours, one card on its way to the PC at a time, and one
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.9", api: 2 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.9.1", api: 2 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -129,7 +129,7 @@ current etag the answer waits up to `wait` seconds for a change and then, if the
 
 ```
 state = {
-  now, bot: "2.9",
+  now, bot: "2.9.1",
   venue: { name: "Kelvingrove Park", short: "KP", first: 540, last: 1260, lengths: [1, 2],
            courts: [1,2,3,4,5,6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
   venues: [ { key, name, club: "clubspark" | "glasgow", types: ["outdoor"] | ["indoor"] | …,
@@ -152,7 +152,7 @@ state = {
   run:     null | { stage: "started" | "ready" | "trouble", at, why },    // tonight's run, as the PC reports it
   indoor:  { linked, days: 9, quietUntil, holdNo,                         // holdNo: why no hold can start now (plain text), or null
              centres: [ { key: "g", name: "Gorbals", site }, { key: "s", name: "Scotstoun", site } ] },
-  card:    null | { brand, last4, expMonth, expYear, pending, forgetting, why },   // the card your PC keeps, for Pay
+  card:    null | { brand, last4, expMonth, expYear, tag, pending, forgetting, why },   // the card your PC keeps, for Pay
   hold:    null | hold,
   notes:   [ { id, at, kind: "booked" | "missed" | "warn" | "hold" | "info", title, body } ],   // newest first, the last 30
   devices: [ { id, name, at, seenAt, me } ],
@@ -354,6 +354,13 @@ Null when the PC keeps no card as far as the bot knows, none is on its way and t
   or "Card". `last4`: the last four digits, a string. `expMonth` (1 to 12) and `expYear` (four
   digits). All four are null while the PC keeps no card (`pending` or `why` is then what there is).
   Nothing more of the card ever reaches the bot.
+- `tag` (added in 2.9.1, within `api: 2`): which pay key the card was kept with, so that the app can
+  tell its own card from one given on another phone (or one whose "kept" it never heard): the first
+  8 hex characters (lower case) of the SHA-256 of the pay key's 32 raw bytes (the base64 the app
+  sealed with the card, decoded). For the pay key of 32 bytes of 0x5a
+  (`WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=`) it is `"60bf07c4"`. Null when the PC keeps
+  no card, or its booker is older than 2.9.1 (or the card was kept before it), or what the PC
+  said is not 8 such characters. It says nothing of the card or the key that could be used.
 - `pending`: true from `POST /app/card` until the PC has said how that card went (it collects it
   with its next ping, within seconds while it is awake, and answers on the ping after), or two
   minutes have gone. The card shown meanwhile is the one kept before.
@@ -432,9 +439,11 @@ time, whoever started it.
     says: “…”".
   - `"approve"`: "Approve the payment in your banking app. Your bank wants you to approve £23.00 to
     Glasgow Club before it pays." and "Your PC pressed Pay and is waiting for the answer until 12:09."
-  - back in the basket after Pay: "Your PC could not pay: <the PC's reason>. Pay was not pressed, so
-    nothing was paid." (it does not try again for this court), or "Not paid from the app: <why>.
-    Nothing was pressed, so you can ask again there." (the order never reached the PC).
+  - back in the basket after Pay: "Your PC could not pay: <the PC's reason>. Your PC pressed
+    nothing." (it does not try again for this court; whether anything was paid in that window by
+    other hands, it cannot say: one of its reasons is "someone is already paying in the Chrome window
+    on your PC"), or "Not paid from the app: <why>. Your PC pressed nothing, so you can ask again
+    there." (the order never reached the PC).
   - how it ended after a press (`ended` as before): "Booked and paid. Your PC pressed Pay, and the
     court is on your Bookings page at Glasgow Club now; it was not before."; "Your PC pressed Pay,
     but the payment did not go through: …" (with what the payment page said); "Your PC pressed
@@ -893,7 +902,7 @@ not reach it: nothing was pressed, and Pay may be asked for again. The checks co
    once at most", "the card kept on this PC has expired", or the daily limit's.
 2. `"paying"`: it types the card and the code into the three boxes and reads each back, notes the
    payment for its daily limit (`GLASGOW_PAY_PER_DAY` on the PC, two unless set), and presses Pay,
-   once. Stopped before the press, it goes back to `"held"`, unpaid.
+   once. Stopped before the press, it goes back to `"held"`, having pressed nothing.
 3. It waits for the answer. Your bank wanting your approval (its page, with no box to type in):
    `"approve"`, and the PC waits five minutes for it. Your bank asking for a code to be typed in: the
    PC stops there, and never types or passes on such a code (`"failed"`). The payment page coming back

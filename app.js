@@ -27,7 +27,7 @@ const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 
-const VERSION = '2.9';
+const VERSION = '2.9.1';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -619,7 +619,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       // `paySealed`); 'told' (it went to the PC at `payToldAt`, and the sealed code is no longer
       // kept here); 'paying' (the PC said it is paying); 'failed' (the PC said it could not, and
       // did not press Pay: `payFailed`); 'lost' (it never reached the PC, or the PC did not take
-      // it up: `payFailed`. Nothing was pressed, and Pay may be asked for again). `payAmount`: the
+      // it up: `payFailed`. Your PC pressed nothing, and Pay may be asked for again). `payAmount`: the
       // amount confirmed in the app. `pressedAt`: when a press was heard of here. `payDoubt`: why
       // a press is only "maybe". `payWords`: what the payment page said after the press.
       // `pressed`: what is known of a press (PRESS_RANK). `bank`: with an ending, 'approve' (your
@@ -906,7 +906,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         log(`Hold: ${holdName(h)} is in the basket${h.price ? ` (${h.price})` : ''}.`);
       }
     } else if (stage === 'held' && PAYING.includes(h.stage) && !pressedNow(h) && raw.pay === 'failed') {
-      // The PC stopped before it pressed Pay: back in the basket, unpaid, as it was.
+      // The PC stopped before it pressed Pay: back in the basket, as it was.
       h.stage = 'held';
       redraw = true;
     }
@@ -1017,7 +1017,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const CARD_ASK_MS = 2 * 60 * 1000;                  // a card waits this long for the PC to collect it...
   const CARD_ANSWER_MS = 2 * 60 * 1000;               // ...and a card or a forget, once collected, this long for the PC's answer
   let cardKey = null;                                 // the PC's card key, as its last ping gave it (base64), or null
-  let pcCard = null;                                  // the card the PC keeps, as its last ping said: { brand, last4, expMonth, expYear }, or null
+  let pcCard = null;                                  // the card the PC keeps, as its last ping said: { brand, last4, expMonth, expYear, tag }, or null
   let pcCardSaid = false;                             // whether a ping has said which card it keeps (since this start)
   let cardAsk = null;                                 // waiting for the PC: { id, kind: 'card' | 'forget', sealed, at, takenAt }
   let cardWhy = null;                                 // why the last card (or forget) did not go through, in words, for the app
@@ -1123,6 +1123,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (!pcCard && !cardAsk && !cardWhy) return null;
     return {
       brand: pcCard ? pcCard.brand : null, last4: pcCard ? pcCard.last4 : null, expMonth: pcCard ? pcCard.expMonth : null, expYear: pcCard ? pcCard.expYear : null,
+      tag: pcCard ? pcCard.tag : null,
       pending: !!cardAsk && cardAsk.kind === 'card', forgetting: !!cardAsk && cardAsk.kind === 'forget', why: cardWhy,
     };
   }
