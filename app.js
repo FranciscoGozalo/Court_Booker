@@ -28,7 +28,7 @@ const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 
-const VERSION = '2.10.1';
+const VERSION = '2.10.3';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -332,8 +332,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // showing), or null. The Wake button, /wake and the app all go by it.
   function wakeBlocker(t) {
     if (wakeState() === 'off') return { toast: 'Waking is not set up: add WAKE_MAC on Railway.' };
-    if (!state.home) return { toast: 'I do not know your home address yet. Your PC must be in touch once first.' };
-    if (pcState(t) === 'awake') return { toast: 'Your PC is already awake.', menu: true };
+    if (!state.home) return { toast: 'Can’t wake your PC: it hasn’t been in touch.' };
+    if (pcState(t) === 'awake') return { toast: 'Already awake.', menu: true };
     if (wokeAt && t - wokeAt < 30000) return { toast: 'Sent a moment ago. Give it a minute.' };
     return null;
   }
@@ -347,7 +347,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       await wake({ host: state.home.ip, port: wakePort, mac: wakeMac });
     } catch (err) {
       log(`Wake-up not sent: ${err.message}`);
-      return { toast: 'The wake-up could not be sent. Try again.' };
+      return { toast: 'Couldn’t send the wake-up. Try again.' };
     }
     wokeAt = t;
     log('Wake-up sent to your PC.');
@@ -372,12 +372,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // What stands in the way of putting your PC to sleep now, in words, or null. Sleep my PC,
   // /sleep and the app all go by it.
   function sleepNo(t) {
-    if (!linked) return 'Your PC is not linked to me.';
-    if (pcState(t) !== 'awake') return 'Your PC is not awake.';
+    if (!linked) return 'Your PC isn’t linked.';
+    const pc = pcState(t);
+    if (pc !== 'awake') return pc === 'asleep' ? 'Already asleep.' : 'Your PC isn’t answering.';
     const booking = sleepBlocker(t);
-    if (booking) return booking.club ? 'Your PC books Glasgow Club at 00:00, so it stays awake until then.' : `Your PC books at ${hhmm(releaseMin)}, so it stays awake until then.`;
-    if (holdLive(t)) return 'Your PC is holding a court for you. Let it go first.';
-    if (cs.live(t)) return 'Your PC is booking a court for you. Wait for it to finish.';
+    if (booking) return `Staying awake for the ${booking.club ? '00:00' : hhmm(releaseMin)} booking.`;
+    if (holdLive(t)) return 'Your PC is holding a court. Let it go first.';
+    if (cs.live(t)) return 'Your PC is booking a court. Wait for it to finish.';
     return null;
   }
   // `sent` says the request is waiting for the PC.
@@ -487,12 +488,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (linked && pcState(t) === 'awake') {
       if (!indoor.peek(key, dateIso, { fresh }) && nearRun(t)) {
         const busy = G.problem('odd', 'the PC is at its booking run');
-        busy.say = `Your PC's nightly booking run is at ${hhmm(releaseMin)}, so I am asking nothing else of it until ${hhmm((releaseMin + LOOK_GUARD_MS / 60000) % 1440)}.`;
+        busy.say = `Not available until ${hhmm((releaseMin + LOOK_GUARD_MS / 60000) % 1440)}, around the nightly booking.`;
         throw busy;
       }
       if (!indoor.peek(key, dateIso, { fresh }) && nearClubRun(t)) {
         const busy = G.problem('odd', 'the PC is at its Glasgow Club booking');
-        busy.say = `Your PC books Glasgow Club at 00:00, so I am asking nothing else of it until ${hhmm(LOOK_GUARD_MS / 60000)}.`;
+        busy.say = `Not available until ${hhmm(LOOK_GUARD_MS / 60000)}, around the midnight booking.`;
         throw busy;
       }
       try { return await indoor.day(key, dateIso, { fresh, via: askPc }); } catch (err) {
@@ -503,7 +504,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     try { return await indoor.day(key, dateIso, { fresh }); } catch (err) {
       if (!linked || err.kind !== 'challenge') throw err;
       const asleep = G.problem('challenge', err.message);
-      asleep.say = 'Glasgow Club\'s site turns this server away, so your PC reads the free courts for me, and your PC is not awake. Wake it and try again, or open the sheet.';
+      asleep.say = 'Your PC reads Glasgow Club’s courts, and it isn’t awake. Wake it and try again, or open the sheet.';
       asleep.wake = wakeState() === 'ready';
       throw asleep;
     }
@@ -604,6 +605,19 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       log(`Could not keep a note about the hold: ${e.message}`);
     }
   }
+  // A hold that ended booked is a booking: kept as a result, as the midnight run keeps one for the
+  // same venue, date and start, and under the same id (lib/venues.js, resultId). So a weekly
+  // booking or a one-off for that slot is not booked again, and a later result for it does not
+  // count twice. Like every Glasgow Club booking it counts toward no allowance. Its card and its
+  // note have told of it already: nothing more is said. `c`: { key, date, start, court } (a hold,
+  // or a note about one); `price`: as your PC read it.
+  function holdBooked(c, price) {
+    const centre = G.CENTRES[c.key];
+    if (!centre) return;
+    resultFromAgent({ id: V.resultId(centre.venue, c.date, c.start), status: 'booked', type: centre.type, end: c.start + 60, court: String(c.court),
+      price: typeof price === 'string' ? price : null, paid: true }, { quiet: true })
+      .catch(e => log(`Could not keep the hold as a booking: ${e.message}`));
+  }
   // Until when Glasgow Club's site is to be left alone by your PC: it met a "checking your
   // browser" page there, holding a court or reading the sheet. 0 when it is not.
   function siteQuietUntil(t) {
@@ -614,25 +628,25 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
   // What stands in the way of a new hold: { toast, say, wake, busy }, or null.
   function holdBlocker(t) {
-    if (!linked) return { toast: 'Your PC is not linked to me.', say: 'Your PC is not linked to me, and it is your PC that signs in and holds the court.' };
+    if (!linked) return { toast: 'Your PC isn’t linked.', say: 'Your PC isn’t linked, and it’s your PC that holds the court.' };
     if (holdLive(t)) return { toast: 'Your PC is already holding a court.', busy: true };
-    if (cs.live(t)) return { toast: 'Your PC is booking a court.', say: 'Your PC is booking a court at a park just now. Hold one when it has finished.' };
+    if (cs.live(t)) return { toast: 'Your PC is booking a court.', say: 'Your PC is booking a park court. Hold one when it’s done.' };
     if (pcState(t) !== 'awake') {
-      return { toast: 'Your PC is not awake.', say: 'Your PC is not awake, and it is your PC that signs in to Glasgow Club and holds the court. Wake it and try again.', wake: wakeState() === 'ready' };
+      return { toast: 'Your PC isn’t awake.', say: 'Your PC isn’t awake. Wake it and try again.', wake: wakeState() === 'ready' };
     }
     if (nearHoldGuard(t)) {
       const from = (releaseMin - HOLD_BEFORE_MS / 60000 + 1440) % 1440, to = (releaseMin + HOLD_AFTER_MS / 60000) % 1440;
-      return { toast: 'Not around the nightly booking run.', say: `Your PC's nightly booking run is at ${hhmm(releaseMin)}, so it holds nothing else from ${hhmm(from)} to ${hhmm(to)}. The sheet below still opens.` };
+      return { toast: 'Not around the nightly booking.', say: `Not available ${hhmm(from)}–${hhmm(to)}, around the nightly booking. The sheet still opens.` };
     }
     if (nearClubHold(t)) {
       const from = 1440 - HOLD_BEFORE_MS / 60000, to = CLUB_HOLD_AFTER_MS / 60000;
-      return { toast: 'Not around the midnight booking.', say: `Your PC books Glasgow Club at 00:00, so it holds nothing else from ${hhmm(from)} to ${hhmm(to)}. The sheet below still opens.` };
+      return { toast: 'Not around the midnight booking.', say: `Not available ${hhmm(from)}–${hhmm(to)}, around the midnight booking. The sheet still opens.` };
     }
     const quietUntil = siteQuietUntil(t);
-    if (quietUntil) return { toast: 'Glasgow Club is checking visitors.', say: `Glasgow Club's site was checking visitors from your home connection, so your PC is leaving it alone until ${clock(quietUntil)}.` };
+    if (quietUntil) return { toast: 'Glasgow Club is checking visitors.', say: `Glasgow Club was checking visitors from your home connection. Not available until ${clock(quietUntil)}.` };
     holdStarts = holdStarts.filter(at => t - at < 60 * 60 * 1000);
     if (holdStarts.length >= HOLD_PER_HOUR) {
-      return { toast: 'Too many holds this hour.', say: `That is ${HOLD_PER_HOUR} holds within an hour, and each is a sign-in to Glasgow Club. The next can start at ${clock(holdStarts[0] + 60 * 60 * 1000)}.` };
+      return { toast: 'Too many holds this hour.', say: `That’s ${HOLD_PER_HOUR} holds in an hour. Next at ${clock(holdStarts[0] + 60 * 60 * 1000)}.` };
     }
     return null;
   }
@@ -731,7 +745,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // taken: it is at the payment page, and only it can say how that ends.
   function holdOrder(id, what) {
     const h = hold;
-    if (!h || h.id !== id) return { toast: 'I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up.' };
+    if (!h || h.id !== id) return { toast: 'No longer following that hold. Your PC lets it go when its time is up.' };
     if (h.end) return { toast: 'That hold is over.' };
     if (pressedNow(h)) return { toast: h.pressed === true ? 'Your PC has pressed Pay. Wait for the answer.' : 'Your PC may have pressed Pay. Wait for the answer.' };
     if (PAYING.includes(h.stage) || h.payState === 'paying') return { toast: 'Your PC is paying for it. Wait for its answer.' };
@@ -758,7 +772,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (h.end) return 'That hold is over.';
     if (PAYING.includes(h.stage) || h.payState === 'paying' || pressedNow(h)) return 'Your PC is paying for it already.';
     if (h.payState === 'asked' || h.payState === 'told') return 'Your PC has been told to pay for it already.';
-    if (h.payState === 'failed') return 'Your PC tried to pay for it once and could not, so it will not try again. Pay at your PC, or let it go.';
+    if (h.payState === 'failed') return 'Your PC couldn’t pay for it and won’t try again. Pay at your PC, or let it go.';
     if (h.stage !== 'held') return 'It is not in your basket yet.';
     if (h.order) return h.order === 'release' ? 'Already letting it go.' : 'Already checking.';
     if (cardAsk && cardAsk.kind === 'forget') return 'Your PC is forgetting its card.';
@@ -766,8 +780,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (!pcCard) return 'There is no card on your PC. Add one in the app first.';
     if (h.pay !== 'ready') return h.pay && h.payWhy ? `Your PC cannot pay for this court: ${h.payWhy}.` : 'Your PC has not said that it can pay for this court.';
     if (!h.price) return 'Your PC could not read the price, so it cannot pay for this court.';
-    if (h.silent || t - h.heard >= HOLD_SILENT_MS) return 'I have not heard from your PC for over a minute, so I am not asking it to pay.';
-    if (h.until && h.until - t < PAY_ROOM_MS) return 'Too little of the hold\'s time is left to pay for it from here. Pay at your PC, or let it go.';
+    if (h.silent || t - h.heard >= HOLD_SILENT_MS) return 'No word from your PC for over a minute, so it isn’t asked to pay.';
+    if (h.until && h.until - t < PAY_ROOM_MS) return 'Too little time left to pay from here. Pay at your PC, or let it go.';
     return null;
   }
   // Pay, from the app: the hold's id, the amount you confirmed there, and the card's security
@@ -775,10 +789,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // The order then waits for the PC's next note (a few seconds), PAY_ORDER_MS at most.
   function holdPay(id, amount, sealed) {
     const t = now(), h = hold;
-    if (!h || h.id !== id) return { toast: 'I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up.' };
+    if (!h || h.id !== id) return { toast: 'No longer following that hold. Your PC lets it go when its time is up.' };
     const no = payNo(h, t);
     if (no) return { toast: no };
-    if (amount !== h.price) return { toast: `The price is ${h.price}, not ${amount}. Look at it again before you pay.` };
+    if (amount !== h.price) return { toast: `The price is ${h.price}, not ${amount}. Check it before you pay.` };
     h.payState = 'asked';
     h.payAmount = amount;
     h.paySealed = sealed;
@@ -834,18 +848,21 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // What a note says of a press: on its way to paying ('paying', 'approve') and with an ending, in its `pressed`.
   const pressOf = (raw, stage) => (PAYING.includes(stage) || HOLD_ENDS.includes(stage) ? pressedSaid(raw.pressed) : null);
   const strangers = new Map();          // id -> { going, ended, failed: what has been said; pressed; court: which court, once a note has said }
+  // The court a note from the PC names: { key, date, start, court }, or null.
+  const courtOfNote = raw => (Object.prototype.hasOwnProperty.call(G.CENTRES, raw.key) && typeof raw.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.date)
+    && !Number.isNaN(Date.parse(`${raw.date}T12:00:00Z`)) && Number.isInteger(raw.start) && raw.start >= 0 && raw.start <= 23 * 60 && Number.isInteger(raw.court) && raw.court >= 1 && raw.court <= 20
+    ? { key: raw.key, date: raw.date, start: raw.start, court: raw.court } : null);
   function strangerNote(raw, id, stage) {
     const t = now();
     const ending = HOLD_ENDS.includes(stage);
+    // Booked: kept as a booking, whatever else is said of it (a court paid for with "I have paid" is said nothing more).
+    if (stage === 'booked' && courtOfNote(raw)) holdBooked(courtOfNote(raw), raw.price);
     const s = strangers.get(id) || { going: false, ended: false, failed: false, pressed: null, court: null };
     const said = pressOf(raw, stage);
     s.pressed = said ? stronger(s.pressed || false, said) : s.pressed;   // the PC link's "gone" may say nothing of a press: what an earlier note said stands
     const couldNot = !ending && stage === 'held' && raw.pay === 'failed' && !s.pressed;
     if (!s.pressed && !couldNot) return;
-    if (!s.court && Object.prototype.hasOwnProperty.call(G.CENTRES, raw.key) && typeof raw.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.date)
-      && !Number.isNaN(Date.parse(`${raw.date}T12:00:00Z`)) && Number.isInteger(raw.start) && raw.start >= 0 && raw.start <= 23 * 60 && Number.isInteger(raw.court) && raw.court >= 1 && raw.court <= 20) {
-      s.court = { key: raw.key, date: raw.date, start: raw.start, court: raw.court };
-    }
+    if (!s.court) s.court = courtOfNote(raw);
     strangers.set(id, s);
     if (strangers.size > 20) strangers.delete(strangers.keys().next().value);
     if (couldNot ? s.failed || s.ended : ending ? s.ended : s.going || s.ended) return;
@@ -877,7 +894,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (says) gaveUp.delete(id);
     const h = hold && id === hold.id ? hold : (id && former.get(id)) || null;
     if (!h) {
-      if (id && gaveUp.has(id)) return { ok: true, order: 'release' };
+      if (id && gaveUp.has(id)) {
+        if (stage === 'booked' && courtOfNote(raw)) holdBooked(courtOfNote(raw), raw.price);     // given up on here, and paid for at your PC all the same
+        return { ok: true, order: 'release' };
+      }
       if (id && /^[0-9a-f]{6,40}$/.test(id)) strangerNote(raw, id, stage);
       return { ok: true, unknown: true };
     }
@@ -921,6 +941,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       log(`Hold ${stage}: ${holdName(h)}${h.why ? ` (${h.why})` : ''}${h.pressed ? `; Pay ${h.pressed === true ? 'was' : h.pressed === 'maybe' ? 'may have been' : 'was ordered and may have been'} pressed` : ''}.`);
       drawHold(h);
       holdEnded(h);
+      if (stage === 'booked') holdBooked(h, h.price);
       return { ok: true };
     }
     const left = Number(raw.left);
@@ -1850,7 +1871,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const price = typeof raw.price === 'string' && /^£\d{1,4}(\.\d\d)?$/.test(raw.price) ? raw.price : null;
     const court = intIn(raw.court, 1, 20);
     const title = 'Approve the payment in your bank\'s app';
-    const body = `Your PC is paying ${price ? `${price} ` : ''}for ${M.slotOf({ ...r, end: r.start + 60 })}${court ? `, court ${court}` : ''}. Your bank wants you to approve it in its app; your PC waits five minutes for that.`;
+    const body = `Your PC is paying ${price ? `${price} ` : ''}for ${M.slotOf({ ...r, end: r.start + 60 })}${court ? `, court ${court}` : ''}. Approve it in your bank’s app within five minutes.`;
     log(`Your bank wants the payment for ${r.id} approved: told you so.`);
     note('warn', title, body);
     const chat = owner();
@@ -1860,12 +1881,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
 
   // The PC says what happened. The message goes out first: if Telegram fails, the PC is told
   // so and tries again, and nothing is recorded twice.
-  async function resultFromAgent(raw) {
+  // `quiet`: kept without a card, a note or a push, for a booking that has been told of already
+  // (a hold that ended booked: see holdBooked). Then a booking kept for that id stands.
+  async function resultFromAgent(raw, { quiet = false } = {}) {
     const r = cleanResult(raw);
     if (!r) return { ok: false, why: 'that result is missing something or does not make sense' };
     const prev = state.results[r.id];
-    if (prev && prev.status === 'booked' && r.status !== 'booked') return { ok: true };       // a booking stands
-    const same = prev && prev.status === r.status && prev.court === r.court;
+    if (prev && prev.status === 'booked' && (r.status !== 'booked' || quiet)) return { ok: true };       // a booking stands
+    const same = quiet || (prev && prev.status === r.status && prev.court === r.court);
     const chat = owner();
     if (!same && chat !== null) {
       if (r.status === 'booked') await sendCard(chat, 'booked', M.bookedCaption(r), UI.afterBooked());
@@ -1874,7 +1897,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     state.results[r.id] = { ...r, at: now() };
     for (const k of Object.keys(state.results)) if (now() - state.results[k].at > RESULTS_KEEP_MS) delete state.results[k];
     save();
-    log(`Result from the PC: ${r.id} ${r.status}${r.court ? ` (Court ${r.court})` : ''}`);
+    log(`${quiet ? 'Kept as a booking' : 'Result from the PC'}: ${r.id} ${r.status}${r.court ? ` (Court ${r.court})` : ''}`);
     if (!same && chat !== null) {                     // what the card said, as a note for the app
       const after = V.clubOf(r.venue) ? (r.paid === true ? `paid ${r.price || ''}`.trim() : r.paid === 'maybe' ? 'Pay was pressed' : 'not paid')
         : r.gate ? `gate ${r.gate}` : 'gate code not shown';
@@ -2274,7 +2297,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const h = hold;
     if (!h) return null;
     const centre = G.CENTRES[h.key];
-    const scr = UI.indoorHold(x, h);
+    const scr = UI.indoorHold({ ...x, app: true }, h);
     const [title, ...lines] = scr.caption.split('\n').map(A.plain);
     const keys = scr.keyboard.inline_keyboard.flat().map(b => b.callback_data);
     return {
@@ -2371,7 +2394,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     // a minute the app may ask for, whether or not the read then works. One answered from
     // what is already known asks nothing of anyone, and is not counted.
     if (!indoor.peek(v.centre, v.date, { fresh: v.fresh }) && !lookLimiter.allow(t)) {
-      return no(`That is ${A.LOOKS_PER_MIN} looks at Glasgow Club's sheet within a minute, which is as many as I ask for. Wait a minute, then look again.`);
+      return no(`That’s ${A.LOOKS_PER_MIN} looks in a minute. Wait a minute, then look again.`);
     }
     let got;
     try { got = await readIndoor(v.centre, v.date, v.fresh); } catch (err) { return no(A.whole(G.whyText(err))); }
@@ -2382,7 +2405,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       if (!at) slots.push(at = { start: s.start, end: s.end, courts: [] });
       at.courts.push({ n: s.court, name: A.whole(s.name || `Court ${s.court}`), price: null });      // the sheet carries no price: that shows once a court is held
     }
-    const [, ...words] = UI.indoorDay(ctx(), v.centre, v.date, got).caption.split('\n').map(A.plain);
+    const [, ...words] = UI.indoorDay({ ...ctx(), app: true }, v.centre, v.date, got).caption.split('\n').map(A.plain);
     // What the app has now been shown free: for the next 15 minutes a hold may be asked for one
     // of these courts, and for no other (kept in memory only, so not across a restart).
     const shownAt = now();

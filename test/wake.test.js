@@ -102,12 +102,12 @@ test('tapping Wake sends the packet home, says so, and is not repeated straight 
   // The PC answers: green dot, no button, no note.
   clock.t += 40000; app.pingFromAgent({ ip: '2.96.64.17' }); await app.tick();
   assert.equal(tg.last().photo, 'upload:banner-home-awake.jpg');
-  assert.match(tg.last().text, /Your PC is awake\.$/);
+  assert.match(tg.last().text, /Your PC · Awake$/);
   assert.ok(!labels(tg.last()).includes('Wake my PC'));
   // /wake now just says it is awake.
   await app.handleUpdate(say(OWNER, '/wake'));
   assert.equal(woken.length, 1);
-  assert.match(tg.last().text, /Your PC is awake\./);
+  assert.match(tg.last().text, /Your PC · Awake/);
 });
 
 test('without WAKE_MAC, or before the PC has been in touch, waking explains why not', async () => {
@@ -121,7 +121,7 @@ test('without WAKE_MAC, or before the PC has been in touch, waking explains why 
   assert.match(off.tg.last().text, /Wake from Telegram: not set up/);
   const fresh = makeApp(`${TUE}T12:00:00Z`);
   await fresh.app.handleUpdate(say(OWNER, '/wake'));
-  assert.match(fresh.tg.last().text, /I do not know your home address yet/);
+  assert.match(fresh.tg.last().text, /Can’t wake your PC: it hasn’t been in touch\./);
   await fresh.app.handleUpdate(say(OWNER, '/status'));
   assert.match(fresh.tg.last().text, /Wake from Telegram: waiting for your PC/);
 });
@@ -135,7 +135,7 @@ test('a failed send is reported, and can be tried again at once', async () => {
   app.pingFromAgent({ ip: '2.96.64.17' });
   clock.t += 10 * 60000;
   await app.handleUpdate(say(OWNER, '/wake'));
-  assert.match(tg.last().text, /could not be sent/);
+  assert.match(tg.last().text, /Couldn’t send the wake-up/);
   fail = false;
   await app.handleUpdate(say(OWNER, '/wake'));
   assert.equal(sent, 1);

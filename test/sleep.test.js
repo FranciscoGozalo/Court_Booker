@@ -75,7 +75,7 @@ test('no sleeping in the half hour before a booking, or when the PC is not awake
   const { app, tg, clock } = makeApp(`${TUE}T21:35:00Z`, { owner: OWNER, plan: { tue: { start: 1140, hours: 1 } } });
   await app.pingFromAgent({});
   await app.handleUpdate(say(OWNER, '/sleep'));
-  assert.match(tg.last().text, /Your PC books at 22:00, so it stays awake until then\./);
+  assert.match(tg.last().text, /Staying awake for the 22:00 booking\./);
   assert.deepEqual(await app.pingFromAgent({}), { ok: true });
   // Just before the half hour it may.
   clock.t = at(`${TUE}T21:29:30Z`);
@@ -89,7 +89,7 @@ test('no sleeping in the half hour before a booking, or when the PC is not awake
   // Asleep already: nothing to do.
   clock.t += 10 * 60000;
   await app.handleUpdate(say(OWNER, '/sleep'));
-  assert.match(tg.last().text, /Your PC is not awake\./);
+  assert.match(tg.last().text, /Already asleep\./);
 });
 
 test('the server passes { wait } through and answers when the app does', async () => {

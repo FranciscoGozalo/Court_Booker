@@ -60,7 +60,7 @@ test('booking a date by tapping: menu, calendar, day, time, length, add', async 
   const menu = tg.last();
   assert.equal(menu.method, 'photo');
   assert.equal(menu.photo, 'upload:banner-home-offline.jpg');                         // no word from the PC yet: red dot
-  assert.match(menu.text, /^<b>Court Booker<\/b>[\s\S]*Your PC has not been in touch yet\.$/);
+  assert.match(menu.text, /^<b>Court Booker<\/b>[\s\S]*Your PC · Not in touch yet$/);
   const card = menu.id;
   await tap(app, find(menu, 'Book a date').callback_data, card);
   assert.equal(tg.last().method, 'caption');                                          // the same card changes
@@ -174,7 +174,7 @@ test('the dot follows your PC: awake while it checks in, asleep after, offline a
   await app.handleUpdate(say(OWNER, '/menu'));
   const card = tg.last();
   assert.equal(card.photo, 'upload:banner-home-awake.jpg');
-  assert.match(card.text, /Your PC is awake\.$/);
+  assert.match(card.text, /Your PC · Awake$/);
   // Still awake a minute later: no change, so nothing is redrawn.
   clock.t += 60000; app.pingFromAgent(); await app.tick();
   assert.equal(tg.calls.length, 1);
@@ -183,7 +183,7 @@ test('the dot follows your PC: awake while it checks in, asleep after, offline a
   assert.equal(tg.last().method, 'media');
   assert.equal(tg.last().id, card.id);
   assert.equal(tg.last().photo, 'upload:banner-home-asleep.jpg');
-  assert.match(tg.last().text, /Your PC is asleep \(last in touch today at 12:01\)\. It wakes at 21:55 to book\./);
+  assert.match(tg.last().text, /Your PC · Asleep · wakes at 21:55/);
   await app.tick();
   assert.equal(tg.calls.length, 2);                                                  // once, not every tick
   // Tapping on it now edits only the words: the banner is already right.
@@ -194,11 +194,11 @@ test('the dot follows your PC: awake while it checks in, asleep after, offline a
   assert.equal(tg.last().photo, 'upload:banner-home-offline.jpg');
   assert.match(tg.last().text, /^<b>Book a court<\/b>/);
   await app.handleUpdate(say(OWNER, '/menu'));
-  assert.match(tg.last().text, /Your PC has not been in touch since yesterday at 12:01\. It may be off\./);
+  assert.match(tg.last().text, /Your PC · Last seen yesterday at 12:01/);
   // It wakes: green again.
   app.pingFromAgent(); await app.tick();
   assert.equal(tg.last().photo, 'id:banner-home-awake.jpg');                          // Telegram has it already
-  assert.match(tg.last().text, /Your PC is awake\./);
+  assert.match(tg.last().text, /Your PC · Awake/);
   assert.equal(app.pcState(), 'awake');
 });
 

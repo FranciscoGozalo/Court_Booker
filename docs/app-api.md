@@ -19,7 +19,10 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.10.1 (`api: 3`; 2.10.1 added signed bookings: `auth` on the requests that
+This file describes the API as built in version 2.10.3 (`api: 3`; 2.10.3 changed no field's shape: a Glasgow Club court
+held and paid for now also shows in `results`, a hold's `pay` order may ask your PC to use the security code it keeps (see
+"The sealed box"), and many sentences are shorter: `pc.line`, the hold's `lines`, a look's `note`, and the `why` of many
+refusals; 2.10.1 added signed bookings: `auth` on the requests that
 save one, `signed` in the state, and `POST /app/weekly/auth`, see "Signed bookings"). `api: 3` adds weekly bookings and one-off dates at every
 venue (`state.weekly`, `POST /app/weekly` and its change, on and remove, a `venue` and `type` on `POST /app/once`), Glasgow
 Club's courts booked and paid by your PC at midnight (`venues[].release`, `.paid` and `.allowance`; `price` and `paid` on
@@ -265,12 +268,12 @@ Kelvingrove's; when each venue opens its days is `venues[].release` (api 3).
     all, its own `"failed"` too: a booking stands. Its word about any of the last ten bookings counts,
     even one a newer booking has replaced.
   - `why`: null while under way and when booked; otherwise the result's reason (the words after
-    "It did not work: " in `results`). `gate`: the gate code, when booked and shown, else null.
+    "It didn’t work: " in `results`). `gate`: the gate code, when booked and shown, else null.
   - `at`: when it was asked for. `heardAt`: when your PC last said anything about it.
-  - `line`: one plain sentence for the moment: "Asking your PC to book it." / "Your PC has it and
-    is starting Chrome…" / "Your PC is opening ClubSpark…" / "Your PC is signing in to ClubSpark…" /
+  - `line`: one plain sentence for the moment: "Asking your PC to book it." / "Starting Chrome on
+    your PC…" / "Opening ClubSpark…" / "Signing in to ClubSpark…" /
     "Signed in. Looking for court 3 on the sheet…" / "Booking court 3…" / "No word from your PC for
-    over a minute." / "Booked: court 3. Gate code 4821." (or "… The gate code was not shown.") /
+    over a minute." / "Booked: court 3. Gate code 4821." (or "… Gate code not shown.") /
     "Not booked: <why>."
 
 **`allowance`**: Glasgow Life Tennis's weekly allowance, this week and then next: at most 7
@@ -303,17 +306,17 @@ as the owner gave them do not say. `week`: that Monday, YYYY-MM-DD.
 - `state`: `"awake"` (heard from in the last 3 minutes), `"asleep"`, or `"offline"` (not for over a
   day, or never). `linked`: whether a PC can reach the bot at all (always true over HTTP).
   `seenAt`: when it was last heard from, or null.
-- `line`: one of "Your PC is awake." / "Your PC is asleep (last in touch today at 13:01). It wakes
-  at 21:55 to book." / "Your PC has not been in touch since yesterday at 21:55. It may be off." /
-  "Your PC has not been in touch yet." (null if no PC is linked).
+- `line` (2.10.3: short, as the app shows it beside the PC): one of "Awake" / "Asleep · wakes at 21:55" /
+  "Last seen yesterday at 21:55" (or "… today at 13:01", "… Mon 16 Nov at 21:55") / "Not in touch yet"
+  (null if no PC is linked). Telegram's menu says "Your PC · " before it.
 - `canWake`, `wakeWhy`: whether `POST /app/pc/wake` would send a wake-up now, and if not, the
   sentence it would be refused with (null when it can): "Waking is not set up: add WAKE_MAC on
-  Railway." / "I do not know your home address yet. Your PC must be in touch once first." / "Your
-  PC is already awake." / "Sent a moment ago. Give it a minute." (for 30 seconds after a wake-up).
-- `canSleep`, `sleepWhy`: the same for `POST /app/pc/sleep`: "Your PC is not linked to me." / "Your
-  PC is not awake." / "Your PC books at 22:00, so it stays awake until then." (from 30 minutes
-  before a release) / "Your PC is holding a court for you. Let it go first." / "Your PC is booking a
-  court for you. Wait for it to finish." (Book now at a park, under way)
+  Railway." / "Can’t wake your PC: it hasn’t been in touch." / "Already awake." / "Sent a moment ago. Give it a minute." (for 30 seconds after a wake-up).
+- `canSleep`, `sleepWhy`: the same for `POST /app/pc/sleep`: "Your PC isn’t linked." / "Already
+  asleep." / "Your PC isn’t answering." (offline) / "Staying awake for the 22:00 booking." (from 30
+  minutes before a release; "… the 00:00 booking." around Glasgow Club's midnight) / "Your PC is
+  holding a court. Let it go first." / "Your PC is booking a court. Wait for it to finish." (Book now
+  at a park, under way)
 - `sleepAsked`: when sleep was asked for, while the PC has not collected the request yet (it has
   two minutes to; after that, or once collected, null). `wokeAt`: when the last wake-up was sent
   since the bot started, or null.
@@ -373,8 +376,18 @@ for the parks'): `price` the price asked for the court (`"£23.00"`, or null whe
 pressed, and whether the payment went through is not known: look in the banking app and under
 Bookings on Glasgow Club's site). The `why` of one not booked ends with what was paid, in words.
 `gate`: the gate code, a string (null if not booked, or if none was shown). `why`: null when
-booked; "No court was free for the whole slot." for `none`; "It did not work: <the PC's reason>."
+booked; "No court free for the whole time." for `none`; "It didn’t work: <the PC's reason>."
 for `failed`. `at`: when the result came in.
+A Glasgow Club court held and then booked (2.10.3: paid from the app, by the PC with its card, or
+in Chrome on the PC and then "I have paid") is a result too, as the midnight run's would be for the
+same venue, date and start, and under the same id (`scotstoun/2026-11-25@18:00`): `venue`
+(`"gorbals"` or `"scotstoun"`, from the hold's centre `g`, `s` or `o`), `type` (`"indoor"`, or
+`"outdoor"` for `o`), `court` (`"1"`), `price` (the price your PC read, or null), `paid: true`,
+`gate: null`, `status: "booked"`, `why: null`, and `end` an hour after `start`. So the schedule does
+not book that slot again, a later result for it does not count twice, and like every Glasgow Club
+booking it counts toward no allowance. No card, note or notification comes with it: the hold's own
+(`"Booked · Scotstoun outdoor court 1"`) has said so. A booking already kept for that id stands; a
+"not booked" one is replaced. A hold that ends any other way keeps no result.
 
 **`run`**: how the PC's booking run stands, from half an hour before a release to an hour after
 it. Null outside that time (a run started earlier in the day is not tonight's), while paused, once
@@ -382,7 +395,7 @@ every booking of that release has been reported on, and after a restart of the b
 says more. `stage`: `"started"` (it asked what to
 book), `"ready"` (signed in to ClubSpark, waiting for the release) or `"trouble"` (an attempt
 failed and it is trying again). `at`: when it said so. `why`: null, or for trouble the two lines of
-Telegram's message, such as "ClubSpark did not load. Your PC is trying again (attempt 2 of 3)."
+Telegram's message, such as "ClubSpark did not load. Trying again (2 of 3)."
 
 **`indoor`**
 
@@ -480,16 +493,16 @@ time, whoever started it.
   the same check, so it is false exactly when that request would be refused (but for the amount),
   and the refusal's sentence says why. Telegram has no Pay button.
 - `lines` while paying (the card's words, as they stand):
-  - in the basket, the PC able to pay: "Pay from the app: your PC pays £23.00 with the card it keeps
-    (Visa ending 4242), once you confirm it there." then "Or pay in the Chrome window on your PC,
-    then tap I have paid." and "Unpaid, your PC lets it go at 12:12." When it cannot: "Paying from
-    the app is not on for this court: <the PC's reason>." then "Pay in the Chrome window on your PC,
-    then tap I have paid." A PC with an older booker says nothing of paying, and neither line is there.
-  - Pay asked for: "In your basket: £23.00 to pay." and "Telling your PC to pay £23.00, as you asked
-    in the app…"; told, and no word from the PC for half a minute: "Your PC was told to pay and has
+  - in the basket (2.10.3: the app's own words, which differ from Telegram's only in where to pay):
+    "£23.00 to pay. In your basket since 12:00." then, the PC able to pay, "Pay here, or in Chrome on
+    your PC and tap I Have Paid." and "Let go at 12:12 if unpaid." (Telegram's card: "Pay in the app,
+    or in Chrome on your PC and tap I have paid."). When it cannot: "Can’t pay here: <the PC's
+    reason>." then "Pay in Chrome on your PC and tap I Have Paid." A PC with an older booker says
+    nothing of paying, and only that second line is there.
+  - Pay asked for: "£23.00 to pay." and "Telling your PC to pay £23.00…"; told, and no word from the PC for half a minute: "Your PC was told to pay and has
     not said how it went. Before you pay any other way, look at the Chrome window on your PC, under
     Bookings on Glasgow Club's site and in your banking app."
-  - `"paying"`: "Paying £23.00: your PC is typing in the card it keeps and pressing Pay…"; once
+  - `"paying"`: "Paying £23.00 with the card your PC keeps…"; once
     pressed: "Your PC pressed Pay £23.00; I heard so at 12:03. If your bank asks you to approve it,
     do that in your banking app." and "Waiting for Glasgow Club's answer…"; or, when Chrome gave the
     PC no answer to the press: "Your PC may have pressed Pay £23.00: <why>. I heard so at 12:03."
@@ -502,8 +515,8 @@ time, whoever started it.
     other hands, it cannot say: one of its reasons is "someone is already paying in the Chrome window
     on your PC"), or "Not paid from the app: <why>. Your PC pressed nothing, so you can ask again
     there." (the order never reached the PC).
-  - how it ended after a press (`ended` as before): "Booked and paid. Your PC pressed Pay, and the
-    court is on your Bookings page at Glasgow Club now; it was not before."; "Your PC pressed Pay,
+  - how it ended after a press (`ended` as before): "Booked and paid. Now on your Glasgow Club
+    Bookings page." (said only on your PC's word that it is there now, and was not before); "Your PC pressed Pay,
     but the payment did not go through: …" (with what the payment page said); "Your PC pressed
     Pay, and then your bank asked for a code to be typed into the payment page. Your PC never types
     or passes on such a code, so it stopped there, and the payment may not have gone through." (`"failed"`);
@@ -601,10 +614,9 @@ look = { venue, date, at, by: "pc", note,
   nightly run reads courts); `name`: ClubSpark's name for it ("Court 3"). A court whose name ends in
   no number, or whose number another court shares, is not offered. For today, times that have
   started are left out.
-- `note`: one sentence or more per line: "Free courts, as ClubSpark showed it at 12:00." / "No
-  court is free that day, as ClubSpark showed it at 12:00." / "ClubSpark's sheet shows no courts at
-  all that day, as it showed it at 12:00."; then, for today, "Times that have started are left
-  out."; then, during a pause after ClubSpark turned your PC away, the sentence below that says until when.
+- `note` (2.10.3): one sentence or more per line, or "" when there is nothing to add (when ClubSpark
+  showed it is `at`): "No court free that day." / "ClubSpark lists no courts that day."; then, for
+  today, "Times already started aren’t shown."; then, during a pause after ClubSpark turned your PC away, the sentence below that says until when.
 - Kept and reused: a day's look (park and date) is not read again within 3 minutes, `fresh` or
   not; without `fresh: true` it is reused for up to 10. Only a look that asks your PC to read counts
   towards the six in ten minutes, whether or not the read then works; one answered from what is
@@ -616,21 +628,21 @@ look = { venue, date, at, by: "pc", note,
 - 400 "A look needs a park (venue) and a date (YYYY-MM-DD)."
 - 400 "There is no such park. Send one of: drumchapel, garrowhill, kelvingrove, knightswood, maryhill, queenspark, victoriapark."
 - 400 "That day is no longer on offer. Pick again." (a day gone by, or not a calendar date)
-- 400 "That day is not open for booking yet: it opens on Tue 17 Nov at 22:00." For Kelvingrove it adds " Add it to your list and your PC books it then."
-- 409 "ClubSpark turned your PC away at 12:05, as it does when it checks a connection, so it is left alone until 14:05: nothing is read or booked there from the app until then."
-- 409 "Your PC's nightly booking run is at 22:00, so ClubSpark is not read from 21:00 to 22:30, to leave the connection quiet before it."
-- 409 "Your PC's nightly booking run is still going, so nothing else is read or booked at ClubSpark until it has finished."
-- 409 "Your PC is booking a court just now. Look again when it has finished."
-- 409 "Your PC is not awake, and it is your PC that reads ClubSpark. Wake it and try again."
-- 409 "That is 6 reads of ClubSpark within ten minutes, which is as many as I ask your PC for, to keep your home connection in good standing with ClubSpark. The next can be at 12:10."
+- 400 "Not open yet: opens Tue 17 Nov at 22:00." For Kelvingrove it adds " Add it to your list and your PC books it then."
+- 409 "ClubSpark turned your PC away at 12:05. Not available until 14:05."
+- 409 "Not available 21:00–22:30, around the nightly booking."
+- 409 "Not available until the nightly booking has finished."
+- 409 "Your PC is booking a court. Look again when it’s done."
+- 409 "Your PC isn’t awake. Wake it and try again."
+- 409 "That’s 6 reads in ten minutes, to keep your home connection in good standing with ClubSpark. Next at 12:10."
 - 409 "Your PC is reading another day at ClubSpark just now. Try again in a moment."
-- 409 "ClubSpark turned your PC away just now (<your PC's word for how: ClubSpark showed a "Just a moment" page, or its booking sheet never showed>), so it is left alone until 14:05: nothing is read or booked there from the app until then." (this read was turned away)
-- 409 "Your PC did not answer in time, so I could not read the free courts." (its answer, if it comes later, is still kept and used)
-- 409 "ClubSpark's page did not load on your PC in time."
-- 409 "Your PC could not reach ClubSpark."
-- 409 "Your PC did not read it: <its reason>." (its own limits: "the nightly booking starts in 20 minutes", "it has read ClubSpark 6 times in ten minutes and is leaving it alone for a few minutes", "it is booking at ClubSpark just now")
-- 409 "ClubSpark's sheet could not be read (<what went wrong>)." (an answer that does not read as a sheet: never taken for "nothing is free")
-- 409 "Your PC is not linked to me, and it is your PC that reads and books ClubSpark." (not over HTTP)
+- 409 "ClubSpark turned your PC away just now (<your PC's word for how: ClubSpark showed a "Just a moment" page, or its booking sheet never showed>). Not available until 14:05." (this read was turned away)
+- 409 "Your PC didn’t answer in time." (its answer, if it comes later, is still kept and used)
+- 409 "ClubSpark didn’t load on your PC in time."
+- 409 "Your PC couldn’t reach ClubSpark."
+- 409 "Your PC didn’t read it: <its reason>." (its own limits: "the nightly booking starts in 20 minutes", "it has read ClubSpark 6 times in ten minutes and is leaving it alone for a few minutes", "it is booking at ClubSpark just now")
+- 409 "Couldn’t read ClubSpark’s sheet (<what went wrong>)." (an answer that does not read as a sheet: never taken for "nothing is free")
+- 409 "Your PC isn’t linked, and it’s your PC that reads and books ClubSpark." (not over HTTP)
 
 **`POST /app/clubspark/book`** `{ venue, date, start, hours, court }`. Book now: your PC signs in to
 ClubSpark as its nightly run does and books exactly that court for that time, or nothing. `hours`
@@ -657,7 +669,7 @@ says "ClubSpark asked for payment; nothing was booked or paid".
 
 - 400 "Book now needs a park (venue), a date (YYYY-MM-DD), a start in minutes after midnight, hours (1 or 2) and a court number."
 - 400 "There is no such park. Send one of: drumchapel, garrowhill, kelvingrove, knightswood, maryhill, queenspark, victoriapark."
-- 400 "That day is no longer on offer. Pick again." or "That day is not open for booking yet: …" (as for a look)
+- 400 "That day is no longer on offer. Pick again." or "Not open yet: …" (as for a look)
 - 400 "That time is no longer on offer. Pick again." (a start that has passed or is not a five-minute step, one that runs past midnight, a court not from 1 to 20)
 - 409 "Court 3 is already booked for you at Queens Park on Fri 20 Nov at 18:00."
 - 409 "That list is old. Read the day again, then book a court." (no look in the last 15 minutes showed that court free at that start)
@@ -665,29 +677,29 @@ says "ClubSpark asked for payment; nothing was booked or paid".
 - 409 "That would be 8 sessions in the week of Mon 16 Nov; the limit is 7." or "That would be 15 hours in the week of Mon 16 Nov; the limit is 14."
 - 409, one of the `clubspark.bookNo` sentences:
   - the "turned your PC away" and "still going" sentences above;
-  - "Your PC's nightly booking run is at 22:00, so nothing is booked at ClubSpark from 21:25 to 22:30."
+  - "Not available 21:25–22:30, around the nightly booking."
   - "Your PC is already booking a court."
   - "Your PC is holding a court at Glasgow Club. Let it go first."
-  - "Your PC is not awake, and it is your PC that signs in to ClubSpark and books. Wake it and try again."
-  - "That is 4 bookings within an hour, and each is a sign-in to ClubSpark. The next can start at 13:00."
-  - "Your PC is not linked to me, and it is your PC that reads and books ClubSpark." (not over HTTP)
+  - "Your PC isn’t awake. Wake it and try again."
+  - "That’s 4 bookings in an hour. Next at 13:00."
+  - "Your PC isn’t linked, and it’s your PC that reads and books ClubSpark." (not over HTTP)
 
-While a booking is under way: the PC is not put to sleep (`pc.sleepWhy` "Your PC is booking a court
-for you. Wait for it to finish."), no hold starts (`indoor.holdNo` "Your PC is booking a court at a
+While a booking is under way: the PC is not put to sleep (`pc.sleepWhy` "Your PC is booking a court.
+Wait for it to finish."), no hold starts (`indoor.holdNo` "Your PC is booking a park court. Hold one when it’s done."
 park just now. Hold one when it has finished."), and no park is read.
 
 How a booking can end, as its result's `why` reads (`results[].why`, and `clubspark.book.why`
-without "It did not work: "):
+without "It didn’t work: "):
 
-- "It did not work: court 1 was no longer free for that time (not free at 18:00 any more), and your PC takes no other court." (or "(free at 18:00, but only until 19:00)")
-- "It did not work: your PC did not start it: <its reason>." (its own limits, or a hold under way)
-- "It did not work: <your PC's reason>." Among them: "ClubSpark asked for payment; nothing was booked or paid"; "after "Confirm", ClubSpark went on to a payment page, where your PC paid nothing: check ClubSpark for it"; "DRY_RUN is on in .env on your PC, so it stopped before booking (court 3 was free, Free)"; "ClubSpark showed a "Just a moment" page, so your PC stopped there" (or "ClubSpark's booking sheet never showed, …", "ClubSpark refused a request (HTTP 403), …"); "Chrome could not start (…)"; a sign-in that did not go through; "queenspark has no court 9"; "it could not reach the bot just before booking (…), so it booked nothing"; "this PC went to sleep while booking, so it stopped". Once this bot has given the go-ahead, anything that went wrong (but a court gone, or a stop at a payment step) ends "… It was booking when that happened: check ClubSpark for it", whether your PC's words say so or not.
-- "It did not work: your PC's booking stopped before it booked anything (<why>)." or "… stopped while it was booking court 3: check ClubSpark for it."
-- "It did not work: ClubSpark had turned your PC away, so it was not handed to your PC and nothing was booked." (or "your PC's nightly booking run was near, so …")
-- "It did not work: your PC did not collect it in time, so nothing was booked."
-- "It did not work: your PC collected it but did not start on it, so nothing was booked."
-- "It did not work: no word from your PC for four minutes, so I stopped following it. It books nothing without my go-ahead, so nothing was booked." Or, once it had the go-ahead: "It did not work: no word from your PC while it was booking court 3: check ClubSpark for it."
-- "It did not work: your PC was still at it twelve minutes after it took the booking, so I stopped following it. It books nothing without my go-ahead, so nothing was booked." Or, once it had the go-ahead: "… so I stopped following it: check ClubSpark for court 3."
+- "It didn’t work: court 1 was no longer free for that time (not free at 18:00 any more), and your PC takes no other court." (or "(free at 18:00, but only until 19:00)")
+- "It didn’t work: your PC did not start it: <its reason>." (its own limits, or a hold under way)
+- "It didn’t work: <your PC's reason>." Among them: "ClubSpark asked for payment; nothing was booked or paid"; "after "Confirm", ClubSpark went on to a payment page, where your PC paid nothing: check ClubSpark for it"; "DRY_RUN is on in .env on your PC, so it stopped before booking (court 3 was free, Free)"; "ClubSpark showed a "Just a moment" page, so your PC stopped there" (or "ClubSpark's booking sheet never showed, …", "ClubSpark refused a request (HTTP 403), …"); "Chrome could not start (…)"; a sign-in that did not go through; "queenspark has no court 9"; "it could not reach the bot just before booking (…), so it booked nothing"; "this PC went to sleep while booking, so it stopped". Once this bot has given the go-ahead, anything that went wrong (but a court gone, or a stop at a payment step) ends "… It was booking when that happened: check ClubSpark for it", whether your PC's words say so or not.
+- "It didn’t work: your PC's booking stopped before it booked anything (<why>)." or "… stopped while it was booking court 3: check ClubSpark for it."
+- "It didn’t work: ClubSpark had turned your PC away, so it was not handed to your PC and nothing was booked." (or "your PC's nightly booking run was near, so …")
+- "It didn’t work: your PC did not collect it in time, so nothing was booked."
+- "It didn’t work: your PC collected it but did not start on it, so nothing was booked."
+- "It didn’t work: no word from your PC for four minutes, so I stopped following it. It books nothing without my go-ahead, so nothing was booked." Or, once it had the go-ahead: "It didn’t work: no word from your PC while it was booking court 3: check ClubSpark for it."
+- "It didn’t work: your PC was still at it twelve minutes after it took the booking, so I stopped following it. It books nothing without my go-ahead, so nothing was booked." Or, once it had the go-ahead: "… so I stopped following it: check ClubSpark for court 3."
 - If your PC's own word comes after any of the endings this bot decided, it replaces it; and a "booked" replaces any ending: a booking stands, and counts towards its week.
 
 ### Each request, and every `why` it can give
@@ -821,10 +833,10 @@ for a court in a look's `slots` (see `POST /app/hold`).
 - `slots`: the courts that can be booked now, by start time; `n` is the court's number, `name`
   Glasgow Club's name for it ("Tennis Hall Court 3"; "Outdoor Tennis Court 1" at Scotstoun outdoor), and `price` is always null: the sheet
   carries no price (it is known once a court is held: `hold.price`).
-- `note`: what Telegram's card says about that day, one sentence or more per line: "Free start
-  times, as Glasgow Club showed it at 12:00. Each is one hour. Pick one." / "No court is free that
-  day, as Glasgow Club showed it at 12:00." / "Glasgow Club's sheet lists no courts at all that
-  day, as Glasgow Club showed it at 12:00. Open the sheet to see for yourself." / for a day (or
+- `note` (2.10.3): what Telegram's card says about that day but its "Updated 12:00." line (the app
+  shows `at` itself), one sentence or more per line, or "" when there is nothing more (a day with
+  free courts): "No court free that day." / "Glasgow Club lists no courts that day. Open the sheet
+  to check." / for a day (or
   hours) not open for booking yet, when it opens and what is free as it stands. Courts that are
   not open for booking yet are in the note only, never in `slots`.
 - `sheet`: that centre's sheet for that day on Glasgow Club's site, to book and pay there by hand.
@@ -832,9 +844,9 @@ for a court in a look's `slots` (see `POST /app/hold`).
 - 400 "A look needs a centre (g, s or o) and a date (YYYY-MM-DD)."
 - 400 "There is no such centre: send g for Gorbals, s for Scotstoun (indoor) or o for Scotstoun outdoor."
 - 400 "That day is no longer on offer. Pick again."
-- 409 "That is 12 looks at Glasgow Club's sheet within a minute, which is as many as I ask for. Wait a minute, then look again."
-- 409 "Your PC's nightly booking run is at 22:00, so I am asking nothing else of it until 22:10."
-- 409 "Glasgow Club's site turns this server away, so your PC reads the free courts for me, and your PC is not awake. Wake it and try again, or open the sheet."
+- 409 "That’s 12 looks in a minute. Wait a minute, then look again."
+- 409 "Not available until 22:10, around the nightly booking."
+- 409 "Your PC reads Glasgow Club’s courts, and it isn’t awake. Wake it and try again, or open the sheet."
 - 409 "Your PC did not answer in time, so I could not read Glasgow Club's free courts."
 - 409 "Glasgow Club's site is checking visitors from your home connection just now, so your PC cannot read the free courts. It will not be asked again for an hour."
 - 409 "Glasgow Club's site says it is being asked too often, so it will not be asked again for an hour."
@@ -862,12 +874,12 @@ whether that time is on offer at all, then this, then the guards.
 - 409 "That list is old. Read the day again, then hold a court." (no look in the last 15 minutes showed the app that court free then)
 - 409, one of the `indoor.holdNo` sentences:
   - "Your PC is already holding a court."
-  - "Your PC is booking a court at a park just now. Hold one when it has finished." (Book now, under way)
-  - "Your PC is not awake, and it is your PC that signs in to Glasgow Club and holds the court. Wake it and try again."
-  - "Your PC's nightly booking run is at 22:00, so it holds nothing else from 21:25 to 22:15. The sheet below still opens."
-  - "Glasgow Club's site was checking visitors from your home connection, so your PC is leaving it alone until 13:00."
-  - "That is 6 holds within an hour, and each is a sign-in to Glasgow Club. The next can start at 13:00."
-  - "Your PC is not linked to me, and it is your PC that signs in and holds the court." (not over HTTP)
+  - "Your PC is booking a park court. Hold one when it’s done." (Book now, under way)
+  - "Your PC isn’t awake. Wake it and try again."
+  - "Not available 21:25–22:15, around the nightly booking. The sheet still opens."
+  - "Glasgow Club was checking visitors from your home connection. Not available until 13:00."
+  - "That’s 6 holds in an hour. Next at 13:00."
+  - "Your PC isn’t linked, and it’s your PC that holds the court." (not over HTTP)
 
 **`POST /app/hold/order`** `{ id, what }`. `release` is Stop (before the basket) or Let it go;
 `done` is I have paid (`pay` is under "Paying from the app"). It works on a hold started from either side, as Telegram's buttons do. The
@@ -877,7 +889,7 @@ there and then (`ended: "stopped"`). A `done` before the court is in the basket 
 changes nothing, whether or not the PC has collected the hold yet: it never stops a hold.
 
 - 400 "To act on a hold, send its id and what to do: release, done or pay."
-- 409 "I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up."
+- 409 "No longer following that hold. Your PC lets it go when its time is up."
 - 409 "That hold is over."
 - 409 "It is not in your basket yet." (`done` at any stage before `"held"`)
 - 409 "Already letting it go." or "Already checking."
@@ -896,7 +908,7 @@ The card is typed into the app, sealed there for your PC's key, and kept on your
 price the owner confirmed in the app and the card's security code, sealed the same way. The PC types
 the card and the code into Glasgow Club's payment page and presses Pay, once. The bot only passes
 sealed boxes on: it has no key to open them with. Telegram has no Pay button, since the security
-code only ever comes from the app; its card says "Pay from the app" where the app can pay.
+code only ever comes from the app; its card says "Pay in the app" where the app can pay.
 
 ### The sealed box
 
@@ -935,6 +947,12 @@ box to its log or to disk, and drops it once it is handed to the PC (or dropped 
   confirmed, exactly as in the order (`"£23.00"`). `payKey`: the pay key sent with the card the PC
   keeps. `centre`, `date`, `start`, `court`: the hold's own, as in `state.hold` (`"g"`, `"s"` or `"o"`; say `"g"`,
   `"2026-11-20"`, `1080`, `3`).
+- Or, since the PC's booker 2.10.2, the same without `cvc` and with `use: "kept"`:
+  `{ use: "kept", id, amount, payKey, centre, date, start, court }`, sealed the same way. It asks
+  your PC to pay with the security code it keeps for automatic payments (`card.auto`), so the owner
+  types no code in the app. The bot cannot tell the two apart and passes either on unopened, as it
+  came; the checks above (the pay key, the binding to this hold, court and amount, one order per
+  hold) are your PC's, for both.
 
 Why the pay key and the binding: the PC's key is public (the bot relays it), so anybody, the bot
 too, can seal a box for the PC. Only the app knows the pay key, so a security code without it was
@@ -984,11 +1002,11 @@ not reach it: nothing was pressed, and Pay may be asked for again. The checks co
 - 400 "To act on a hold, send its id and what to do: release, done or pay."
 - 400 "To pay, send the hold's id, what: "pay", the amount you confirmed (such as "£23.00") and the sealed security code."
 - 400 "That is not a sealed box I can pass on: it must be standard base64, at most 1024 characters, of a key, a nonce and the box."
-- 409 "I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up."
+- 409 "No longer following that hold. Your PC lets it go when its time is up."
 - 409 "That hold is over."
 - 409 "Your PC is paying for it already." (a second Pay while it pays, or after the press)
 - 409 "Your PC has been told to pay for it already." (a second Pay while the order is on its way)
-- 409 "Your PC tried to pay for it once and could not, so it will not try again. Pay at your PC, or let it go."
+- 409 "Your PC couldn’t pay for it and won’t try again. Pay at your PC, or let it go."
 - 409 "It is not in your basket yet."
 - 409 "Already letting it go." or "Already checking."
 - 409 "Your PC is forgetting its card."
@@ -1003,9 +1021,9 @@ not reach it: nothing was pressed, and Pay may be asked for again. The checks co
   payments made being unreadable.
 - 409 "Your PC has not said that it can pay for this court." (its booker is older than 2.9)
 - 409 "Your PC could not read the price, so it cannot pay for this court."
-- 409 "I have not heard from your PC for over a minute, so I am not asking it to pay."
-- 409 "Too little of the hold's time is left to pay for it from here. Pay at your PC, or let it go." (under 30 seconds of `until`)
-- 409 "The price is £23.00, not £25.00. Look at it again before you pay." (`amount` is not `hold.price`)
+- 409 "No word from your PC for over a minute, so it isn’t asked to pay."
+- 409 "Too little time left to pay from here. Pay at your PC, or let it go." (under 30 seconds of `until`)
+- 409 "The price is £23.00, not £25.00. Check it before you pay." (`amount` is not `hold.price`)
 
 ### What the PC does
 
@@ -1056,8 +1074,7 @@ unless the PC's `.env` says), and every check of the payment page passes (the pa
 basket, one thing in its basket, one amount, empty card boxes, no bank's check showing, the press
 once). If your bank asks you to approve the payment, the bot says so at once: a note of kind
 `"warn"`, "Approve the payment in your bank's app" ("Your PC is paying £23.00 for Gorbals · Wed 25 Nov
-· 18:00–19:00, court 1. Your bank wants you to approve it in its app; your PC waits five minutes for
-that."), which is also a notification. Then your Bookings page says whether it was booked, and the
+· 18:00–19:00, court 1. Approve it in your bank’s app within five minutes."), which is also a notification. Then your Bookings page says whether it was booked, and the
 result says so: booked, with `court`, `price` and `paid: true`; or not, with `why` and `paid`. With
 automatic payments off nothing is taken: the result is "failed", "automatic payments are off on your
 PC, so it did not take a court", `paid: false`. A court taken and then not paid for (a check that did
@@ -1083,11 +1100,10 @@ added after its day opened is booked at the next run, before midnight (`open`), 
 own; one that was on the list at its midnight is not tried again after it (by then you may have
 booked it by hand after hearing it was not booked).
 
-Around a night's Glasgow Club job your PC is left to it: Sleep is refused from 23:00 ("Your PC books
-Glasgow Club at 00:00, so it stays awake until then."), holds from 23:25 to 00:30 ("Your PC books
-Glasgow Club at 00:00, so it holds nothing else from 23:25 to 00:30. The sheet below still opens."),
-and looks at Glasgow Club's sheets from 23:50 to 00:10 ("Your PC books Glasgow Club at 00:00, so I am
-asking nothing else of it until 00:10."). A PC whose booker is older than 2.10 is handed
+Around a night's Glasgow Club job your PC is left to it: Sleep is refused from 23:00 ("Staying awake
+for the 00:00 booking."), holds from 23:25 to 00:30 ("Not available 23:25–00:30, around the midnight
+booking. The sheet still opens."), and looks at Glasgow Club's sheets from 23:50 to 00:10 ("Not
+available until 00:10, around the midnight booking."). A PC whose booker is older than 2.10 is handed
 Kelvingrove's jobs alone (it would book any other at Kelvingrove); every other job then has the
 result "your PC's booker does not book <place> yet: update it on your PC. Your PC did not try it".
 Update the PC first.
@@ -1180,9 +1196,9 @@ goes for every sentence in the state.
 | `kind` | When | `title` | `body` |
 | --- | --- | --- | --- |
 | `booked` | the PC booked a court (at its nightly run, or with Book now) | "Court 3 booked" | "Thu 26 Nov · 19:00–21:00 · gate 2433" (or "… · gate code not shown"); at a park other than Kelvingrove the park comes first: "Queens Park · Fri 20 Nov · 18:00–19:00 · gate 4821" |
-| `missed` | it could not, or the weekly allowance kept a job from the nightly run | "Not booked" | "Tue 24 Nov · 19:00–21:00. No court was free for the whole slot." or "… It did not work: <reason>." (the park first, as above) |
+| `missed` | it could not, or the weekly allowance kept a job from the nightly run | "Not booked" | "Tue 24 Nov · 19:00–21:00. No court free for the whole time." or "… It didn’t work: <reason>." (the park first, as above) |
 | `warn` | ClubSpark turned your PC away, reading or booking a park | "ClubSpark turned your PC away" | "ClubSpark turned your PC away at 12:05, reading Maryhill Park's courts (ClubSpark showed a "Just a moment" page), which is how it treats a connection it is checking. Nothing more is read or booked at ClubSpark from the app until 14:05. Your nightly booking run uses the same connection: if ClubSpark still turns it away at 22:00, that run may not get through." (once for each pause; also sent in Telegram) |
-| `warn` | trouble before a booking | "Trouble before the booking" | "<reason>. Your PC is trying again (attempt 2 of 3)." |
+| `warn` | trouble before a booking | "Trouble before the booking" | "<reason>. Trying again (2 of 3)." |
 | `warn` | 20 minutes before, the PC does not answer | "Your PC is not answering" | "I sent it a wake-up at 21:40, ahead of tonight's booking, and it has not replied. Booking opens at 22:00 for Tue 24 Nov · 16:00–18:00." With no way to wake it from the bot: "It has not been in touch for over a day. Booking opens …", or, if the PC has never been in touch at all, "It has not been in touch yet. Booking opens …" |
 | `warn` | 2 minutes before, the run has not started | "The booking run has not started" or "Your PC has not checked in" | the two lines of Telegram's warning |
 | `warn` | 8 minutes after, no result | "No word from your PC" | "It started on Tue 24 Nov · 16:00–18:00 but has not said how it went. Check ClubSpark, and book by hand if it is not there." |

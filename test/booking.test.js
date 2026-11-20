@@ -168,7 +168,7 @@ test('a failed booking is a card on the not-booked banner saying why; nonsense i
   assert.equal(tg.last().method, 'photo');
   assert.equal(tg.last().photo, 'upload:banner-missed.jpg');
   assert.deepEqual(tg.last().extra.reply_markup.inline_keyboard[0].map(b => b.callback_data), ['n:b', 'n:h']);
-  assert.match(tg.last().text, /Not booked · Tue 24 Nov · 19:00–21:00<\/b>\nNo court was free for the whole slot/);
+  assert.match(tg.last().text, /Not booked · Tue 24 Nov · 19:00–21:00<\/b>\nNo court free for the whole time/);
   assert.equal((await app.resultFromAgent({ id: 'nope', status: 'booked', court: 3 })).ok, false);
   assert.equal((await app.resultFromAgent({ id: '2026-11-24@19:00', status: 'booked' })).ok, false);   // no court
 });

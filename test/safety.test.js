@@ -336,13 +336,13 @@ test('"signed in" with no heads-up card (a late run, or after a restart of the b
 test('trouble before the booking is passed on at once, but never as a flood', async () => {
   const { app, tg, clock } = makeApp(`${TUE}T21:56:00Z`);
   assert.deepEqual(await app.progressFromAgent({ stage: 'trouble', why: 'Chrome did not start: <session not created>.', attempt: 2, of: 3 }), { ok: true });
-  assert.equal(tg.last().text, '<b>Trouble before the booking</b>\nChrome did not start: &lt;session not created&gt;.\nYour PC is trying again (attempt 2 of 3).');
+  assert.equal(tg.last().text, '<b>Trouble before the booking</b>\nChrome did not start: &lt;session not created&gt;.\nTrying again (2 of 3).');
   clock.t += 5000;
   await app.progressFromAgent({ stage: 'trouble', why: 'again', attempt: 3, of: 3 });
   assert.equal(tg.calls.length, 1);                                    // within 15 s: not twice
   clock.t += 20000;
   await app.progressFromAgent({ stage: 'trouble', why: 'ClubSpark did not load' });
-  assert.equal(tg.last().text, '<b>Trouble before the booking</b>\nClubSpark did not load.\nYour PC is trying again.');
+  assert.equal(tg.last().text, '<b>Trouble before the booking</b>\nClubSpark did not load.\nTrying again.');
   assert.deepEqual(await app.progressFromAgent({ stage: 'dancing' }), { ok: false, why: 'that is not a stage I know (ready, trouble or bank)' });
   assert.equal((await app.progressFromAgent(null)).ok, false);
 });

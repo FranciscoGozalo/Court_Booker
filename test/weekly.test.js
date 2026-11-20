@@ -241,11 +241,11 @@ test('a Glasgow Club result: booked with its court and price, or not, with wheth
   // Not booked: why, and whether Pay was pressed.
   await t.app.resultFromAgent({ id: 'scotstoun/2026-11-26@10:00', status: 'failed', type: 'outdoor', price: '£12.00', paid: 'maybe', why: 'your bank did not approve the payment in time', end: 660 });
   await settle();
-  assert.match(t.tg.last().text, /^<b>Not booked · Scotstoun outdoor · Thu 26 Nov · 10:00–11:00<\/b>\nIt did not work: your bank did not approve the payment in time\. Pay was pressed, and whether the payment went through is not known/);
+  assert.match(t.tg.last().text, /^<b>Not booked · Scotstoun outdoor · Thu 26 Nov · 10:00–11:00<\/b>\nIt didn’t work: your bank did not approve the payment in time\. Pay was pressed, and whether the payment went through is not known/);
   assert.match(t.tg.last().text, /Book by hand on Glasgow Club's site if you still want it\.$/);
   await t.app.resultFromAgent({ id: 'gorbals/2026-11-27@18:00', status: 'none', paid: false, end: 1140 });
   await settle();
-  assert.equal(state(t, phone).results.find(x => x.id === 'gorbals/2026-11-27@18:00').why, 'No court was free for the whole slot. Nothing was paid.');
+  assert.equal(state(t, phone).results.find(x => x.id === 'gorbals/2026-11-27@18:00').why, 'No court free for the whole time. Nothing was paid.');
   // A park's result has neither price nor paid.
   await t.app.resultFromAgent({ id: 'queenspark/2026-11-25@18:00', status: 'booked', court: 1, end: 1140 });
   const q = state(t, phone).results.find(x => x.id === 'queenspark/2026-11-25@18:00');
@@ -259,7 +259,7 @@ test('your bank wants the payment approved: said at once, in Telegram and as a n
   const before = t.pushes.length;
   assert.deepEqual(await t.app.progressFromAgent({ stage: 'bank', id: 'gorbals/2026-11-25@18:00', type: 'indoor', price: '£23.00', court: 2 }), { ok: true });
   await settle();
-  const words = 'Your PC is paying £23.00 for Gorbals · Wed 25 Nov · 18:00–19:00, court 2. Your bank wants you to approve it in its app; your PC waits five minutes for that.';
+  const words = 'Your PC is paying £23.00 for Gorbals · Wed 25 Nov · 18:00–19:00, court 2. Approve it in your bank’s app within five minutes.';
   assert.equal(t.tg.last().text, `<b>Approve the payment in your bank's app</b>\n${words}`);
   assert.deepEqual([state(t, phone).notes[0].kind, state(t, phone).notes[0].title, state(t, phone).notes[0].body], ['warn', 'Approve the payment in your bank\'s app', words]);
   assert.equal(t.pushes.length, before + 1);
@@ -276,10 +276,10 @@ test('around a night\'s Glasgow Club booking: no Sleep from 23:00, no hold from 
   assert.equal(state(t, phone).pc.sleepWhy, null);
   t.clock.t = at('2026-11-17T23:00:00Z');
   await t.app.pingFromAgent(HOME);
-  assert.equal(state(t, phone).pc.sleepWhy, 'Your PC books Glasgow Club at 00:00, so it stays awake until then.');
+  assert.equal(state(t, phone).pc.sleepWhy, 'Staying awake for the 00:00 booking.');
   t.clock.t = at('2026-11-17T23:25:00Z');
   await t.app.pingFromAgent(HOME);
-  assert.equal(state(t, phone).indoor.holdNo, 'Your PC books Glasgow Club at 00:00, so it holds nothing else from 23:25 to 00:30. The sheet below still opens.');
+  assert.equal(state(t, phone).indoor.holdNo, 'Not available 23:25–00:30, around the midnight booking. The sheet still opens.');
   t.clock.t = at('2026-11-18T00:31:00Z');
   await t.app.pingFromAgent(HOME);
   assert.deepEqual([state(t, phone).indoor.holdNo, state(t, phone).pc.sleepWhy], [null, null]);

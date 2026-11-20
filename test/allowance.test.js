@@ -207,7 +207,7 @@ test('the nightly run is not handed a job that would pass the limit: its result 
   const r = t.app.state.results['2026-11-24@16:00'];
   assert.deepEqual([r.status, r.why], ['failed', 'that would be 8 sessions in the week of Mon 23 Nov; the limit is 7. Your PC did not try it']);
   const card = t.tg.calls.find(c => c.method === 'photo');
-  assert.equal(card.text, '<b>Not booked · Tue 24 Nov · 16:00–18:00</b>\nIt did not work: that would be 8 sessions in the week of Mon 23 Nov; the limit is 7. Your PC did not try it.\nBook by hand on ClubSpark if you still want it.');
+  assert.equal(card.text, '<b>Not booked · Tue 24 Nov · 16:00–18:00</b>\nIt didn’t work: that would be 8 sessions in the week of Mon 23 Nov; the limit is 7. Your PC did not try it.\nBook by hand on ClubSpark if you still want it.');
   assert.deepEqual(t.pushes.map(p => p.title), ['Not booked']);
   // Asked again (a second attempt of the run): not said twice.
   t.app.jobsForAgent({}, { run: true });
