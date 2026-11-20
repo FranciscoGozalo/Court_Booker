@@ -18,12 +18,12 @@ const TITLE = '<b>Gorbals · Fri 20 Nov · 18:00–19:00 · Court 3</b>';
 const LAPSES = 'If the court was in your basket and not paid for, the hold lapses by itself.';
 const LOOK_UNDER = 'Look under Bookings on Glasgow Club\'s site.';
 
-function makeApp(t0, { pcHoldMs = 60, env = {}, glasgow = null } = {}) {
+function makeApp(t0, { pcHoldMs = 60, env = {}, glasgow = null, store = memStore({ owner: OWNER, order: [3, 4, 5, 2, 1, 6] }) } = {}) {
   const clock = { t: at(t0) };
   const tg = fakeTelegram(clock);
   const logs = [];
   const reader = glasgow || { asked: 0, day: async () => { reader.asked++; return { at: clock.t, slots: [], listed: 1 }; }, peek: () => null, health: () => null };
-  const app = createApp({ now: () => clock.t, tg, store: memStore({ owner: OWNER, order: [3, 4, 5, 2, 1, 6] }), pictures: PICTURES, linked: true, glasgow: typeof reader === 'function' ? reader(clock) : reader, log: l => logs.push(l), env, pcHoldMs });
+  const app = createApp({ now: () => clock.t, tg, store, pictures: PICTURES, linked: true, glasgow: typeof reader === 'function' ? reader(clock) : reader, log: l => logs.push(l), env, pcHoldMs });
   return { app, tg, clock, logs, glasgow: reader };
 }
 let tapId = 1;
@@ -51,7 +51,7 @@ const held = t => note(t, 'held', { price: '£23.00', left: 12 * 60000 });
 
 // ---------- the screens ----------
 
-const ctxAt = time => ({ cfg: { plan: {}, once: [], order: [3, 4, 5, 2, 1, 6], releaseMin: 1320, daysAhead: 7 }, now: at(time), paused: false, results: {}, lastSeen: null, linked: true, pc: 'awake', wake: 'ready' });
+const ctxAt = time => ({ cfg: { plan: {}, once: [], order: [3, 4, 5, 2, 1, 6], releaseMin: 1320, daysAhead: 7 }, now: at(time), paused: false, results: {}, lastSeen: null, linked: true, pc: 'awake', wake: 'ready', pinned: true });
 const holdAt = (over = {}) => ({ id: 'a1b2c3d4e5f6', key: 'g', date: FRI, start: 1080, court: 3, taken: true, stage: 'held', end: null, order: null, price: '£23.00',
   heldAt: at(`${TUE}T12:01:00Z`), until: at(`${TUE}T12:13:00Z`), why: '', basket: '', removed: null, words: '', checked: false, silent: false, ...over });
 // Telegram counts a caption's 1024 characters after it has read the tags and entities.
@@ -588,9 +588,30 @@ test('a note from the PC about a hold counts as the PC being in touch', async ()
 
 // ---------- paying from your PC ----------
 // Only when the PC says with the court that paying is set up there (a card and a limit in its
-// .env). The card never comes to the bot: all it handles is the amount and your two taps.
+// .env), and only when this bot is locked to you by TELEGRAM_CHAT_ID. The card never comes to
+// the bot: all it handles is the amount and your two taps.
 
+const PINNED = { env: { TELEGRAM_CHAT_ID: String(OWNER) } };
+const startedPinned = (opts = {}) => started(undefined, { ...PINNED, ...opts });
 const heldReady = t => note(t, 'held', { price: '£23.00', left: 12 * 60000, pay: 'ready' });
+// A hold in the basket on a pinned bot, Pay tapped and confirmed, and the PC told so.
+async function payAsked() {
+  const t = await startedPinned();
+  heldReady(t);
+  await tap(t.app, `gy:${t.id}`, 7);
+  await tap(t.app, `gz:${t.id}:2300`, 7);
+  assert.deepEqual(note(t, 'held', { beat: true }), { ok: true, order: 'pay', amount: '£23.00' });
+  return t;
+}
+// ...and the PC's word that Pay was pressed (`how`: 'pressed'), or may have been ('maybe').
+async function payPressed(how = 'pressed') {
+  const t = await payAsked();
+  t.clock.t += 9000;
+  assert.deepEqual(note(t, 'held', { beat: true, pay: how, left: 6 * 60000, ...(how === 'maybe' ? { payWhy: 'Chrome gave no answer when Pay was pressed' } : {}) }), { ok: true });
+  await settle();
+  return t;
+}
+const PAID_UNKNOWN = 'Whether the payment went through is not known here. Look under Bookings on Glasgow Club\'s site, and in your banking app. Nothing was taken out of your basket.';
 
 test('the card of a court your PC can pay for: Pay comes first, and it asks before it does anything', () => {
   const ctx = ctxAt(`${TUE}T12:02:00Z`);
@@ -613,11 +634,24 @@ test('the card of a court your PC can pay for: Pay comes first, and it asks befo
   assert.deepEqual([paying.caption.split('\n')[2], keysOf(paying)], ['Paying: your PC is typing the card into the payment page and pressing Pay…', []]);
   const pressed = UI.indoorHold(ctx, holdAt({ pay: 'ready', payState: 'pressed', payAmount: '£23.00', pressedAt: at(`${TUE}T12:03:00Z`), payWords: 'Processing <payment>' }));
   assert.deepEqual(pressed.caption.split('\n').slice(1), [
-    'Your PC pressed <b>Pay £23.00</b> at 12:03. If your bank asks you to approve it, do that now in your banking app.',
+    'Your PC pressed <b>Pay £23.00</b>; I heard so at 12:03. If your bank asks you to approve it, do that now in your banking app.',   // the time is when the bot heard, and says so
     'Waiting for Glasgow Club\'s answer…',
     'The payment page says: “Processing &lt;payment&gt;”',
   ]);
   assert.deepEqual(keysOf(pressed), []);
+  // Chrome gave the PC no answer to the press: "may have pressed", what to do about it, and where to look.
+  const maybe = UI.indoorHold(ctx, holdAt({ pay: 'ready', payState: 'maybe', payAmount: '£23.00', pressedAt: at(`${TUE}T12:03:00Z`), payDoubt: 'Chrome did not answer in time when Pay was pressed <45 s>' }));
+  assert.deepEqual(maybe.caption.split('\n').slice(1), [
+    'Your PC <b>may have pressed Pay £23.00</b>: Chrome did not answer in time when Pay was pressed &lt;45 s&gt;. I heard so at 12:03.',
+    'Take it as pressed. Before you pay any other way, look under Bookings on Glasgow Club\'s site and in your banking app. If your bank asks you to approve this payment, that is yours to decide.',
+    'Your PC takes nothing out of your basket, and is waiting for Glasgow Club\'s answer…',
+  ]);
+  assert.deepEqual(maybe.keyboard.inline_keyboard.flat().map(b => [b.text, b.url]), [['Open Glasgow Club', 'https://glasgowclub.gladstonego.cloud/']]);   // no "Let it go", no "I have paid", no second Pay
+  fits(maybe);
+  assert.match(UI.indoorHold(ctx, holdAt({ pay: 'ready', payState: 'maybe', pressedAt: at(`${TUE}T12:03:00Z`) })).caption, /may have pressed Pay £23\.00<\/b>: it could not tell whether the press went through\. I heard so at 12:03\./);
+  // The longest these two cards can get (the PC's reason is cut at 160 characters, the page's words at 300) still fits a card.
+  fits(UI.indoorHold(ctx, holdAt({ pay: 'ready', payState: 'maybe', payAmount: '£1234.00', pressedAt: at(`${TUE}T12:03:00Z`), payDoubt: '<'.repeat(160), payWords: '<'.repeat(300) })));
+  fits(UI.indoorHold(ctx, holdAt({ pay: 'ready', payState: 'pressed', payAmount: '£1234.00', pressedAt: at(`${TUE}T12:03:00Z`), payWords: '<'.repeat(300) })));
   // It could not pay: said, with the other ways still there, and Pay not offered again.
   const failed = UI.indoorHold(ctx, holdAt({ pay: 'ready', payState: 'failed', payFailed: 'the expiry box: it did not hold what was typed' }));
   assert.equal(failed.caption.split('\n')[2], 'Your PC could not pay: the expiry box: it did not hold what was typed. Pay was not pressed, so nothing was paid.');
@@ -627,6 +661,12 @@ test('the card of a court your PC can pay for: Pay comes first, and it asks befo
   assert.equal(over.caption.split('\n')[2], 'Paying from your PC is not on for this one: £30.00 is more than your limit for one payment (GLASGOW_PAY_MAX, £25).');
   assert.deepEqual(keysOf(over), ['Open my basket', 'I have paid', 'Let it go']);
   assert.ok(!UI.indoorHold(ctx, holdAt()).caption.includes('Paying from your PC'));
+  // A bot that is not locked to you never shows Pay, whatever the hold says of itself.
+  for (const loose of [{ ...ctx, pinned: false }, { ...ctx, pinned: undefined }]) {
+    const none = UI.indoorHold(loose, holdAt({ pay: 'ready' }));
+    assert.deepEqual(keysOf(none), ['Open my basket', 'I have paid', 'Let it go']);
+    assert.ok(!none.caption.includes('Pay from my PC'));
+  }
 });
 
 test('how it ended after your PC pressed Pay: booked and paid, or what is known and where to look', () => {
@@ -641,8 +681,44 @@ test('how it ended after your PC pressed Pay: booked and paid, or what is known 
   assert.equal(end({ end: 'failed', stage: 'held', why: 'it stopped: Chrome went away' }), `Something went wrong after your PC pressed Pay: it stopped: Chrome went away.\nI cannot say how it ended. ${LOOK_UNDER} Look in your banking app too.`);
 });
 
+test('after a press, the endings that know nothing of the payment say so: the window closed, the PC asleep, the tool gone, nothing more heard', () => {
+  const ctx = ctxAt(`${TUE}T12:20:00Z`);
+  const card = over => { const s = UI.indoorHold(ctx, holdAt({ pressed: true, ...over })); fits(s); return s; };
+  const end = over => wordsOf(card(over));
+  assert.equal(end({ end: 'closed' }), `Your PC pressed Pay, and then the Chrome window on your PC was closed, so I cannot see how it ended.\n${PAID_UNKNOWN}`);
+  assert.equal(end({ end: 'slept' }), `Your PC pressed Pay, and then your PC went to sleep, so it stopped there.\n${PAID_UNKNOWN}`);
+  assert.equal(end({ end: 'gone' }), `Your PC pressed Pay, and then the tool on your PC stopped without saying how it ended.\n${PAID_UNKNOWN}`);
+  assert.equal(end({ end: 'gone', why: 'the booking tool was still running after twenty-eight minutes, so it was stopped' }),
+    `Your PC pressed Pay, and then the tool on your PC stopped without saying how it ended (the booking tool was still running after twenty-eight minutes, so it was stopped).\n${PAID_UNKNOWN}`);
+  assert.equal(end({ end: 'timeout' }), `Your PC pressed Pay, and I have heard nothing more from your PC about this.\n${PAID_UNKNOWN}`);
+  for (const how of ['closed', 'slept', 'gone', 'timeout']) {
+    // None of them says an unpaid hold "lapses by itself", and each points at where the answer is.
+    assert.ok(!end({ end: how }).includes('lapses'), how);
+    assert.deepEqual(keysOf(card({ end: how })), ['Open Glasgow Club', 'Other times', 'Menu'], how);
+    // "May have pressed" (Chrome gave the PC no answer to the press) is said as that, with the same care.
+    assert.equal(end({ end: how, pressed: 'maybe' }).split('\n')[1], PAID_UNKNOWN, how);
+    assert.match(end({ end: how, pressed: 'maybe' }), /^Your PC may have pressed Pay \(whether it did is not known\), and /, how);
+    // Without a press they read as they always did.
+    assert.match(wordsOf(UI.indoorHold(ctx, holdAt({ end: how }))), /If the court was in your basket and not paid for, the hold lapses by itself\.$/, how);
+  }
+  // The other endings after a press that may or may not have landed.
+  assert.equal(end({ end: 'booked', pressed: 'maybe', words: 'Thank you' }),
+    '<b>Booked.</b> It is on your Bookings page at Glasgow Club now, and was not before. Your PC could not tell whether its press of Pay had gone through; your banking app shows what was paid.\nAfter the payment the page said: “Thank you”');
+  assert.match(end({ end: 'unsure', pressed: 'maybe', checked: true, basket: 'still' }), /^Your PC may have pressed Pay \(whether it did is not known\), and the payment page never moved on, but I could not see the court as a new booking on your Bookings page\.\n.*Look in your banking app too/);
+  assert.match(end({ end: 'left', pressed: 'maybe', checked: true, basket: 'gone' }), /^Your PC may have pressed Pay \(whether it did is not known\) and the payment page moved on, but /);
+  assert.equal(end({ end: 'failed', pressed: 'maybe', stage: 'held', why: 'it stopped: Chrome went away' }), `Something went wrong after your PC may have pressed Pay: it stopped: Chrome went away.\nI cannot say how it ended. ${LOOK_UNDER} Look in your banking app too.`);
+  // The longest of them, with everything the PC can send at its longest, still fits a card (`end` checks each).
+  for (const pressed of [true, 'maybe']) {
+    end({ end: 'left', pressed, checked: false, basket: 'still', words: '<'.repeat(300) });
+    end({ end: 'unsure', pressed, checked: false, basket: 'still', words: '<'.repeat(300) });
+    end({ end: 'gone', pressed, why: '<'.repeat(300) });
+    end({ end: 'failed', pressed, stage: 'held', why: '<'.repeat(300) });
+    end({ end: 'booked', pressed, words: '<'.repeat(300) });
+  }
+});
+
 test('Pay from my PC: asked for, confirmed with the amount, sent to the PC until it answers, and never twice', async () => {
-  const t = await started();
+  const t = await startedPinned();
   assert.deepEqual(heldReady(t), { ok: true });
   await settle();
   assert.deepEqual(texts(t.tg.last()), ['Pay £23.00 from my PC', 'Open my basket', 'I have paid', 'Let it go']);
@@ -673,7 +749,7 @@ test('Pay from my PC: asked for, confirmed with the amount, sent to the PC until
   t.clock.t += 8000;
   assert.deepEqual(note(t, 'held', { beat: true, pay: 'pressed', left: 6 * 60000 }), { ok: true });
   await settle();
-  assert.equal(t.tg.last().text.split('\n')[1], 'Your PC pressed <b>Pay £23.00</b> at 12:00. If your bank asks you to approve it, do that now in your banking app.');
+  assert.equal(t.tg.last().text.split('\n')[1], 'Your PC pressed <b>Pay £23.00</b>; I heard so at 12:00. If your bank asks you to approve it, do that now in your banking app.');
   assert.deepEqual(texts(t.tg.last()), []);
   await tap(t.app, `gx:${t.id}`, 7);
   assert.equal(lastAnswer(t), 'Your PC has pressed Pay. Wait for the answer.');
@@ -692,7 +768,7 @@ test('Pay from my PC: asked for, confirmed with the amount, sent to the PC until
 });
 
 test('"Yes, pay" only counts for the amount that was shown, after the question, on a court the PC can pay for', async () => {
-  const t = await started();
+  const t = await startedPinned();
   heldReady(t);
   await tap(t.app, `gz:${t.id}:2300`, 7);                                                        // Yes without the question (an old button)
   assert.equal(lastAnswer(t), 'The amount has changed. Look again.');
@@ -701,7 +777,7 @@ test('"Yes, pay" only counts for the amount that was shown, after the question, 
   assert.equal(lastAnswer(t), 'The amount has changed. Look again.');
   assert.deepEqual(note(t, 'held', { beat: true }), { ok: true });                               // nothing was sent to the PC
   // A court the PC did not say it can pay for: no Pay, whatever is tapped.
-  const plain = await started();
+  const plain = await startedPinned();
   held(plain);
   for (const data of [`gy:${plain.id}`, `gz:${plain.id}:2300`]) {
     await tap(plain.app, data, 7);
@@ -709,7 +785,7 @@ test('"Yes, pay" only counts for the amount that was shown, after the question, 
   }
   assert.deepEqual(note(plain, 'held', { beat: true }), { ok: true });
   // Before the court is in the basket, and once the hold is over: no.
-  const early = await started();
+  const early = await startedPinned();
   note(early, 'signing-in');
   await tap(early.app, `gy:${early.id}`, 7);
   assert.equal(lastAnswer(early), 'Paying from your PC is not on for this court.');
@@ -721,7 +797,7 @@ test('"Yes, pay" only counts for the amount that was shown, after the question, 
 });
 
 test('the PC could not pay: the card says why, Pay is not offered again, and the court can still be let go', async () => {
-  const t = await started();
+  const t = await startedPinned();
   heldReady(t);
   await tap(t.app, `gy:${t.id}`, 7);
   await tap(t.app, `gz:${t.id}:2300`, 7);
@@ -737,7 +813,7 @@ test('the PC could not pay: the card says why, Pay is not offered again, and the
 });
 
 test('told to pay twice over, a PC that comes back with neither a press nor a reason is not acting on it: said, and the order withdrawn', async () => {
-  const t = await started();
+  const t = await startedPinned();
   heldReady(t);
   await tap(t.app, `gy:${t.id}`, 7);
   await tap(t.app, `gz:${t.id}:2300`, 7);
@@ -749,7 +825,7 @@ test('told to pay twice over, a PC that comes back with neither a press nor a re
   await settle();
   assert.equal(t.tg.last().text.split('\n')[2], 'Your PC could not pay: your PC did not act on it. Pay was not pressed, so nothing was paid.');
   // While the PC is at it (it sends nothing while it types), however long that takes, nothing is concluded.
-  const slow = await started();
+  const slow = await startedPinned();
   heldReady(slow);
   await tap(slow.app, `gy:${slow.id}`, 7);
   await tap(slow.app, `gz:${slow.id}:2300`, 7);
@@ -761,16 +837,273 @@ test('told to pay twice over, a PC that comes back with neither a press nor a re
 });
 
 test('after Pay is pressed the hold runs on the PC\'s clock for the answer, and an ending that could not see the booking says where to look', async () => {
-  const t = await started();
+  const t = await startedPinned();
   heldReady(t);                                                                                  // until 12:12
   await tap(t.app, `gy:${t.id}`, 7);
   await tap(t.app, `gz:${t.id}:2300`, 7);
   t.clock.t = at(`${TUE}T12:11:00Z`);
   note(t, 'held', { beat: true, pay: 'pressed', left: 6 * 60000 });                              // pressed a minute before the hold's own end
   for (t.clock.t = at(`${TUE}T12:11:04Z`); t.clock.t < at(`${TUE}T12:23:00Z`); t.clock.t += 4000) { note(t, 'held', { beat: true, pay: 'pressed', left: Math.max(0, at(`${TUE}T12:17:00Z`) - t.clock.t) }); await t.app.tick(); }
-  assert.match(t.tg.last().text.split('\n')[1], /^Your PC pressed <b>Pay £23\.00<\/b> at 12:11\./);   // still waiting at 12:23, eleven minutes after 12:12
+  assert.match(t.tg.last().text.split('\n')[1], /^Your PC pressed <b>Pay £23\.00<\/b>; I heard so at 12:11\./);   // still waiting at 12:23, eleven minutes after 12:12
   note(t, 'unsure', { words: '', checked: true, basket: 'still', pressed: true });
   await settle();
   assert.match(rest(t.tg.last())[0], /^Your PC pressed Pay, and the payment page never moved on, but I could not see the court as a new booking/);
   assert.match(rest(t.tg.last())[1], /Look in your banking app too/);
+});
+
+// ---------- after a press, no ending forgets it ----------
+
+test('the PC link says the tool has gone after Pay was pressed: the card says Pay was pressed and that how it went is not known', async () => {
+  const t = await payPressed();
+  // The link does not know what its tool did: its note says nothing of a press. The bot does.
+  assert.deepEqual(note(t, 'gone', { why: 'the booking tool was still running after twenty-eight minutes, so it was stopped' }), { ok: true });
+  await settle();
+  assert.deepEqual(rest(t.tg.last()), ['Your PC pressed Pay, and then the tool on your PC stopped without saying how it ended (the booking tool was still running after twenty-eight minutes, so it was stopped).', PAID_UNKNOWN]);
+  assert.deepEqual(texts(t.tg.last()), ['Open Glasgow Club', 'Other times', 'Menu']);
+});
+
+test('the Chrome window closed, or the PC asleep, after Pay was pressed: said with the press, whether or not the tool\'s note says so again', async () => {
+  for (const [how, first] of [['closed', 'Your PC pressed Pay, and then the Chrome window on your PC was closed, so I cannot see how it ended.'], ['slept', 'Your PC pressed Pay, and then your PC went to sleep, so it stopped there.']]) {
+    for (const extra of [{ pressed: true }, {}]) {
+      const t = await payPressed();
+      assert.deepEqual(note(t, how, extra), { ok: true });
+      await settle();
+      assert.deepEqual(rest(t.tg.last()), [first, PAID_UNKNOWN], how);
+      assert.deepEqual(texts(t.tg.last()), ['Open Glasgow Club', 'Other times', 'Menu'], how);
+    }
+  }
+  // A hold nobody paid for from the PC ends in the old words.
+  const plain = await started();
+  held(plain);
+  note(plain, 'closed');
+  await settle();
+  assert.deepEqual(rest(plain.tg.last()), [`The Chrome window on your PC was closed, so I cannot see how it ended. ${LAPSES}`]);
+});
+
+test('nothing more is heard after Pay was pressed: the card says so with the press, and the PC is never told to let go', async () => {
+  const t = await payPressed();                                                                  // the PC gave the page six more minutes
+  t.clock.t += 12 * 60000;
+  await t.app.tick();
+  assert.match(t.tg.last().text.split('\n')[1], /^Your PC pressed <b>Pay £23\.00<\/b>; I heard so at /);   // not yet: seven minutes after its time
+  t.clock.t += 2 * 60000;
+  await t.app.tick();
+  assert.deepEqual(rest(t.tg.last()), ['Your PC pressed Pay, and I have heard nothing more from your PC about this.', PAID_UNKNOWN]);
+  assert.deepEqual(texts(t.tg.last()), ['Open Glasgow Club', 'Other times', 'Menu']);
+  // A PC that still has it is not told to let go (as it is for a hold nobody paid for): a payment may be going through.
+  assert.deepEqual(note(t, 'held', { beat: true, pay: 'pressed', left: 0 }), { ok: true });
+  // And when the PC does say how it ended, its word replaces the bot's guess.
+  assert.deepEqual(note(t, 'booked', { words: 'Thank you', pressed: true }), { ok: true });
+  await settle();
+  assert.equal(rest(t.tg.last())[0], '<b>Booked and paid.</b> Your PC pressed Pay, and the court is on your Bookings page at Glasgow Club now; it was not before.');
+  // Given up for another hold after four silent minutes: the same words, and the old tool is not told to let go either.
+  const old = await payPressed();
+  old.clock.t += 4 * 60000;
+  await old.app.pingFromAgent();
+  const ping = old.app.pingFromAgent({}, { wait: 5 });
+  await tap(old.app, 'gh:g:20261120:1900:3', 8);
+  await ping;
+  await settle();
+  const first = old.tg.calls.filter(c => c.id === 7).pop();
+  assert.deepEqual(rest(first), ['Your PC pressed Pay, and I have heard nothing more from your PC about this.', PAID_UNKNOWN]);
+  assert.deepEqual(note(old, 'held', { beat: true, pay: 'pressed', left: 60000 }), { ok: true, unknown: true });
+});
+
+test('you confirmed Pay and the PC never said how it went: an ending that is not the tool\'s own word says Pay may have been pressed', async () => {
+  // The tool is stopped, or dies, in the middle of paying: the link's "gone" is all that comes.
+  const t = await payAsked();
+  assert.deepEqual(note(t, 'gone'), { ok: true });
+  await settle();
+  assert.deepEqual(rest(t.tg.last()), ['Your PC may have pressed Pay (whether it did is not known), and then the tool on your PC stopped without saying how it ended.', PAID_UNKNOWN]);
+  // Nothing at all comes: the bot's own ending says the same, and does not tell the PC to let go.
+  const silent = await payAsked();
+  silent.clock.t += 20 * 60000;
+  await silent.app.tick();
+  assert.deepEqual(rest(silent.tg.last()), ['Your PC may have pressed Pay (whether it did is not known), and I have heard nothing more from your PC about this.', PAID_UNKNOWN]);
+  assert.deepEqual(note(silent, 'held', { beat: true }), { ok: true });
+  // The tool's own word, when it does come, is what counts: it had not pressed, and let the court go.
+  assert.deepEqual(note(silent, 'released', { basket: 'empty', removed: 1, why: 'time', checked: true }), { ok: true });
+  await settle();
+  assert.deepEqual(rest(silent.tg.last()), ['Not paid in time, so your PC took the court out of your basket again.']);
+  // The tool's own "closed" while it had only been asked: it would have said so had it pressed.
+  const closed = await payAsked();
+  note(closed, 'closed');
+  await settle();
+  assert.deepEqual(rest(closed.tg.last()), [`The Chrome window on your PC was closed, so I cannot see how it ended. ${LAPSES}`]);
+});
+
+test('"may have pressed": the PC could not tell whether its press of Pay landed, and from then on it is treated as pressed here too', async () => {
+  const t = await payPressed('maybe');
+  assert.deepEqual(rest(t.tg.last()), [
+    'Your PC <b>may have pressed Pay £23.00</b>: Chrome gave no answer when Pay was pressed. I heard so at 12:00.',
+    'Take it as pressed. Before you pay any other way, look under Bookings on Glasgow Club\'s site and in your banking app. If your bank asks you to approve this payment, that is yours to decide.',
+    'Your PC takes nothing out of your basket, and is waiting for Glasgow Club\'s answer…',
+  ]);
+  assert.deepEqual(texts(t.tg.last()), ['Open Glasgow Club']);
+  assert.ok(t.logs.includes('Hold: your PC may have pressed Pay for Gorbals 2026-11-20 18:00 court 3 (£23.00): Chrome gave no answer when Pay was pressed.'));
+  // No order goes to the PC any more, and neither Let it go, I have paid nor a second Pay is taken.
+  assert.deepEqual(note(t, 'held', { beat: true, pay: 'maybe', left: 5 * 60000 }), { ok: true });
+  for (const [data, toast] of [[`gx:${t.id}`, 'Your PC may have pressed Pay. Wait for the answer.'], [`gp:${t.id}`, 'Your PC may have pressed Pay. Wait for the answer.'], [`gy:${t.id}`, 'Pay may have been pressed already.'], [`gz:${t.id}:2300`, 'Pay may have been pressed already.']]) {
+    await tap(t.app, data, 7);
+    assert.equal(lastAnswer(t), toast, data);
+  }
+  assert.deepEqual(note(t, 'held', { beat: true, pay: 'maybe', left: 5 * 60000, words: 'Processing' }), { ok: true });
+  await settle();
+  assert.equal(t.tg.last().text.split('\n')[4], 'The payment page says: “Processing”');
+  // The ending carries it: not seen as booked.
+  assert.deepEqual(note(t, 'unsure', { words: '', checked: true, basket: 'still', pressed: 'maybe' }), { ok: true });
+  await settle();
+  assert.match(rest(t.tg.last())[0], /^Your PC may have pressed Pay \(whether it did is not known\), and the payment page never moved on, but I could not see the court as a new booking/);
+  assert.match(rest(t.tg.last())[1], /Look in your banking app too/);
+  // Every other ending after a "maybe", whether the note says so again or not.
+  for (const [how, extra, first] of [
+    ['closed', { pressed: 'maybe' }, 'Your PC may have pressed Pay (whether it did is not known), and then the Chrome window on your PC was closed, so I cannot see how it ended.'],
+    ['slept', {}, 'Your PC may have pressed Pay (whether it did is not known), and then your PC went to sleep, so it stopped there.'],
+    ['gone', {}, 'Your PC may have pressed Pay (whether it did is not known), and then the tool on your PC stopped without saying how it ended.'],
+  ]) {
+    const m = await payPressed('maybe');
+    note(m, how, extra);
+    await settle();
+    assert.deepEqual(rest(m.tg.last()), [first, PAID_UNKNOWN], how);
+  }
+  const quiet = await payPressed('maybe');
+  quiet.clock.t += 14 * 60000;
+  await quiet.app.tick();
+  assert.deepEqual(rest(quiet.tg.last()), ['Your PC may have pressed Pay (whether it did is not known), and I have heard nothing more from your PC about this.', PAID_UNKNOWN]);
+  assert.deepEqual(note(quiet, 'held', { beat: true, pay: 'maybe', left: 0 }), { ok: true });         // never "let it go"
+  // Booked after all: said as booked, with what is not known left as that.
+  const b = await payPressed('maybe');
+  note(b, 'booked', { words: '', pressed: 'maybe' });
+  await settle();
+  assert.deepEqual(rest(b.tg.last()), ['<b>Booked.</b> It is on your Bookings page at Glasgow Club now, and was not before. Your PC could not tell whether its press of Pay had gone through; your banking app shows what was paid.']);
+});
+
+test('the bot restarted between the press and the ending: a note that says Pay was pressed is passed on to you in a message, not dropped', async () => {
+  const t = await payPressed();
+  const fresh = makeApp(`${TUE}T12:05:00Z`, PINNED);                                             // the same bot after a redeploy: it knows no hold
+  const beat = { id: t.id, key: 'g', date: FRI, start: 1080, court: 3, stage: 'held', beat: true, price: '£23.00', pay: 'pressed', left: 4 * 60000 };
+  // The PC's next beat: nothing can be ordered, but you hear of it, once.
+  assert.deepEqual(fresh.app.holdFromAgent(beat), { ok: true, unknown: true });
+  await settle();
+  assert.equal(fresh.tg.calls.length, 1);
+  assert.deepEqual([fresh.tg.last().method, fresh.tg.last().chat], ['send', OWNER]);
+  assert.deepEqual(fresh.tg.last().text.split('\n'), [
+    TITLE,
+    'I am no longer following this hold (I was restarted while your PC had it, or had given it up), so its card does not change any more. This is what your PC says:',
+    'Your PC pressed Pay, and it is waiting for Glasgow Club\'s answer. If your bank asks you to approve the payment, that is yours to do in your banking app.',
+    `${PAID_UNKNOWN} I will say here how it ended, if your PC tells me.`,
+  ]);
+  assert.deepEqual(texts(fresh.tg.last()), ['Open Glasgow Club', 'Menu']);
+  for (let i = 0; i < 5; i++) assert.deepEqual(fresh.app.holdFromAgent(beat), { ok: true, unknown: true });   // a beat every four seconds
+  await settle();
+  assert.equal(fresh.tg.calls.length, 1);
+  // The ending: said once more, in the words the card would have had.
+  const ending = { id: t.id, key: 'g', date: FRI, start: 1080, court: 3, stage: 'unsure', words: '', checked: true, basket: 'still', pressed: true };
+  assert.deepEqual(fresh.app.holdFromAgent(ending), { ok: true, unknown: true });
+  assert.deepEqual(fresh.app.holdFromAgent(ending), { ok: true, unknown: true });                 // the PC tries an ending up to four times
+  assert.deepEqual(fresh.app.holdFromAgent({ id: t.id, stage: 'gone' }), { ok: true, unknown: true });   // and its link's "the tool has gone" follows
+  await settle();
+  assert.equal(fresh.tg.calls.length, 2);
+  assert.deepEqual(fresh.tg.last().text.split('\n').slice(0, 3), [
+    TITLE,
+    'I am no longer following this hold (I was restarted while your PC had it, or had given it up), so its card does not change any more. This is what your PC says:',
+    'Your PC pressed Pay, and the payment page never moved on, but I could not see the court as a new booking on your Bookings page.',
+  ]);
+  assert.match(fresh.tg.last().text, /Look in your banking app too/);
+  assert.ok(fresh.logs.some(l => /A hold I am not following ended \(unsure\), and your PC says Pay was pressed for it: told you so\./.test(l)));
+  // The ending is the first thing heard after the restart: booked and paid, said once.
+  const later = makeApp(`${TUE}T12:05:00Z`, PINNED);
+  later.app.holdFromAgent({ id: t.id, key: 'g', date: FRI, start: 1080, court: 3, stage: 'booked', words: 'Thank you', pressed: true });
+  await settle();
+  assert.deepEqual(later.tg.last().text.split('\n').slice(2), ['<b>Booked and paid.</b> Your PC pressed Pay, and the court is on your Bookings page at Glasgow Club now; it was not before.', 'After the payment the page said: “Thank you”']);
+  // The tool was stopped after the restart: the link's "gone" says nothing of a press, but an earlier beat did.
+  const stopped = makeApp(`${TUE}T12:05:00Z`, PINNED);
+  stopped.app.holdFromAgent({ ...beat, pay: 'maybe' });
+  stopped.app.holdFromAgent({ id: t.id, stage: 'gone', why: 'the booking tool was still running after twenty-eight minutes, so it was stopped' });
+  await settle();
+  assert.equal(stopped.tg.calls.length, 2);
+  assert.deepEqual(stopped.tg.last().text.split('\n').slice(0, 1).concat(stopped.tg.last().text.split('\n').slice(2)), [
+    TITLE,
+    'Your PC may have pressed Pay (whether it did is not known), and then the tool on your PC stopped without saying how it ended (the booking tool was still running after twenty-eight minutes, so it was stopped).',
+    PAID_UNKNOWN,
+  ]);
+  // Telegram will not take the message: it is tried again.
+  const flaky = makeApp(`${TUE}T12:05:00Z`, PINNED);
+  flaky.tg.failSend = 1;
+  flaky.app.holdFromAgent(ending);
+  await new Promise(r => setTimeout(r, 3100));
+  assert.equal(flaky.tg.calls.length, 1);
+  assert.ok(flaky.logs.some(l => /Could not tell you about that hold: network down/.test(l)));
+});
+
+test('a note about a hold this bot does not know that says nothing of a press is still left alone, and so is one that does not read as a hold', async () => {
+  const fresh = makeApp(`${TUE}T12:05:00Z`, PINNED);
+  for (const raw of [
+    { id: 'a1b2c3d4e5f6', key: 'g', date: FRI, start: 1080, court: 3, stage: 'held', beat: true, price: '£23.00' },
+    { id: 'a1b2c3d4e5f6', key: 'g', date: FRI, start: 1080, court: 3, stage: 'held', beat: true, pay: 'ready' },
+    { id: 'a1b2c3d4e5f6', key: 'g', date: FRI, start: 1080, court: 3, stage: 'held', beat: true, pay: 'failed', payWhy: 'x' },
+    { id: 'a1b2c3d4e5f6', key: 'g', date: FRI, start: 1080, court: 3, stage: 'released', basket: 'empty', removed: 1, why: 'time' },
+    { id: 'a1b2c3d4e5f6', key: 'g', date: FRI, start: 1080, court: 3, stage: 'closed' },
+    { id: 'a1b2c3d4e5f6', stage: 'gone' },
+    { id: 'a1b2c3d4e5f6', stage: 'signing-in', pay: 'pressed', pressed: 'yes' },                   // not a step at which Pay can have been pressed, and not a word for it
+    { id: '<b>not an id</b>', stage: 'booked', pressed: true },
+    null, 7, {},
+  ]) assert.deepEqual(fresh.app.holdFromAgent(raw), { ok: true, unknown: true });
+  await settle();
+  assert.equal(fresh.tg.calls.length, 0);
+  // A note with a press but without a court that reads as one: you are still told, without a made-up court.
+  fresh.app.holdFromAgent({ id: 'a1b2c3d4e5f6', key: 'toString', date: 'soon', start: -1, court: 99, stage: 'closed', pressed: true });
+  await settle();
+  assert.equal(fresh.tg.calls.length, 1);
+  assert.equal(fresh.tg.last().text.split('\n')[0], '<b>A court your PC was holding</b>');
+  assert.match(fresh.tg.last().text, /Your PC pressed Pay, and then the Chrome window on your PC was closed/);
+  // A bot with no owner at all has nobody to tell.
+  const ownerless = makeApp(`${TUE}T12:05:00Z`, { store: memStore(null) });
+  ownerless.app.holdFromAgent({ id: 'a1b2c3d4e5f6', key: 'g', date: FRI, start: 1080, court: 3, stage: 'booked', pressed: true });
+  await settle();
+  assert.equal(ownerless.tg.calls.length, 0);
+});
+
+// ---------- who may spend ----------
+
+test('Pay is offered, and taken, only when the bot is locked to you by TELEGRAM_CHAT_ID: an owner from the saved settings alone cannot spend', async () => {
+  const t = await started();                                                                     // the owner comes from the saved settings; no TELEGRAM_CHAT_ID
+  assert.deepEqual(heldReady(t), { ok: true });
+  await settle();
+  assert.deepEqual(texts(t.tg.last()), ['Open my basket', 'I have paid', 'Let it go']);          // no Pay button
+  assert.equal(t.tg.last().text.split('\n')[2], 'Paying from your PC is not on: this bot is not locked to you, so whoever came to own it could spend from your card. Add the variable TELEGRAM_CHAT_ID = 42 in Railway.');
+  assert.ok(t.logs.some(l => /is in the basket \(£23\.00\); your PC could pay for it, but Pay is not offered without TELEGRAM_CHAT_ID\.$/.test(l)));
+  // The taps themselves (from an old card, or made up) are refused, and no order to pay ever goes to the PC.
+  for (const data of [`gy:${t.id}`, `gz:${t.id}:2300`, `gy:${t.id}`, `gz:${t.id}:2300`]) {
+    await tap(t.app, data, 7);
+    assert.equal(lastAnswer(t), 'Paying needs this bot locked to you: set TELEGRAM_CHAT_ID in Railway.', data);
+    assert.deepEqual(note(t, 'held', { beat: true }), { ok: true });
+  }
+  // Everything else about the hold works as ever.
+  await tap(t.app, `gx:${t.id}`, 7);
+  assert.equal(lastAnswer(t), 'Letting it go');
+  assert.deepEqual(note(t, 'held', { beat: true }), { ok: true, order: 'release' });
+});
+
+test('the saved settings lost and no TELEGRAM_CHAT_ID: whoever sends /start first owns the bot, and still cannot spend from your card', async () => {
+  const STRANGER = 666;
+  const t = makeApp(`${TUE}T12:00:00Z`, { store: memStore(null) });
+  await t.app.handleUpdate(say(STRANGER, '/start'));
+  assert.equal(t.app.owner(), STRANGER);                                                         // as it has always been, for a bot that is not locked
+  await t.app.pingFromAgent({ ip: '81.2.69.142' });
+  const ping = t.app.pingFromAgent({ ip: '81.2.69.142' }, { wait: 5 });
+  await tap(t.app, HOLD, 7, { chat: STRANGER });
+  const id = (await ping).hold.id;
+  await settle();
+  t.app.holdFromAgent({ id, key: 'g', date: FRI, start: 1080, court: 3, stage: 'held', price: '£23.00', left: 12 * 60000, pay: 'ready' });
+  await settle();
+  assert.deepEqual(texts(t.tg.last()), ['Open my basket', 'I have paid', 'Let it go']);
+  for (const data of [`gy:${id}`, `gz:${id}:2300`]) {
+    await tap(t.app, data, 7, { chat: STRANGER });
+    assert.equal(lastAnswer(t), 'Paying needs this bot locked to you: set TELEGRAM_CHAT_ID in Railway.');
+  }
+  assert.deepEqual(t.app.holdFromAgent({ id, key: 'g', date: FRI, start: 1080, court: 3, stage: 'held', beat: true }), { ok: true });
+  // With TELEGRAM_CHAT_ID set, a stranger is not the owner at all, and the owner's Pay works.
+  const locked = makeApp(`${TUE}T12:00:00Z`, { ...PINNED, store: memStore(null) });
+  await locked.app.handleUpdate(say(STRANGER, '/start'));
+  assert.equal(locked.app.owner(), OWNER);
 });
