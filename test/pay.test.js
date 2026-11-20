@@ -485,9 +485,17 @@ test('an order the PC never came for is dropped after half a minute, unsent: not
   assert.deepEqual(t.beat(), { ok: true, order: 'pay', amount: '£23.00', sealed: again });
 });
 
-test('an order that did not reach the PC: its next note is from the basket, not "paying", so nothing was pressed and Pay may be asked for again', async () => {
+test('an order that did not reach the PC: its next notes are from the basket, not "paying", so nothing was pressed and Pay may be asked for again', async () => {
   const t = await told();
-  assert.deepEqual(t.beat(), { ok: true });                                                   // a note from the basket: it never took the order up
+  // One note from the basket may be an older one, slow on the way and overtaken by the one that took the order: nothing changes for it.
+  assert.deepEqual(t.beat(), { ok: true });
+  assert.deepEqual([t.hold().can.pay, t.hold().lines[1]], [false, 'Telling your PC to pay £23.00, as you asked in the app…']);
+  const slow = await told();
+  slow.beat();
+  slow.pc('paying', { price: '£23.00', left: 11 * 60000 });                                      // and then the PC says it is paying: it had the order all along
+  assert.deepEqual([slow.hold().stage, slow.hold().can.pay], ['paying', false]);
+  // Two: it never got there.
+  assert.deepEqual(t.beat(), { ok: true });
   const h = t.hold();
   assert.deepEqual([h.stage, h.can.pay, h.lines[1]], ['held', true, 'Not paid from the app: your PC did not get the order to pay. Nothing was pressed, so you can ask again there.']);
   assert.ok(t.logs.includes('Hold: the order to pay for Gorbals 2026-11-20 18:00 court 3 was dropped (your PC did not get the order to pay).'));
@@ -595,7 +603,7 @@ test('your bank\'s approval does not come in time, a code is asked for, or the p
   const c = await pressed();
   assert.deepEqual(c.pc('failed', { pressed: true, bank: 'code', why: 'your bank asked for a code to be typed into the payment page, and I never type or pass on such a code' }), { ok: true });
   assert.deepEqual(c.hold().lines, [
-    'Your PC pressed Pay, and then your bank asked for a code to be typed into the payment page. Your PC never types or passes on such a code, so it stopped there: the payment was not finished.',
+    'Your PC pressed Pay, and then your bank asked for a code to be typed into the payment page. Your PC never types or passes on such a code, so it stopped there, and the payment may not have gone through.',
     `Nothing was taken out of your basket; unpaid, the court lapses by itself. ${LOOK_UNDER} Look in your banking app too.`,
   ]);
   // The payment page came back with an error.

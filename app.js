@@ -614,7 +614,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       // a press is only "maybe". `payWords`: what the payment page said after the press.
       // `pressed`: what is known of a press (PRESS_RANK). `bank`: with an ending, 'approve' (your
       // bank's approval had not come) or 'code' (it asked for a code, which the PC never types).
-      pay: '', payWhy: '', payState: null, payAmount: '', paySealed: null, payAskedAt: null, payToldAt: null, payQuiet: false, payFailed: '',
+      // `payAfter`: notes from the basket heard since the order went to the PC, saying nothing of it.
+      pay: '', payWhy: '', payState: null, payAmount: '', paySealed: null, payAskedAt: null, payToldAt: null, payQuiet: false, payAfter: 0, payFailed: '',
       payDoubt: '', payWords: '', pressedAt: null, pressed: false, bank: '' };
     hold = h;
     holdStarts.push(t);
@@ -711,6 +712,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     h.payAskedAt = t;
     h.payToldAt = null;
     h.payQuiet = false;
+    h.payAfter = 0;
     h.payFailed = '';
     log(`Hold: you asked in the app to pay ${amount} for ${holdName(h)} with the card your PC keeps.`);
     drawHold(h);
@@ -911,13 +913,19 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       }
       if (h.payState === 'told' || h.payState === 'paying') {
         // Told to pay, the PC is back with a note from the basket: it could not (and says why),
-        // or the order never reached it. Either way it did not press Pay.
+        // or the order never reached it. Either way it did not press Pay. A PC that took the
+        // order up says so before anything else, so two notes from the basket that say nothing
+        // of it mean it never got there. (One alone may be an older note that was slow on the
+        // way, overtaken by the one that took the order.)
         if (pay === 'failed') {
           h.payState = 'failed';
           h.payFailed = payWhy || 'no reason was given';
           log(`Hold: your PC could not pay for ${holdName(h)} (${h.payFailed}).`);
-        } else withdrawPay(h, 'your PC did not get the order to pay');
-        redraw = true;
+          redraw = true;
+        } else if (h.payState === 'told' && ++h.payAfter >= 2) {
+          withdrawPay(h, 'your PC did not get the order to pay');
+          redraw = true;
+        }
       }
       if (h.payState === 'asked' && pay !== 'ready') {
         // Asked for while the PC could pay, and now it says it cannot: the order is not sent.

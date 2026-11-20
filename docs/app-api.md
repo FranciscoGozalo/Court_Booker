@@ -240,7 +240,8 @@ Null when the PC keeps no card as far as the bot knows, none is on its way and t
     not pass the check every card number passes (a digit may be wrong)", "the card number should be
     12 to 19 digits", "the card number is missing", "the expiry month should be 1 to 12", "the
     expiry year should be four digits", "the card has expired", "the expiry is more than 20 years
-    away, which I take for a slip", "the name on the card should be at most 60 characters", "it
+    away, which I take for a slip", "the name on the card should be at most 60 characters", "it came
+    without the app's pay key, so no payment could ever be ordered with it", "it
     could not be opened with this PC's key (it was sealed for another key, or changed on the way)",
     "it is not a sealed box (it does not read as base64)", "it is too short to be a sealed box",
     "it is longer than a sealed box may be (1024 characters)", "Windows would not protect it, so it
@@ -315,7 +316,7 @@ time, whoever started it.
     court is on your Bookings page at Glasgow Club now; it was not before."; "Your PC pressed Pay,
     but the payment did not go through: …" (with what the payment page said); "Your PC pressed
     Pay, and then your bank asked for a code to be typed into the payment page. Your PC never types
-    or passes on such a code, so it stopped there: the payment was not finished." (`"failed"`);
+    or passes on such a code, so it stopped there, and the payment may not have gone through." (`"failed"`);
     "Your PC pressed Pay and your bank asked you to approve the payment, but no approval had come
     when your PC stopped waiting, and I could not see the court as a new booking on your Bookings
     page." (`"unsure"`); and for every ending that cannot know how the payment went (the Chrome
@@ -525,15 +526,29 @@ A box is at most 1024 base64 characters, and at least 74 bytes once decoded. Tha
 canonical base64, is all the bot checks; it passes on exactly what came. It never writes a sealed
 box to its log or to disk, and drops it once it is handed to the PC (or dropped unsent).
 
-- The card: `{ number, expMonth, expYear, name }`. `number`: a string of 12 to 19 digits (spaces and
-  dashes are ignored) that passes the Luhn check. `expMonth`: 1 to 12 (a number; "01" is taken too).
-  `expYear`: four digits (two are taken as 20YY). The card must not have expired (it is good to the
-  end of its month), and must expire within 20 years. `name`: the name on the card, up to 60
-  characters, or left out. There is no security code in it: the PC never keeps one.
-- The security code, for one payment: `{ cvc, id, amount }`. `cvc`: 3 or 4 digits, as a string.
-  `id`: the hold's `id`. `amount`: the amount the owner confirmed, exactly as in the order
-  (`"£23.00"`). The PC refuses a code sealed for another hold or another amount: a box kept by
-  anyone on the way is of no use for any other payment.
+- The card: `{ number, expMonth, expYear, name, payKey }`. `number`: a string of 12 to 19 digits
+  (spaces and dashes are ignored) that passes the Luhn check. `expMonth`: 1 to 12 (a number; "01" is
+  taken too). `expYear`: four digits (two are taken as 20YY). The card must not have expired (it is
+  good to the end of its month), and must expire within 20 years. `name`: the name on the card, up
+  to 60 characters, or left out. `payKey`: the app's pay key, standard base64 of 32 random bytes
+  (`nacl.randomBytes(32)`), made by the app for this card and kept in the iPhone's keychain; it goes
+  nowhere else. The PC keeps it with the card, protected, and refuses a card without one. There is
+  no security code in the card: the PC never keeps one.
+- The security code, for one payment: `{ cvc, id, amount, payKey, centre, date, start, court }`.
+  `cvc`: 3 or 4 digits, as a string. `id`: the hold's `id`. `amount`: the amount the owner
+  confirmed, exactly as in the order (`"£23.00"`). `payKey`: the pay key sent with the card the PC
+  keeps. `centre`, `date`, `start`, `court`: the hold's own, as in `state.hold` (`"g"`,
+  `"2026-11-20"`, `1080`, `3`).
+
+Why the pay key and the binding: the PC's key is public (the bot relays it), so anybody, the bot
+too, can seal a box for the PC. Only the app knows the pay key, so a security code without it was
+not sealed by the app, and the PC uses it for nothing ("the security code did not come from the
+app the card was given in, so it was not used"). A code sealed for another hold, court or amount is
+refused too ("the security code was sealed for another payment"), and the PC notes each hold it
+took an order to pay for and takes no second one for it ("an order to pay for this hold came
+before, and a hold is paid for once at most"): a box kept by anyone on the way is of no use for any
+other payment. Only the phone that sent the card has its pay key: to pay from another linked phone,
+send the card from that phone (it replaces the card kept, and its pay key).
 
 The app should keep the first `pc.cardKey` it sealed for, and ask the owner before sealing for a
 different one. (The PC makes its key once, and a new one only if Windows can no longer unlock the
@@ -598,10 +613,16 @@ not reach it: nothing was pressed, and Pay may be asked for again. The checks co
 
 ### What the PC does
 
-1. It opens the code (sealed for this hold and this amount), unlocks the card it keeps, and checks
-   the payment page: one Pay button reading exactly "Pay " and the amount, and the payment
-   provider's three card boxes (card number, expiry, security code). If anything is not as it should
-   be it types nothing and says why: the hold stays `"held"`, and its lines say "Your PC could not pay: …".
+1. It unlocks the card it keeps, opens the code (sealed by the app the card came from, for this
+   hold, this court and this amount), notes that this hold has had its order, and checks the
+   payment page: one Pay button reading exactly "Pay " and the amount, and the payment provider's
+   three card boxes (card number, expiry, security code). If anything is not as it should be it
+   types nothing and says why: the hold stays `"held"`, and its lines say "Your PC could not pay: …",
+   with reasons such as "the amount confirmed in the app (£25.00) is not the price read at the basket
+   (£23.00)", 'the payment page says "Pay £25.00", not the £23.00 you confirmed', "the security code
+   did not come from the app the card was given in, so it was not used", "the security code was
+   sealed for another payment", "an order to pay for this hold came before, and a hold is paid for
+   once at most", "the card kept on this PC has expired", or the daily limit's.
 2. `"paying"`: it types the card and the code into the three boxes and reads each back, notes the
    payment for its daily limit (`GLASGOW_PAY_PER_DAY` on the PC, two unless set), and presses Pay,
    once. Stopped before the press, it goes back to `"held"`, unpaid.
@@ -665,9 +686,13 @@ phone's push token: the phone stays linked, and gets notifications again once th
 ## Known limits
 
 - The bot passes on the card key that the PC's signed pings give it. A bot that lied about
-  `pc.cardKey` could read a card sealed for its own key: so the app keeps the first key it used and
+  `pc.cardKey` could read whatever the app sealed for its own key instead, the card and its pay key
+  included, and could then order payments with them. So the app keeps the first key it used and
   asks before using another, and the owner can compare fingerprints with the PC (`node book.js
-  --card-key`). It could not use a security code for a payment other than the one it was sealed for.
+  --card-key`). With the PC's real key, the bot can neither read the card nor order a payment: that
+  takes the pay key, which only the app and the PC have.
+- A bot that is not what it should be can still start holds, drop or delay what the app sends, or
+  ask the PC to forget its card: nuisances, not payments.
 - A restart of the bot loses `pc.cardKey` and `card` until the PC's next ping (within a minute while
   it is awake), and a card or a Pay waiting for the PC: send it again. While the PC pays, the bot
   follows a restart as it can: in a message and a note (see above).
