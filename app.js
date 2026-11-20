@@ -350,15 +350,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return { toast: 'Sleep sent', screen: UI.home(ctx()), view: 'h', sent: true };
   }
   // What the PC should do now, collected by its ping: { look } (read a day of Glasgow Club's
-  // sheet: someone is waiting for it, so it goes first), { csLook } or { csBook } (a park on
-  // ClubSpark: lib/clubspark.js), { hold } (put a court in your basket) or { sleep: true }, each
-  // once, or nothing.
+  // sheet: someone is waiting for it, so it goes first), { hold } (put a court in your basket)
+  // or { sleep: true }, each once, or nothing.
   function takeOrder(t) {
     if (lookAsk && !lookAsk.taken) {
       lookAsk.taken = true;
       return { look: { id: lookAsk.id, key: lookAsk.key, date: lookAsk.date } };
     }
-    const park = cs.takeOrder(t);
+    const park = cs.takeOrder(t);                      // a park on ClubSpark: { csLook } or { csBook } (lib/clubspark.js)
     if (park) return park;
     if (hold && !hold.end && !hold.taken) {
       hold.taken = true;
@@ -693,30 +692,6 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
   }
 
-  // ---------- Glasgow Life's parks on ClubSpark: free courts, and Book now (lib/clubspark.js) ----------
-  // Your PC reads a park's sheet as any visitor would, and books one court there at once, signed
-  // in as its nightly run is. Each request rides on its ping, like a look or a hold; the app asks
-  // (POST /app/clubspark/look and /book), and your PC answers on POST /agent/clubspark/*. A
-  // booking's outcome is an ordinary result: the card, the note and the push. It is kept even when
-  // Telegram will not take the card, as is a job the weekly allowance keeps from the nightly run.
-  async function keepResult(raw) {
-    try { return await resultFromAgent(raw); } catch (e) {
-      log(`Could not send the card for ${raw.id}: ${e.message}`);
-      const r = cleanResult(raw), prev = r && state.results[r.id];
-      if (r && !(prev && prev.status === 'booked')) { state.results[r.id] = { ...r, at: now() }; save(); }
-      return { ok: true };
-    }
-  }
-  // Tests may give `clubspark` (the waits in lib/clubspark.js) alongside createApp's other options.
-  const cs = CS.createClubSpark({
-    now, log, releaseMin, daysAhead, linked, ...((arguments[0] && arguments[0].clubspark) || {}),
-    pcAwake: t => pcState(t) === 'awake', holdLive: t => holdLive(t), runGoing: t => !!runNow(t),
-    wakePings: () => { for (const w of [...waiters].reverse()) w.wake(); },            // the newest ping first, as for a look
-    heard: t => { state.lastSeen = t; },
-    results: () => state.results, record: keepResult, note,
-    tell: html => (owner() === null ? Promise.resolve() : say(owner(), html)),
-  });
-
   // A trial of a wider banner: a text message with the banner as a large link preview (the page
   // at /card/<kind> on this server names the picture). Telegram fetches it from RAILWAY_PUBLIC_DOMAIN.
   const publicHost = String(env.PUBLIC_HOST || env.RAILWAY_PUBLIC_DOMAIN || '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
@@ -797,6 +772,30 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       log(`Could not update the menu card: ${err.message}`);
     }
   }
+
+  // ---------- Glasgow Life's parks on ClubSpark: free courts, and Book now (lib/clubspark.js) ----------
+  // Your PC reads a park's sheet as any visitor would, and books one court there at once, signed
+  // in as its nightly run is. Each request rides on its ping, like a look or a hold; the app asks
+  // (POST /app/clubspark/look and /book), and your PC answers on POST /agent/clubspark/*. A
+  // booking's outcome is an ordinary result: the card, the note and the push. It is kept even when
+  // Telegram will not take the card, as is a job the weekly allowance keeps from the nightly run.
+  async function keepResult(raw) {
+    try { return await resultFromAgent(raw); } catch (e) {
+      log(`Could not send the card for ${raw.id}: ${e.message}`);
+      const r = cleanResult(raw), prev = r && state.results[r.id];
+      if (r && !(prev && prev.status === 'booked')) { state.results[r.id] = { ...r, at: now() }; save(); }
+      return { ok: true };
+    }
+  }
+  // Tests may give `clubspark` (the waits in lib/clubspark.js) alongside createApp's other options.
+  const cs = CS.createClubSpark({
+    now, log, releaseMin, daysAhead, linked, ...((arguments[0] && arguments[0].clubspark) || {}),
+    pcAwake: t => pcState(t) === 'awake', holdLive: t => holdLive(t), runGoing: t => !!runNow(t),
+    wakePings: () => { for (const w of [...waiters].reverse()) w.wake(); },            // the newest ping first, as for a look
+    heard: t => { state.lastSeen = t; },
+    results: () => state.results, record: keepResult, note,
+    tell: html => (owner() === null ? Promise.resolve() : say(owner(), html)),
+  });
 
   // ---------- what you ask for ----------
   // The changes behind the commands, the buttons and the app, so that all three do the same
@@ -1699,9 +1698,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
 
   return {
+    clubSparkFromAgent: cs.fromAgent,
     handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, holdFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures,
     appHello, appPair, appAuth, appState, appAsk,
-    clubSparkFromAgent: cs.fromAgent,
   };
 }
 

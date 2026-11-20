@@ -390,6 +390,137 @@ look = { centre, date, at, by: "pc" | "bot", note, sheet,
          slots: [ { start, end, courts: [ { n, name, price } ] } ] }      // free courts only, by start time
 ```
 
+### The parks on ClubSpark
+
+Glasgow Life's seven parks (`venues` with `club: "clubspark"`) are read and booked by your PC at
+home, because ClubSpark's Cloudflare turns this server away. A request rides on the PC's ping, as
+an indoor look or a hold does, and the answer waits for the PC.
+
+Your home connection is what the nightly booking depends on, and ClubSpark's Cloudflare once
+challenged it after many quick requests. So, for the seven parks together, whichever phone asks:
+a day's look is kept 3 minutes (and reused up to 10 when not asked to be fresh); at most 6 fresh
+reads are asked of your PC in any 10 minutes; no fresh read from an hour before the release time
+(21:00), to leave the connection quiet before it, and no booking from 35 minutes before it (21:25,
+when your PC stops taking them too), either until 30 minutes after it (22:30), nor while the
+nightly run is still going (it started, and has not said how every one of tonight's bookings
+went, up to an hour after the release); one thing at a time; and after ClubSpark turns your PC
+away (`quietUntil` says what counts), while reading or booking, nothing at all for 2 hours. That
+pause is said in Telegram (once, with your PC's word for how), as a note (and so a notification),
+in the bot's log, in `clubspark.quietUntil`, `lookNo` and `bookNo`, and in the `note` of any look
+shown meanwhile. Nothing tries to get round a check. Your PC keeps limits of its own besides
+(`lib/clubspark.js` in the booker): the same six reads in ten minutes, four bookings an hour, two
+hours after being turned away, no look from 21:00 and no booking from 21:25 to 22:30 by its own
+clock, nor either while Windows says the nightly task is running. A look's Chrome is an ordinary
+Chrome window kept off the screen, like the nightly run's, not a hidden ("headless") one.
+
+**`POST /app/clubspark/look`** `{ venue, date, fresh }` → `{ ok: true, look }` (no state). `venue` is a
+park's key; `date` one of `clubspark.days`. The request waits for your PC: Chrome starts and the
+page loads, so a few seconds to about 20, and 45 at the very most.
+
+```
+look = { venue, date, at, by: "pc", note,
+         slots: [ { start, end, courts: [ { n, name } ] } ] }     // free courts only, by start time
+```
+
+- What your PC reads: that park's ClubSpark booking sheet for the day, in a hidden Chrome of its
+  own, as any visitor would (no sign-in, nothing clicked), once: one page load and the requests
+  that page makes itself. It sends back the sheet's courts and each free interval's "Book" link, the
+  very links its nightly run books from.
+- `at`: when ClubSpark showed it (when your PC's answer came). `by`: always `"pc"`.
+- `slots`: one per start time with a free court, earliest first, each `end` the end of that
+  interval (an hour at Kelvingrove). `n`: the court's number, the number its name ends with (as the
+  nightly run reads courts); `name`: ClubSpark's name for it ("Court 3"). A court whose name ends in
+  no number, or whose number another court shares, is not offered. For today, times that have
+  started are left out.
+- `note`: one sentence or more per line: "Free courts, as ClubSpark showed it at 12:00." / "No
+  court is free that day, as ClubSpark showed it at 12:00." / "ClubSpark's sheet shows no courts at
+  all that day, as it showed it at 12:00."; then, for today, "Times that have started are left
+  out."; then, during a pause after ClubSpark turned your PC away, the sentence below that says until when.
+- Kept and reused: a day's look (park and date) is not read again within 3 minutes, `fresh` or
+  not; without `fresh: true` it is reused for up to 10. Only a look that asks your PC to read counts
+  towards the six in ten minutes, whether or not the read then works; one answered from what is
+  known asks nothing of anyone. A second look for the same park and day while the first is being
+  read waits for that read; one for another day is refused until it is done.
+- What a look shows the app is remembered, from the time of the read, for 15 minutes (in memory
+  only): Book now can only be asked for a court in those `slots`.
+
+- 400 "A look needs a park (venue) and a date (YYYY-MM-DD)."
+- 400 "There is no such park. Send one of: drumchapel, garrowhill, kelvingrove, knightswood, maryhill, queenspark, victoriapark."
+- 400 "That day is no longer on offer. Pick again." (a day gone by, or not a calendar date)
+- 400 "That day is not open for booking yet: it opens on Tue 17 Nov at 22:00." For Kelvingrove it adds " Add it to your list and your PC books it then."
+- 409 "ClubSpark turned your PC away at 12:05, as it does when it checks a connection, so it is left alone until 14:05: nothing is read or booked there from the app until then."
+- 409 "Your PC's nightly booking run is at 22:00, so ClubSpark is not read from 21:00 to 22:30, to leave the connection quiet before it."
+- 409 "Your PC's nightly booking run is still going, so nothing else is read or booked at ClubSpark until it has finished."
+- 409 "Your PC is booking a court just now. Look again when it has finished."
+- 409 "Your PC is not awake, and it is your PC that reads ClubSpark. Wake it and try again."
+- 409 "That is 6 reads of ClubSpark within ten minutes, which is as many as I ask your PC for, to keep your home connection in good standing with ClubSpark. The next can be at 12:10."
+- 409 "Your PC is reading another day at ClubSpark just now. Try again in a moment."
+- 409 "ClubSpark turned your PC away just now (<your PC's word for how: ClubSpark showed a "Just a moment" page, or its booking sheet never showed>), so it is left alone until 14:05: nothing is read or booked there from the app until then." (this read was turned away)
+- 409 "Your PC did not answer in time, so I could not read the free courts." (its answer, if it comes later, is still kept and used)
+- 409 "ClubSpark's page did not load on your PC in time."
+- 409 "Your PC could not reach ClubSpark."
+- 409 "Your PC did not read it: <its reason>." (its own limits: "the nightly booking starts in 20 minutes", "it has read ClubSpark 6 times in ten minutes and is leaving it alone for a few minutes", "it is booking at ClubSpark just now")
+- 409 "ClubSpark's sheet could not be read (<what went wrong>)." (an answer that does not read as a sheet: never taken for "nothing is free")
+- 409 "Your PC is not linked to me, and it is your PC that reads and books ClubSpark." (not over HTTP)
+
+**`POST /app/clubspark/book`** `{ venue, date, start, hours, court }`. Book now: your PC signs in to
+ClubSpark as its nightly run does and books exactly that court for that time, or nothing. `hours`
+is 1 or 2. The answer's `state.clubspark.book` is the booking, at stage `"asked"`; from then on it
+moves in the state as your PC goes. Bookings are free with the owner's annual pass, and your PC
+never pays: at a price in the booking form (with the pass it says "Free"), or a payment step on the
+confirm page ("Confirm and pay", or a total above £0.00), it presses nothing more, and the result
+says "ClubSpark asked for payment; nothing was booked or paid".
+
+- It never takes another court: if that court is not free for that whole time any more, it ends
+  `"gone"` and says so. Only you pick.
+- It never tries twice. It presses "Continue booking" only once this bot has said go, and this bot
+  says go only to a booking it still follows; your PC does nothing at all unless this bot has heard
+  it start.
+- How it ends is an ordinary result (`results`, with the court and gate code when booked) with a
+  card in Telegram, a note and a notification, as the nightly run's results have. At Kelvingrove
+  its id is the nightly run's own (`YYYY-MM-DD@HH:MM`): a one-off on the list for that slot then
+  counts as booked. Elsewhere the park is in front of it.
+- A booking counts towards its week (`allowance`) as soon as it is booked.
+- The checks come in this order: the shape of the request; whether that day and time are on offer;
+  whether that court and hour is booked for you already; whether a look showed the app that court
+  free, from a read in the last 15 minutes, for the whole time; the week's allowance; then the
+  guards in `clubspark.bookNo`.
+
+- 400 "Book now needs a park (venue), a date (YYYY-MM-DD), a start in minutes after midnight, hours (1 or 2) and a court number."
+- 400 "There is no such park. Send one of: drumchapel, garrowhill, kelvingrove, knightswood, maryhill, queenspark, victoriapark."
+- 400 "That day is no longer on offer. Pick again." or "That day is not open for booking yet: …" (as for a look)
+- 400 "That time is no longer on offer. Pick again." (a start that has passed or is not a five-minute step, one that runs past midnight, a court not from 1 to 20)
+- 409 "Court 3 is already booked for you at Queens Park on Fri 20 Nov at 18:00."
+- 409 "That list is old. Read the day again, then book a court." (no look in the last 15 minutes showed that court free at that start)
+- 409 "Court 2 is not free for two hours from 18:00. Pick another time or court." (or "… for an hour …", where intervals are shorter than an hour)
+- 409 "That would be 8 sessions in the week of Mon 16 Nov; the limit is 7." or "That would be 15 hours in the week of Mon 16 Nov; the limit is 14."
+- 409, one of the `clubspark.bookNo` sentences:
+  - the "turned your PC away" and "still going" sentences above;
+  - "Your PC's nightly booking run is at 22:00, so nothing is booked at ClubSpark from 21:25 to 22:30."
+  - "Your PC is already booking a court."
+  - "Your PC is holding a court at Glasgow Club. Let it go first."
+  - "Your PC is not awake, and it is your PC that signs in to ClubSpark and books. Wake it and try again."
+  - "That is 4 bookings within an hour, and each is a sign-in to ClubSpark. The next can start at 13:00."
+  - "Your PC is not linked to me, and it is your PC that reads and books ClubSpark." (not over HTTP)
+
+While a booking is under way: the PC is not put to sleep (`pc.sleepWhy` "Your PC is booking a court
+for you. Wait for it to finish."), no hold starts (`indoor.holdNo` "Your PC is booking a court at a
+park just now. Hold one when it has finished."), and no park is read.
+
+How a booking can end, as its result's `why` reads (`results[].why`, and `clubspark.book.why`
+without "It did not work: "):
+
+- "It did not work: court 1 was no longer free for that time (not free at 18:00 any more), and your PC takes no other court." (or "(free at 18:00, but only until 19:00)")
+- "It did not work: your PC did not start it: <its reason>." (its own limits, or a hold under way)
+- "It did not work: <your PC's reason>." Among them: "ClubSpark asked for payment; nothing was booked or paid"; "after "Confirm", ClubSpark went on to a payment page, where your PC paid nothing: check ClubSpark for it"; "DRY_RUN is on in .env on your PC, so it stopped before booking (court 3 was free, Free)"; "ClubSpark showed a "Just a moment" page, so your PC stopped there" (or "ClubSpark's booking sheet never showed, …", "ClubSpark refused a request (HTTP 403), …"); "Chrome could not start (…)"; a sign-in that did not go through; "queenspark has no court 9"; "it could not reach the bot just before booking (…), so it booked nothing"; "this PC went to sleep while booking, so it stopped". Once this bot has given the go-ahead, anything that went wrong (but a court gone, or a stop at a payment step) ends "… It was booking when that happened: check ClubSpark for it", whether your PC's words say so or not.
+- "It did not work: your PC's booking stopped before it booked anything (<why>)." or "… stopped while it was booking court 3: check ClubSpark for it."
+- "It did not work: ClubSpark had turned your PC away, so it was not handed to your PC and nothing was booked." (or "your PC's nightly booking run was near, so …")
+- "It did not work: your PC did not collect it in time, so nothing was booked."
+- "It did not work: your PC collected it but did not start on it, so nothing was booked."
+- "It did not work: no word from your PC for four minutes, so I stopped following it. It books nothing without my go-ahead, so nothing was booked." Or, once it had the go-ahead: "It did not work: no word from your PC while it was booking court 3: check ClubSpark for it."
+- "It did not work: your PC was still at it twelve minutes after it took the booking, so I stopped following it. It books nothing without my go-ahead, so nothing was booked." Or, once it had the go-ahead: "… so I stopped following it: check ClubSpark for court 3."
+- If your PC's own word comes after any of the endings this bot decided, it replaces it; and a "booked" replaces any ending: a booking stands, and counts towards its week.
+
 ### Each request, and every `why` it can give
 
 **`POST /app/once`** `{ date, start, hours }`. `hours` is 1 or 2. As `/book`, any start on the hour
@@ -532,137 +663,6 @@ or null to stop. A token is kept for one phone only: given by a second, it moves
 
 - 400 "That is not an Expo push token. Send one, or null to stop notifications."
 
-### The parks on ClubSpark
-
-Glasgow Life's seven parks (`venues` with `club: "clubspark"`) are read and booked by your PC at
-home, because ClubSpark's Cloudflare turns this server away. A request rides on the PC's ping, as
-an indoor look or a hold does, and the answer waits for the PC.
-
-Your home connection is what the nightly booking depends on, and ClubSpark's Cloudflare once
-challenged it after many quick requests. So, for the seven parks together, whichever phone asks:
-a day's look is kept 3 minutes (and reused up to 10 when not asked to be fresh); at most 6 fresh
-reads are asked of your PC in any 10 minutes; no fresh read from an hour before the release time
-(21:00), to leave the connection quiet before it, and no booking from 35 minutes before it (21:25,
-when your PC stops taking them too), either until 30 minutes after it (22:30), nor while the
-nightly run is still going (it started, and has not said how every one of tonight's bookings
-went, up to an hour after the release); one thing at a time; and after ClubSpark turns your PC
-away (`quietUntil` says what counts), while reading or booking, nothing at all for 2 hours. That
-pause is said in Telegram (once, with your PC's word for how), as a note (and so a notification),
-in the bot's log, in `clubspark.quietUntil`, `lookNo` and `bookNo`, and in the `note` of any look
-shown meanwhile. Nothing tries to get round a check. Your PC keeps limits of its own besides
-(`lib/clubspark.js` in the booker): the same six reads in ten minutes, four bookings an hour, two
-hours after being turned away, no look from 21:00 and no booking from 21:25 to 22:30 by its own
-clock, nor either while Windows says the nightly task is running. A look's Chrome is an ordinary
-Chrome window kept off the screen, like the nightly run's, not a hidden ("headless") one.
-
-**`POST /app/clubspark/look`** `{ venue, date, fresh }` → `{ ok: true, look }` (no state). `venue` is a
-park's key; `date` one of `clubspark.days`. The request waits for your PC: Chrome starts and the
-page loads, so a few seconds to about 20, and 45 at the very most.
-
-```
-look = { venue, date, at, by: "pc", note,
-         slots: [ { start, end, courts: [ { n, name } ] } ] }     // free courts only, by start time
-```
-
-- What your PC reads: that park's ClubSpark booking sheet for the day, in a hidden Chrome of its
-  own, as any visitor would (no sign-in, nothing clicked), once: one page load and the requests
-  that page makes itself. It sends back the sheet's courts and each free interval's "Book" link, the
-  very links its nightly run books from.
-- `at`: when ClubSpark showed it (when your PC's answer came). `by`: always `"pc"`.
-- `slots`: one per start time with a free court, earliest first, each `end` the end of that
-  interval (an hour at Kelvingrove). `n`: the court's number, the number its name ends with (as the
-  nightly run reads courts); `name`: ClubSpark's name for it ("Court 3"). A court whose name ends in
-  no number, or whose number another court shares, is not offered. For today, times that have
-  started are left out.
-- `note`: one sentence or more per line: "Free courts, as ClubSpark showed it at 12:00." / "No
-  court is free that day, as ClubSpark showed it at 12:00." / "ClubSpark's sheet shows no courts at
-  all that day, as it showed it at 12:00."; then, for today, "Times that have started are left
-  out."; then, during a pause after ClubSpark turned your PC away, the sentence below that says until when.
-- Kept and reused: a day's look (park and date) is not read again within 3 minutes, `fresh` or
-  not; without `fresh: true` it is reused for up to 10. Only a look that asks your PC to read counts
-  towards the six in ten minutes, whether or not the read then works; one answered from what is
-  known asks nothing of anyone. A second look for the same park and day while the first is being
-  read waits for that read; one for another day is refused until it is done.
-- What a look shows the app is remembered, from the time of the read, for 15 minutes (in memory
-  only): Book now can only be asked for a court in those `slots`.
-
-- 400 "A look needs a park (venue) and a date (YYYY-MM-DD)."
-- 400 "There is no such park. Send one of: drumchapel, garrowhill, kelvingrove, knightswood, maryhill, queenspark, victoriapark."
-- 400 "That day is no longer on offer. Pick again." (a day gone by, or not a calendar date)
-- 400 "That day is not open for booking yet: it opens on Tue 17 Nov at 22:00." For Kelvingrove it adds " Add it to your list and your PC books it then."
-- 409 "ClubSpark turned your PC away at 12:05, as it does when it checks a connection, so it is left alone until 14:05: nothing is read or booked there from the app until then."
-- 409 "Your PC's nightly booking run is at 22:00, so ClubSpark is not read from 21:00 to 22:30, to leave the connection quiet before it."
-- 409 "Your PC's nightly booking run is still going, so nothing else is read or booked at ClubSpark until it has finished."
-- 409 "Your PC is booking a court just now. Look again when it has finished."
-- 409 "Your PC is not awake, and it is your PC that reads ClubSpark. Wake it and try again."
-- 409 "That is 6 reads of ClubSpark within ten minutes, which is as many as I ask your PC for, to keep your home connection in good standing with ClubSpark. The next can be at 12:10."
-- 409 "Your PC is reading another day at ClubSpark just now. Try again in a moment."
-- 409 "ClubSpark turned your PC away just now (<your PC's word for how: ClubSpark showed a "Just a moment" page, or its booking sheet never showed>), so it is left alone until 14:05: nothing is read or booked there from the app until then." (this read was turned away)
-- 409 "Your PC did not answer in time, so I could not read the free courts." (its answer, if it comes later, is still kept and used)
-- 409 "ClubSpark's page did not load on your PC in time."
-- 409 "Your PC could not reach ClubSpark."
-- 409 "Your PC did not read it: <its reason>." (its own limits: "the nightly booking starts in 20 minutes", "it has read ClubSpark 6 times in ten minutes and is leaving it alone for a few minutes", "it is booking at ClubSpark just now")
-- 409 "ClubSpark's sheet could not be read (<what went wrong>)." (an answer that does not read as a sheet: never taken for "nothing is free")
-- 409 "Your PC is not linked to me, and it is your PC that reads and books ClubSpark." (not over HTTP)
-
-**`POST /app/clubspark/book`** `{ venue, date, start, hours, court }`. Book now: your PC signs in to
-ClubSpark as its nightly run does and books exactly that court for that time, or nothing. `hours`
-is 1 or 2. The answer's `state.clubspark.book` is the booking, at stage `"asked"`; from then on it
-moves in the state as your PC goes. Bookings are free with the owner's annual pass, and your PC
-never pays: at a price in the booking form (with the pass it says "Free"), or a payment step on the
-confirm page ("Confirm and pay", or a total above £0.00), it presses nothing more, and the result
-says "ClubSpark asked for payment; nothing was booked or paid".
-
-- It never takes another court: if that court is not free for that whole time any more, it ends
-  `"gone"` and says so. Only you pick.
-- It never tries twice. It presses "Continue booking" only once this bot has said go, and this bot
-  says go only to a booking it still follows; your PC does nothing at all unless this bot has heard
-  it start.
-- How it ends is an ordinary result (`results`, with the court and gate code when booked) with a
-  card in Telegram, a note and a notification, as the nightly run's results have. At Kelvingrove
-  its id is the nightly run's own (`YYYY-MM-DD@HH:MM`): a one-off on the list for that slot then
-  counts as booked. Elsewhere the park is in front of it.
-- A booking counts towards its week (`allowance`) as soon as it is booked.
-- The checks come in this order: the shape of the request; whether that day and time are on offer;
-  whether that court and hour is booked for you already; whether a look showed the app that court
-  free, from a read in the last 15 minutes, for the whole time; the week's allowance; then the
-  guards in `clubspark.bookNo`.
-
-- 400 "Book now needs a park (venue), a date (YYYY-MM-DD), a start in minutes after midnight, hours (1 or 2) and a court number."
-- 400 "There is no such park. Send one of: drumchapel, garrowhill, kelvingrove, knightswood, maryhill, queenspark, victoriapark."
-- 400 "That day is no longer on offer. Pick again." or "That day is not open for booking yet: …" (as for a look)
-- 400 "That time is no longer on offer. Pick again." (a start that has passed or is not a five-minute step, one that runs past midnight, a court not from 1 to 20)
-- 409 "Court 3 is already booked for you at Queens Park on Fri 20 Nov at 18:00."
-- 409 "That list is old. Read the day again, then book a court." (no look in the last 15 minutes showed that court free at that start)
-- 409 "Court 2 is not free for two hours from 18:00. Pick another time or court." (or "… for an hour …", where intervals are shorter than an hour)
-- 409 "That would be 8 sessions in the week of Mon 16 Nov; the limit is 7." or "That would be 15 hours in the week of Mon 16 Nov; the limit is 14."
-- 409, one of the `clubspark.bookNo` sentences:
-  - the "turned your PC away" and "still going" sentences above;
-  - "Your PC's nightly booking run is at 22:00, so nothing is booked at ClubSpark from 21:25 to 22:30."
-  - "Your PC is already booking a court."
-  - "Your PC is holding a court at Glasgow Club. Let it go first."
-  - "Your PC is not awake, and it is your PC that signs in to ClubSpark and books. Wake it and try again."
-  - "That is 4 bookings within an hour, and each is a sign-in to ClubSpark. The next can start at 13:00."
-  - "Your PC is not linked to me, and it is your PC that reads and books ClubSpark." (not over HTTP)
-
-While a booking is under way: the PC is not put to sleep (`pc.sleepWhy` "Your PC is booking a court
-for you. Wait for it to finish."), no hold starts (`indoor.holdNo` "Your PC is booking a court at a
-park just now. Hold one when it has finished."), and no park is read.
-
-How a booking can end, as its result's `why` reads (`results[].why`, and `clubspark.book.why`
-without "It did not work: "):
-
-- "It did not work: court 1 was no longer free for that time (not free at 18:00 any more), and your PC takes no other court." (or "(free at 18:00, but only until 19:00)")
-- "It did not work: your PC did not start it: <its reason>." (its own limits, or a hold under way)
-- "It did not work: <your PC's reason>." Among them: "ClubSpark asked for payment; nothing was booked or paid"; "after "Confirm", ClubSpark went on to a payment page, where your PC paid nothing: check ClubSpark for it"; "DRY_RUN is on in .env on your PC, so it stopped before booking (court 3 was free, Free)"; "ClubSpark showed a "Just a moment" page, so your PC stopped there" (or "ClubSpark's booking sheet never showed, …", "ClubSpark refused a request (HTTP 403), …"); "Chrome could not start (…)"; a sign-in that did not go through; "queenspark has no court 9"; "it could not reach the bot just before booking (…), so it booked nothing"; "this PC went to sleep while booking, so it stopped". Once this bot has given the go-ahead, anything that went wrong (but a court gone, or a stop at a payment step) ends "… It was booking when that happened: check ClubSpark for it", whether your PC's words say so or not.
-- "It did not work: your PC's booking stopped before it booked anything (<why>)." or "… stopped while it was booking court 3: check ClubSpark for it."
-- "It did not work: ClubSpark had turned your PC away, so it was not handed to your PC and nothing was booked." (or "your PC's nightly booking run was near, so …")
-- "It did not work: your PC did not collect it in time, so nothing was booked."
-- "It did not work: your PC collected it but did not start on it, so nothing was booked."
-- "It did not work: no word from your PC for four minutes, so I stopped following it. It books nothing without my go-ahead, so nothing was booked." Or, once it had the go-ahead: "It did not work: no word from your PC while it was booking court 3: check ClubSpark for it."
-- "It did not work: your PC was still at it twelve minutes after it took the booking, so I stopped following it. It books nothing without my go-ahead, so nothing was booked." Or, once it had the go-ahead: "… so I stopped following it: check ClubSpark for court 3."
-- If your PC's own word comes after any of the endings this bot decided, it replaces it; and a "booked" replaces any ending: a booking stands, and counts towards its week.
-
 ## Notes and notifications
 
 Whatever the bot tells the owner unprompted in Telegram (a court booked or not, trouble before a
@@ -706,6 +706,22 @@ phone's push token: the phone stays linked, and gets notifications again once th
 
 ## Known limits
 
+- A restart of the bot during a hold loses the bot's handle on it: `state.hold` is null
+  afterwards, `hold/order` answers "I am no longer following that hold…", and the one-at-a-time
+  and six-an-hour counts start again. The PC still lets the court go by itself when its time is up.
+  What looks showed the app, a waiting pairing code and the run's stage are lost with a restart too.
+- A phone's token does not expire. It stops working when the phone unlinks itself, when
+  `/app forget` is sent, or when the bot comes to answer to another chat.
+- Telegram can only unlink every phone at once (`/app forget`). One phone can only be unlinked
+  from that phone (`POST /app/unpair`).
+- Someone who calls `/app/pair` without stopping sees the moment a code is waiting (the answer
+  turns from `none` to `wrong`) and can spend it with five wrong tries, or, over two codes, use up
+  the ten tries in ten minutes, so the owner's code is refused for up to ten minutes. They get no
+  more guesses than the limits allow (five a code, ten in ten minutes: about one in a hundred
+  thousand a code). The owner sends `/app` again later. Limits kept per address would end this.
+- A phone linked while the bot answered to one chat is unlinked when it starts answering to
+  another, even if that was a mistake in `TELEGRAM_CHAT_ID` put right later: link it again with
+  `/app`. (Kept, it would go on getting the new chat's notifications.)
 - Scheduling (`plan`, `once`, `release`, `open`, the court `order`) is Kelvingrove's only. Carrying a
   park on each weekly time and one-off would mean changing your PC's nightly run (it books the one
   venue in its `.env`, with one court order and one sign-in) and the ids its results carry; that is
@@ -727,19 +743,3 @@ phone's push token: the phone stays linked, and gets notifications again once th
   count towards their week, so the allowance could let a week go over. Kelvingrove's results, Book
   now ones included, keep their ids and survive. Going back is safest in a week with no park
   bookings; otherwise, keep count of that week by hand.
-- A restart of the bot during a hold loses the bot's handle on it: `state.hold` is null
-  afterwards, `hold/order` answers "I am no longer following that hold…", and the one-at-a-time
-  and six-an-hour counts start again. The PC still lets the court go by itself when its time is up.
-  What looks showed the app, a waiting pairing code and the run's stage are lost with a restart too.
-- A phone's token does not expire. It stops working when the phone unlinks itself, when
-  `/app forget` is sent, or when the bot comes to answer to another chat.
-- Telegram can only unlink every phone at once (`/app forget`). One phone can only be unlinked
-  from that phone (`POST /app/unpair`).
-- Someone who calls `/app/pair` without stopping sees the moment a code is waiting (the answer
-  turns from `none` to `wrong`) and can spend it with five wrong tries, or, over two codes, use up
-  the ten tries in ten minutes, so the owner's code is refused for up to ten minutes. They get no
-  more guesses than the limits allow (five a code, ten in ten minutes: about one in a hundred
-  thousand a code). The owner sends `/app` again later. Limits kept per address would end this.
-- A phone linked while the bot answered to one chat is unlinked when it starts answering to
-  another, even if that was a mistake in `TELEGRAM_CHAT_ID` put right later: link it again with
-  `/app`. (Kept, it would go on getting the new chat's notifications.)
