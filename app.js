@@ -22,8 +22,11 @@ const { readMac, publicIPv4, sendWake } = require('./lib/wake');
 const G = require('./lib/glasgowclub');
 const A = require('./lib/appapi');
 const { createExpoPush, mask: maskPush } = require('./lib/push');
+const V = require('./lib/venues');
+const W = require('./lib/allowance');
+const CS = require('./lib/clubspark');
 
-const VERSION = '2.8';
+const VERSION = '2.9';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -71,14 +74,17 @@ function intIn(v, lo, hi) {
 }
 
 // A result from the PC, made safe to keep and show. Null if it does not make sense.
+// The id is the date and start played; a park other than Kelvingrove (Book now) is put in front
+// of it, and kept as `venue` (lib/venues.js, resultId).
 function cleanResult(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const id = String(raw.id || '');
-  const m = /^(\d{4}-\d{2}-\d{2})@(\d{2}):(\d{2})$/.exec(id);
+  const m = /^(?:([a-z]{3,20})\/)?(\d{4}-\d{2}-\d{2})@(\d{2}):(\d{2})$/.exec(id);
   if (!m || !['booked', 'none', 'failed'].includes(raw.status)) return null;
-  const start = Number(m[2]) * 60 + Number(m[3]);
+  if (m[1] && (m[1] === V.SCHEDULED || !V.parkOf(m[1]))) return null;
+  const start = Number(m[3]) * 60 + Number(m[4]);
   const end = intIn(raw.end, start + 30, 1440) ?? slotEnd(start, 1);
-  const r = { id, status: raw.status, date: m[1], start, end };
+  const r = { id, status: raw.status, date: m[2], start, end, ...(m[1] ? { venue: m[1] } : {}) };
   if (raw.status === 'booked') {
     r.court = String(raw.court ?? '').replace(/[^\w ]/g, '').slice(0, 20);
     if (!r.court) return null;
@@ -330,6 +336,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (pcState(t) !== 'awake') return 'Your PC is not awake.';
     if (sleepBlocker(t)) return `Your PC books at ${hhmm(releaseMin)}, so it stays awake until then.`;
     if (holdLive(t)) return 'Your PC is holding a court for you. Let it go first.';
+    if (cs.live(t)) return 'Your PC is booking a court for you. Wait for it to finish.';
     return null;
   }
   // `sent` says the request is waiting for the PC.
@@ -343,13 +350,16 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return { toast: 'Sleep sent', screen: UI.home(ctx()), view: 'h', sent: true };
   }
   // What the PC should do now, collected by its ping: { look } (read a day of Glasgow Club's
-  // sheet: someone is waiting for it, so it goes first), { hold } (put a court in your basket)
-  // or { sleep: true }, each once, or nothing.
+  // sheet: someone is waiting for it, so it goes first), { csLook } or { csBook } (a park on
+  // ClubSpark: lib/clubspark.js), { hold } (put a court in your basket) or { sleep: true }, each
+  // once, or nothing.
   function takeOrder(t) {
     if (lookAsk && !lookAsk.taken) {
       lookAsk.taken = true;
       return { look: { id: lookAsk.id, key: lookAsk.key, date: lookAsk.date } };
     }
+    const park = cs.takeOrder(t);
+    if (park) return park;
     if (hold && !hold.end && !hold.taken) {
       hold.taken = true;
       hold.heard = hold.takenAt = t;
@@ -498,6 +508,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   function holdBlocker(t) {
     if (!linked) return { toast: 'Your PC is not linked to me.', say: 'Your PC is not linked to me, and it is your PC that signs in and holds the court.' };
     if (holdLive(t)) return { toast: 'Your PC is already holding a court.', busy: true };
+    if (cs.live(t)) return { toast: 'Your PC is booking a court.', say: 'Your PC is booking a court at a park just now. Hold one when it has finished.' };
     if (pcState(t) !== 'awake') {
       return { toast: 'Your PC is not awake.', say: 'Your PC is not awake, and it is your PC that signs in to Glasgow Club and holds the court. Wake it and try again.', wake: wakeState() === 'ready' };
     }
@@ -682,6 +693,30 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
   }
 
+  // ---------- Glasgow Life's parks on ClubSpark: free courts, and Book now (lib/clubspark.js) ----------
+  // Your PC reads a park's sheet as any visitor would, and books one court there at once, signed
+  // in as its nightly run is. Each request rides on its ping, like a look or a hold; the app asks
+  // (POST /app/clubspark/look and /book), and your PC answers on POST /agent/clubspark/*. A
+  // booking's outcome is an ordinary result: the card, the note and the push. It is kept even when
+  // Telegram will not take the card, as is a job the weekly allowance keeps from the nightly run.
+  async function keepResult(raw) {
+    try { return await resultFromAgent(raw); } catch (e) {
+      log(`Could not send the card for ${raw.id}: ${e.message}`);
+      const r = cleanResult(raw), prev = r && state.results[r.id];
+      if (r && !(prev && prev.status === 'booked')) { state.results[r.id] = { ...r, at: now() }; save(); }
+      return { ok: true };
+    }
+  }
+  // Tests may give `clubspark` (the waits in lib/clubspark.js) alongside createApp's other options.
+  const cs = CS.createClubSpark({
+    now, log, releaseMin, daysAhead, linked, ...((arguments[0] && arguments[0].clubspark) || {}),
+    pcAwake: t => pcState(t) === 'awake', holdLive: t => holdLive(t), runGoing: t => !!runNow(t),
+    wakePings: () => { for (const w of [...waiters].reverse()) w.wake(); },            // the newest ping first, as for a look
+    heard: t => { state.lastSeen = t; },
+    results: () => state.results, record: keepResult, note,
+    tell: html => (owner() === null ? Promise.resolve() : say(owner(), html)),
+  });
+
   // A trial of a wider banner: a text message with the banner as a large link preview (the page
   // at /card/<kind> on this server names the picture). Telegram fetches it from RAILWAY_PUBLIC_DOMAIN.
   const publicHost = String(env.PUBLIC_HOST || env.RAILWAY_PUBLIC_DOMAIN || '').trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
@@ -767,15 +802,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // The changes behind the commands, the buttons and the app, so that all three do the same
   // thing with the same checks. What is said about each is the caller's business.
   // A one-off Kelvingrove date: { no } with the sentence that refuses it (`full`: because the
-  // list holds as many as it may), { already: true } when that date and time are on the list,
-  // or { added: true }.
+  // list holds as many as it may; `allowance`: because of the weekly allowance, lib/allowance.js),
+  // { already: true } when that date and time are on the list, or { added: true }.
   function addOnce(dateIso, start, hours, t) {
     const date = civilOf(dateIso), today = todayCivil(t);
     if (date < today || londonInstant(date, start) <= t) return { no: `${label(date)} at ${hhmm(start)} has already passed.` };
     if (date > addDays(today, MAX_AHEAD_DAYS)) return { no: `That is more than ${MAX_AHEAD_DAYS} days away. Try a nearer date.` };
     if (state.once.some(o => o.date === dateIso && o.start === start)) return { already: true };
     if (state.once.length >= MAX_ONCE) return { no: `Your list already has ${MAX_ONCE} one-off dates, which is as many as I keep. Remove one first.`, full: true };
-    state.once = cleanOnce([...state.once, { date: dateIso, start, hours }]); save();
+    const once = cleanOnce([...state.once, { date: dateIso, start, hours }]);
+    const over = W.overIfPlanned(cfg(), { ...cfg(), once }, state.results, t);
+    if (over) return { no: over, allowance: true };
+    state.once = once; save();
     return { added: true };
   }
   // Takes a one-off off the list. Returns it, or null if it was not there.
@@ -784,7 +822,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     state.once = state.once.filter(o => o !== gone); save();
     return gone || null;
   }
-  function setWeekly(day, start, hours) { state.plan[day] = { start, hours }; save(); }
+  // A weekly time, set or changed. Returns the sentence that refuses it (the weekly allowance), or null.
+  function setWeekly(day, start, hours) {
+    const over = W.overIfPlanned(cfg(), { ...cfg(), plan: { ...state.plan, [day]: { start, hours } } }, state.results, now());
+    if (over) return over;
+    state.plan[day] = { start, hours }; save();
+    return null;
+  }
   // Stops a weekday ('all': every one). Says whether there was anything to stop.
   function stopWeekly(day) {
     const had = day === 'all' ? Object.keys(state.plan).length > 0 : !!state.plan[day];
@@ -817,6 +861,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       }
       const r = addOnce(dateIso, start, hours, c.now);
       if (r.full) return { screen: UI.bookings(c), toast: r.no };          // the list is full: here it is, to remove one from
+      if (r.allowance) return { screen: UI.calendar(c), toast: r.no };    // the weekly allowance, in its own words
       if (r.no) return { screen: UI.calendar(c), toast: 'That time is no longer available. Pick again.' };
       if (r.already) return { screen: UI.added(c, dateIso, start, hours, true), toast: 'Already on your list' };
       log(`Added ${dateIso} ${hhmm(start)} by button`);
@@ -834,7 +879,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if ((m = new RegExp(`^wl:${DAY_RE}:(\\d{4}):([12])$`).exec(data))) {
       const start = UI.fromHm(m[2]), hours = +m[3];
       if (start < UI.FIRST_START || start + hours * 60 > UI.LAST_END) return { screen: UI.weekly(c), toast: 'Pick a time between 09:00 and 21:00.' };
-      setWeekly(m[1], start, hours);
+      const over = setWeekly(m[1], start, hours);
+      if (over) return { screen: UI.weekly(c), toast: over };
       log(`Weekly ${m[1]} set by button`);
       return { screen: UI.weeklySaved(ctx(), m[1]), toast: 'Saved' };
     }
@@ -966,7 +1012,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (starting) runNote = { stage: 'started', at: t, why: null };
     noteHome(from);
     const c = cfg();
-    const jobs = state.paused || owner() === null ? [] : jobsFor(t, c, state.results);
+    // The weekly allowance (lib/allowance.js): a job that would pass it is not handed to the PC,
+    // and a run that starts has a result for it that says why.
+    const fit = W.fitJobs(state.paused || owner() === null ? [] : jobsFor(t, c, state.results), state.results);
+    const jobs = fit.keep;
+    if (starting) for (const s of fit.skip) skipJob(s.job, s.why);
     const coming = jobs.filter(j => j.releaseAt > t && j.releaseAt - t <= HEADS_UP_MS);
     if (starting && coming.length) {
       const key = `ready:${coming[0].releaseAt}`;
@@ -992,6 +1042,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     };
   }
 
+  // A job the weekly allowance keeps from the nightly run: said once, in its result.
+  function skipJob(j, why) {
+    const said = `${why.charAt(0).toLowerCase()}${why.slice(1).replace(/\.$/, '')}. Your PC did not try it`;
+    const prev = state.results[j.id];
+    if (prev && prev.status === 'failed' && prev.why === said) return;
+    log(`Not handed to the nightly run: ${j.id}. ${why}`);
+    keepResult({ id: j.id, status: 'failed', why: said, end: j.end }).catch(e => log(`Could not keep that: ${e.message}`));
+  }
+
   // The PC says it is awake: every minute from `node book.js --link`, which runs while you are
   // signed in to Windows. That is all the dot on the menu banner goes on.
   // With `wait` (seconds) the answer waits until there is something for the PC to do, so a
@@ -1011,7 +1070,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     if (wait > 0) tryPcOnce(now());
     let order = takeOrder(now());
-    if (!order.sleep && !order.look && !order.hold && wait > 0) {
+    if (!Object.keys(order).length && wait > 0) {
       await waitForOrder(wait * 1000);
       order = takeOrder(now());
     }
@@ -1159,7 +1218,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         const day = parseDay(args[0]);
         const slot = parseSlot(args.slice(1));
         if (!day || !('start' in slot)) { await say(chat, (slot.why ? `${slot.why}\n` : '') + usage); break; }
-        setWeekly(day, slot.start, slot.hours);
+        const over = setWeekly(day, slot.start, slot.hours);
+        if (over) { await say(chat, over); break; }
         const name = DAY_LONG[DAY_KEYS.indexOf(day)];
         await say(chat, `<b>${name}s · ${slotText(state.plan[day])}</b>\nBooked every week, ${daysAhead} days before at ${hhmm(releaseMin)}, when the day opens.\n\n${next()}${keepNote()}`);
         break;
@@ -1363,6 +1423,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const t = now(), today = todayCivil(t);
       const pastOnce = state.once.filter(o => civilOf(o.date) < today);
       if (pastOnce.length) { state.once = state.once.filter(o => civilOf(o.date) >= today); save(); }
+      cs.tick(t);                                     // a booking at a park the PC never collected, or went silent on
       await refreshNewest(t);
       await checkHold(t);
       const chat = owner();
@@ -1481,13 +1542,16 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const open = booking ? jobsFor(t, c, state.results).filter(j => j.releaseAt <= t && onceIds.has(j.id)) : [];
     const byDay = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.start - b.start);
     const results = Object.values(state.results).map(r => ({
-      id: r.id, status: r.status, date: r.date, start: r.start, end: r.end, court: r.court ?? null, gate: r.gate ?? null,
+      id: r.id, venue: r.venue || V.SCHEDULED, status: r.status, date: r.date, start: r.start, end: r.end, court: r.court ?? null, gate: r.gate ?? null,
       why: r.status === 'booked' ? null : A.plain(M.failedWhy(r)), at: r.at, past: civilOf(r.date) < today,
     })).sort((a, b) => (a.past !== b.past ? (a.past ? 1 : -1) : a.past ? byDay(b, a) : byDay(a, b)));
     const noWake = wakeBlocker(t), noSleep = sleepNo(t), noHold = holdBlocker(t), line = UI.pcLine(x);
     return {
       now: t, bot: VERSION,
       venue: { name: 'Kelvingrove Park', short: 'KP', first: UI.FIRST_START, last: UI.LAST_END, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin, daysAhead, maxAheadDays: MAX_AHEAD_DAYS },
+      venues: V.venueList(G.SHEETS, iso(today), G.sheetUrl),          // every venue and its court types (lib/venues.js)
+      clubspark: cs.view(t),                                           // the parks: looks and Book now (lib/clubspark.js)
+      allowance: W.weeks(c, state.results, t),                         // this week and next (lib/allowance.js)
       paused: state.paused,
       kept: kept(),
       pc: {
@@ -1565,6 +1629,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const t = now();
     // The answer to a request that was carried out: the state as it now stands.
     const done = (extra = {}) => { const s = appState(me); return s ? { status: 200, body: { ok: true, ...extra, ...s } } : no(401, 'unpaired'); };
+    if (/^clubspark\/(look|book)$/.test(name)) { log(`From the app: ${name}`); return cs.appAsk(name.slice('clubspark/'.length), body, done); }
     if (!APP_ASKS.includes(name)) return null;
     const read = { once: A.readOnce, 'once/remove': A.readOnceRemove, plan: A.readPlan, 'plan/remove': A.readPlanRemove, order: A.readOrder, pause: A.readPause,
       'indoor/look': A.readLook, hold: A.readHold, 'hold/order': A.readHoldOrder, push: A.readPush }[name];
@@ -1578,16 +1643,17 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         return { status: 200, body: { ok: true } };
       case 'once': {
         const r = addOnce(v.date, v.start, v.hours, t);
-        if (r.no) return no(r.full ? 409 : 400, r.no);
+        if (r.no) return no(r.full || r.allowance ? 409 : 400, r.no);
         if (r.added) log(`Added ${v.date} ${hhmm(v.start)} from the app`);
         return done(r.already ? { already: true } : {});
       }
       case 'once/remove':
         removeOnce(v.date, v.start);
         return done();
-      case 'plan':
-        setWeekly(v.day, v.start, v.hours);
-        return done();
+      case 'plan': {
+        const over = setWeekly(v.day, v.start, v.hours);
+        return over ? no(409, over) : done();
+      }
       case 'plan/remove':
         stopWeekly(v.day);
         return done();
@@ -1633,6 +1699,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   return {
     handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, holdFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures,
     appHello, appPair, appAuth, appState, appAsk,
+    clubSparkFromAgent: cs.fromAgent,
   };
 }
 

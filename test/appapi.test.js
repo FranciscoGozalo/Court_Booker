@@ -69,7 +69,7 @@ async function seeFree(t, phone, centre = 'g', date = FRI) {
   assert.equal(r.status, 200, JSON.stringify(r.body));
   return r.body.look;
 }
-const STATE_KEYS = ['now', 'bot', 'venue', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'once', 'order', 'results', 'run', 'indoor', 'hold', 'notes', 'devices'];
+const STATE_KEYS = ['now', 'bot', 'venue', 'venues', 'clubspark', 'allowance', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'once', 'order', 'results', 'run', 'indoor', 'hold', 'notes', 'devices'];
 const HOLD_KEYS = ['id', 'startedBy', 'centre', 'centreName', 'date', 'start', 'end', 'court', 'courtName', 'stage', 'live', 'ended', 'price', 'until', 'heardAt', 'title', 'lines', 'can', 'links'];
 // The state as a phone is shown it. Whenever it is looked at here, it is also checked to be
 // whole: the contract's fields and no others, and nothing that JSON would drop on the way.
@@ -82,6 +82,16 @@ const stateOf = (t, phone) => {
   return state;
 };
 const refused = (status, why) => ({ status, body: { ok: false, why } });
+// Every venue as the state lists it on a day: the seven parks on ClubSpark, then Glasgow Club's two.
+const PARK_ADDRESSES = [['drumchapel', 'Drumchapel Park', 'DrumchapelParkTennisCourts'], ['garrowhill', 'Garrowhill Park', 'GarrowhillPark'], ['kelvingrove', 'Kelvingrove Park', 'KelvingroveParkTennisCourts'],
+  ['knightswood', 'Knightswood Park', 'KnightswoodParkTennisCourts'], ['maryhill', 'Maryhill Park', 'MaryhillParkTennisCourts'], ['queenspark', 'Queens Park', 'QueensParkTennisCourtsGlasgow'], ['victoriapark', 'Victoria Park', 'VictoriaParkTennis']];
+const venuesOn = date => [
+  ...PARK_ADDRESSES.map(([key, name, address]) => ({ key, name, club: 'clubspark', types: ['outdoor'], centre: null, schedule: key === 'kelvingrove', notYet: [], note: null,
+    site: `https://clubspark.lta.org.uk/${address}/Booking/BookByDate#?date=${date}` })),
+  { key: 'gorbals', name: 'Gorbals', club: 'glasgow', types: ['indoor'], centre: 'g', schedule: false, notYet: [], note: null, site: `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${date}T00:00:00.000Z` },
+  { key: 'scotstoun', name: 'Scotstoun', club: 'glasgow', types: ['indoor'], centre: 's', schedule: false, notYet: ['outdoor'], note: "Scotstoun's outdoor courts are not available yet.",
+    site: `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${date}T00:00:00.000Z` },
+];
 let tapId = 1;
 const tap = (app, data, messageId, { chat = OWNER } = {}) => app.handleUpdate({
   update_id: 1, callback_query: { id: `app${tapId++}`, data, from: { id: chat }, message: { message_id: messageId, chat: { id: chat, type: 'private' } } },
@@ -381,7 +391,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.8', api: 1 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.9', api: 1 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -638,8 +648,16 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.8',
+    bot: '2.9',
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
+    venues: venuesOn(TUE),
+    // Nothing stands in the way of a look or Book now at a park: the PC is awake, and it is midday.
+    clubspark: { linked: true, days: { first: TUE, last: '2026-11-23' }, quietUntil: null, lookNo: null, bookNo: null, reads: { used: 0, max: 6, nextAt: null }, book: null },
+    // This week: Thursday's 19:00 booked, Friday's two hours still to book. Next week: Tuesday and Thursday every week, and Friday the 27th.
+    allowance: [
+      { week: '2026-11-16', sessions: 1, hours: 1, plannedSessions: 1, plannedHours: 2, maxSessions: 7, maxHours: 14 },
+      { week: '2026-11-23', sessions: 0, hours: 0, plannedSessions: 3, plannedHours: 4, maxSessions: 7, maxHours: 14 },
+    ],
     paused: false,
     kept: 'disk',
     pc: {
@@ -663,11 +681,11 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
     order: [3, 4, 5, 2, 1, 6],
     // Today and later first, soonest first; then what is past, newest first.
     results: [
-      { id: '2026-11-17@09:00', status: 'failed', date: TUE, start: 540, end: 600, court: null, gate: null, why: 'It did not work: the booking sheet did not load <twice>.', at: at('2026-11-10T22:01:00Z'), past: false },
-      { id: '2026-11-18@18:00', status: 'none', date: '2026-11-18', start: 1080, end: 1200, court: null, gate: null, why: 'No court was free for the whole slot.', at: at('2026-11-11T22:05:00Z'), past: false },
-      { id: '2026-11-19@19:00', status: 'booked', date: '2026-11-19', start: 1140, end: 1200, court: '3', gate: '2433', why: null, at: at('2026-11-12T22:00:10Z'), past: false },
-      { id: '2026-11-12@19:00', status: 'failed', date: '2026-11-12', start: 1140, end: 1200, court: null, gate: null, why: 'It did not work: no reason given.', at: at('2026-11-05T22:03:00Z'), past: true },
-      { id: '2026-11-10@16:00', status: 'booked', date: '2026-11-10', start: 960, end: 1080, court: '4', gate: null, why: null, at: at('2026-11-03T22:00:09Z'), past: true },
+      { id: '2026-11-17@09:00', venue: 'kelvingrove', status: 'failed', date: TUE, start: 540, end: 600, court: null, gate: null, why: 'It did not work: the booking sheet did not load <twice>.', at: at('2026-11-10T22:01:00Z'), past: false },
+      { id: '2026-11-18@18:00', venue: 'kelvingrove', status: 'none', date: '2026-11-18', start: 1080, end: 1200, court: null, gate: null, why: 'No court was free for the whole slot.', at: at('2026-11-11T22:05:00Z'), past: false },
+      { id: '2026-11-19@19:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-19', start: 1140, end: 1200, court: '3', gate: '2433', why: null, at: at('2026-11-12T22:00:10Z'), past: false },
+      { id: '2026-11-12@19:00', venue: 'kelvingrove', status: 'failed', date: '2026-11-12', start: 1140, end: 1200, court: null, gate: null, why: 'It did not work: no reason given.', at: at('2026-11-05T22:03:00Z'), past: true },
+      { id: '2026-11-10@16:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-10', start: 960, end: 1080, court: '4', gate: null, why: null, at: at('2026-11-03T22:00:09Z'), past: true },
     ],
     run: null,
     indoor: {
@@ -734,7 +752,7 @@ test('the state follows the clock: what has opened, what has started, what is pa
   assert.deepEqual(s.open, []);
   assert.deepEqual(s.results.filter(r => !r.past).map(r => r.id), ['2026-11-27@10:00']);
   assert.deepEqual(s.results.filter(r => r.past).map(r => r.id), ['2026-11-19@19:00', '2026-11-18@18:00', '2026-11-17@09:00', '2026-11-12@19:00', '2026-11-10@16:00']);
-  assert.deepEqual(s.results[0], { id: '2026-11-27@10:00', status: 'booked', date: '2026-11-27', start: 600, end: 660, court: '5', gate: '9911', why: null, at: t.clock.t, past: false });
+  assert.deepEqual(s.results[0], { id: '2026-11-27@10:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-27', start: 600, end: 660, court: '5', gate: '9911', why: null, at: t.clock.t, past: false });
 });
 
 test('a one-off that repeats a weekly day, added after its release was missed, is one of the open ones', async () => {
