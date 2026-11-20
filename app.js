@@ -148,8 +148,9 @@ function readBackup(text) {
 // (lib/glasgowclub.js); both are swapped out in tests. `pcLookMs` is how long your PC gets to
 // answer when it is asked to read Glasgow Club's sheet, and `pcHoldMs` how long it gets to
 // collect a court to hold. `push` sends a notification to the phones linked to the app
-// (lib/push.js: Expo's push service); tests swap it out too.
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000, pcHoldMs = 25000, push = null }) {
+// (lib/push.js: Expo's push service); tests swap it out too. `retryMs`: how long before a message
+// that must not be lost (see strangerNote) is tried again when Telegram will not take it.
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000, pcHoldMs = 25000, push = null, retryMs = 3000 }) {
   const indoor = glasgow || G.createGlasgowClub({ now, log });
   const pushOut = push || createExpoPush({ log });
   const fromVariable = readBackup(env.COURT_SETTINGS);
@@ -177,11 +178,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (dropped) log(`Unlinked ${dropped === 1 ? 'a phone' : `${dropped} phones`} linked to the app while this bot answered to another chat.`);
     if (dropped || stamped) save();
   }
-  // Whether the owner is fixed by TELEGRAM_CHAT_ID. Without it the owner is whoever is in the
-  // saved settings, and with those lost, whoever sends /start first. That will do for
-  // bookings; it will not do for spending money, so Pay is only ever offered, and taken, when
-  // the owner is pinned.
-  const pinned = envOwner !== null;
+  // Whether the owner is fixed by TELEGRAM_CHAT_ID, to a person. Without it the owner is
+  // whoever is in the saved settings, and with those lost, whoever sends /start first. That
+  // will do for bookings; it will not do for spending money, so Pay is only ever offered, and
+  // taken, when the owner is pinned. (A person's own chat has a number above zero; a group's is
+  // below, and in a group anybody's tap would count.)
+  const pinned = envOwner !== null && envOwner > 0;
   const releaseMin = parseTime(env.RELEASE_TIME) ?? 22 * 60;
   const daysAhead = intIn(env.DAYS_AHEAD, 1, 30) ?? 7;
   const cfg = () => ({ plan: state.plan, once: state.once, order: state.order, releaseMin, daysAhead });
@@ -451,7 +453,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // go", "I have paid", or "Pay". Paying is yours: the bot never can, and your PC only does when
   // you have put a card and a limit in its .env and then tap Pay and confirm the amount, each
   // time (lib/pay.js in the booker). The card itself never comes here. Pay is offered, and
-  // taken, only when this bot is locked to you by TELEGRAM_CHAT_ID (see `pinned`).
+  // taken, only when this bot is locked to you by TELEGRAM_CHAT_ID (see `pinned`). A confirmed
+  // Pay goes to the PC with its next notes for half a minute and is then taken back.
   // Once the PC says Pay was pressed ("pressed"), or may have been ("maybe": Chrome gave it no
   // answer to the press), that is said with however the hold ends, whoever ends it, and such a
   // hold is never told to let go.
@@ -469,8 +472,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const HOLD_PER_HOUR = 6;                            // each is a sign-in to Glasgow Club
   const HOLD_QUIET_MS = 60 * 60 * 1000;               // after Glasgow Club's site checked visitors from home
   const HOLD_REDRAW_MS = 5000;                        // a card Telegram would not redraw is tried again after this
+  const PAY_ORDER_MS = 30 * 1000;                     // a confirmed Pay is handed to the PC for this long, and then taken back
   let hold = null;                                    // the hold being followed, or the last one
   const gaveUp = new Set();                           // holds given up on here: a PC that still has one is told to let it go
+  // Holds given up on here for a newer one although Pay was pressed, may have been, or was
+  // asked for and never answered: still followed to their end, on their own cards.
+  const former = new Map();
   let holdStarts = [];
   let holdQuiet = 0;
   const clock = ms => { const w = londonWall(ms); return hhmm(w.hh * 60 + w.mm); };
@@ -480,19 +487,26 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const rel = londonInstant(addDays(todayCivil(t), d), releaseMin);
     return t >= rel - HOLD_BEFORE_MS && t <= rel + HOLD_AFTER_MS;
   });
-  // What is known here of a press of Pay for a hold: true once the PC said it pressed, 'maybe'
-  // once it said it may have, and otherwise false. `unheard`: the ending is not the tool's own
-  // word (the bot's own "nothing more was heard", or the PC link's "the tool has gone"); then a
-  // Pay you had confirmed, of which the PC never said how it went, may have been pressed too.
-  const pressedSoFar = (h, unheard) => (h.payState === 'pressed' ? true : h.payState === 'maybe' ? 'maybe' : unheard && h.payState === 'asked' ? 'maybe' : false);
+  // What is known here of a press of Pay for a hold, strongest first: true (the PC said it
+  // pressed), 'maybe' (the PC said it may have: it got no answer to the press; or its link
+  // says a press was noted before the tool went), 'unheard' (you confirmed Pay, the order went
+  // out to the PC, and the PC never said how that went), false.
+  const PRESS_RANK = [false, 'unheard', 'maybe', true];
+  const stronger = (a, b) => (PRESS_RANK.indexOf(a) >= PRESS_RANK.indexOf(b) ? a : b);
+  const pressedSaid = v => (v === true ? true : v === 'maybe' ? 'maybe' : null);
+  // `silent`: the ending is not the tool's own word (the bot's own "nothing more was heard",
+  // or the PC link's "the tool has gone"). Only then does a Pay that was asked for and never
+  // answered count for anything: the tool's own endings say for themselves whether it pressed.
+  const pressedSoFar = (h, silent) => (h.payState === 'pressed' ? true : h.payState === 'maybe' ? 'maybe' : silent && h.payState === 'asked' && h.payTold > 0 ? 'unheard' : false);
   function giveUpOn(h, end) {
     h.end = end;
     if (end === 'timeout') h.pressed = pressedSoFar(h, true);
     // A PC that still has a hold given up on here is told to let it go: never one for which
-    // Pay was, or may have been, pressed.
-    if (h.pressed) return;
-    gaveUp.add(h.id);
-    if (gaveUp.size > 50) gaveUp.delete(gaveUp.values().next().value);
+    // Pay was pressed, may have been, or was asked for and not answered.
+    if (!h.pressed) {
+      gaveUp.add(h.id);
+      if (gaveUp.size > 50) gaveUp.delete(gaveUp.values().next().value);
+    }
     holdEnded(h);
   }
   // How a hold ended, as a note for the app: the card's own words about the ending, whoever
@@ -505,6 +519,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     } catch (e) {
       log(`Could not keep a note about the hold: ${e.message}`);
     }
+  }
+  // A confirmed Pay that is not to go out to the PC (any more), with why. Only ever when the
+  // PC has not said it pressed.
+  function withdrawPay(h, why) {
+    h.order = null;
+    h.payState = 'failed';
+    h.payFailed = why;
+    log(`Hold: the order to pay for ${holdName(h)} was taken back (${why}).`);
   }
   // Until when Glasgow Club's site is to be left alone by your PC: it met a "checking your
   // browser" page there, holding a court or reading the sheet. 0 when it is not.
@@ -563,15 +585,22 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       giveUpOn(hold, 'timeout');
       drawHold(hold);
     }
+    // ...unless Pay was pressed for it, may have been, or was asked for and never answered: that
+    // one is followed to its end on its own card, whatever is held next.
+    if (hold && hold.pressed) {
+      former.set(hold.id, hold);
+      if (former.size > 3) former.delete(former.keys().next().value);
+    }
     const h = { id: crypto.randomBytes(6).toString('hex'), by: where.by, chat: where.chat, card: where.card, wide: where.wide, cardless: !!where.cardless,
       key, date: dateIso, start, court, at: t, heard: t,
       taken: false, takenAt: null, stage: 'asked', end: null, order: null, price: '', heldAt: null, until: null, why: '', basket: '', removed: null, words: '', checked: false, silent: false, draws: null, redrawAt: null,
       // Paying from your PC. `pay`: what the PC said of it with the court ('ready', or why not; 'unpinned' when it is
       // ready there but this bot is not locked to you). `payState`: null, 'confirm' (you tapped Pay, and are asked to
-      // confirm the amount), 'asked' (confirmed: the PC is told), 'pressed', 'maybe' (the PC cannot tell whether its
-      // press went through: `payDoubt` says why), 'failed'. `pressedAt`: when that was heard here. `pressed`: for the
-      // ending, whether Pay was pressed (true) or may have been ('maybe').
-      pay: '', payWhy: '', payState: null, payAmount: '', payTold: 0, pressedAt: null, payFailed: '', payWords: '', payDoubt: '', pressed: false };
+      // confirm the amount), 'asked' (confirmed at `payAskedAt`; `payTold` counts the answers that handed it to the
+      // PC), 'pressed', 'maybe' (the PC cannot tell whether its press went through: `payDoubt` says why), 'failed'.
+      // `pressedAt`: when the press was heard of here. `pressed`: for the ending, what is known of a press (see
+      // PRESS_RANK): true, 'maybe', 'unheard' or false.
+      pay: '', payWhy: '', payState: null, payAmount: '', payTold: 0, payAskedAt: null, pressedAt: null, payFailed: '', payWords: '', payDoubt: '', pressed: false };
     hold = h;
     holdStarts.push(t);
     log(`Hold asked for: ${holdName(h)}.`);
@@ -621,9 +650,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       drawHold(h);
       return { toast: 'Stopped', ok: true };
     }
+    // A Pay you confirmed that has not gone out to the PC yet is taken back by this tap. One
+    // that has gone out cannot be: the PC may be at it.
+    if (h.order === 'pay' && h.payTold === 0) withdrawPay(h, 'you asked for something else before your PC had been told');
     if (h.order) return { toast: h.order === 'release' ? 'Already letting it go.' : h.order === 'pay' ? 'Your PC is paying. Wait for its answer.' : 'Already checking.' };
     if (h.payState === 'pressed') return { toast: 'Your PC has pressed Pay. Wait for the answer.' };
     if (h.payState === 'maybe') return { toast: 'Your PC may have pressed Pay. Wait for the answer.' };
+    if (h.payState === 'asked') return { toast: 'Your PC was told to pay and has not said how it went. Wait for its answer.' };
     if (h.payState === 'confirm') h.payState = null;
     h.order = what;
     log(`Hold: you tapped ${what === 'done' ? 'I have paid' : 'Let it go'}.`);
@@ -632,7 +665,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
   // "Pay £… from my PC" (gy), its "Back" (gb) and "Yes, pay £…" (gz, with the amount in pence, so
   // that what is confirmed is what was shown). Only on a court that is in the basket, when the
-  // PC said paying is set up, and once: after "Yes" the PC is told the amount with its next note.
+  // PC said paying is set up, and once: after "Yes" the PC is told the amount with its next
+  // notes, for PAY_ORDER_MS at most (a tap acted on minutes later is not what you confirmed).
   function holdPay(id, what, pence) {
     const h = hold;
     if (!h || h.id !== id) return { toast: 'I am no longer following that hold.' };
@@ -642,7 +676,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (h.stage !== 'held' || h.pay !== 'ready' || !h.price) return { toast: 'Paying from your PC is not on for this court.' };
     if (h.order) return { toast: h.order === 'pay' ? 'Your PC is paying.' : 'Too late for that: it is being dealt with.' };
     if (h.payState === 'maybe') return { toast: 'Pay may have been pressed already.' };
-    if (h.payState === 'pressed' || h.payState === 'failed' || h.payState === 'asked') return { toast: h.payState === 'failed' ? 'That did not work; the card says why.' : 'Pay has been pressed already.' };
+    if (h.payState === 'pressed' || h.payState === 'failed' || h.payState === 'asked') return { toast: h.payState === 'failed' ? 'That did not work; the card says why.' : h.payState === 'asked' ? 'Your PC has been told to pay already.' : 'Pay has been pressed already.' };
     if (what === 'ask') { h.payState = 'confirm'; drawHold(h); return {}; }
     if (what === 'back') { h.payState = null; drawHold(h); return {}; }
     if (h.payState !== 'confirm' || pence !== Math.round(Number(h.price.slice(1)) * 100)) { h.payState = null; drawHold(h); return { toast: 'The amount has changed. Look again.' }; }
@@ -650,45 +684,77 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     h.payAmount = h.price;
     h.payState = 'asked';
     h.payTold = 0;
+    h.payAskedAt = now();
     log(`Hold: you confirmed paying ${h.price} for ${holdName(h)} from your PC.`);
     drawHold(h);
     return { toast: `Paying ${h.price}` };
   }
+
+  // ---------- messages about holds that have no card to say it on ----------
+  // Sent at once; if Telegram will not take one, the timer tries again, less and less often,
+  // for about half an hour. A newer word about the same hold takes the place of an older one
+  // that has not got through.
+  const NOTE_TRIES = 40;
+  const outbox = [];                    // { id, chat, scr, tries, nextAt, sending }
+  function postNote(id, chat, scr, t) {
+    for (let i = outbox.length - 1; i >= 0; i--) if (outbox[i].id === id && !outbox[i].sending) outbox.splice(i, 1);
+    outbox.push({ id, chat, scr, tries: 0, nextAt: t, sending: false });
+    return flushNotes(t);
+  }
+  async function flushNotes(t) {
+    for (const item of [...outbox]) {
+      if (item.sending || t < item.nextAt) continue;
+      item.sending = true;
+      try {
+        await say(item.chat, item.scr.caption, { reply_markup: item.scr.keyboard });
+        if (outbox.includes(item)) outbox.splice(outbox.indexOf(item), 1);
+      } catch (err) {
+        item.sending = false;
+        item.tries++;
+        log(`Could not tell you about a hold I am not following: ${err.message}`);
+        if (item.tries >= NOTE_TRIES) {
+          if (outbox.includes(item)) outbox.splice(outbox.indexOf(item), 1);
+          log('Gave up on that message.');
+        } else item.nextAt = now() + (err.retryAfter ? err.retryAfter * 1000 : Math.min(60000, retryMs * 2 ** Math.min(10, item.tries - 1)));
+      }
+    }
+  }
+
   // A note about a hold this bot is not following: it restarted while the PC held the court
-  // (holds are kept in memory only), or gave the hold up and another took its place. Nothing
-  // can be done about such a hold from here, and its card no longer changes. But if the PC says
-  // Pay was pressed for it, or may have been, that is not to be lost: you are told so in a
-  // message, once while it is still going and once when it has ended, in the words its card
-  // would have had. (A beat comes every few seconds; neither is ever said twice.)
+  // (holds are kept in memory only). Nothing can be done about such a hold from here, and its
+  // card no longer changes. But if the PC says Pay was pressed for it, or may have been, that
+  // is not to be lost: you are told so in a message, once while it is still going and once
+  // when it has ended, in the words its card would have had. (A beat comes every few seconds;
+  // neither is ever said twice.) The same once if the PC says it could not pay: the old card
+  // may be standing at "Paying…".
   const noteText = v => String(v ?? '').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '').slice(0, 300);
   const BASKETS = ['empty', 'items', 'unclear', 'untouched', 'gone', 'still'];
-  const pressedSaid = v => (v === true ? true : v === 'maybe' ? 'maybe' : null);
-  const strangers = new Map();          // id -> { going, ended: what has been said; pressed; court: which court, once a note has said }
+  // What a note says of a press: on a beat in its `pay`, on an ending in its `pressed`.
+  const pressOf = (raw, stage) => (stage === 'held' ? pressedSaid(raw.pay === 'pressed' ? true : raw.pay) : HOLD_ENDS.includes(stage) ? pressedSaid(raw.pressed) : null);
+  const strangers = new Map();          // id -> { going, ended, failed: what has been said; pressed; court: which court, once a note has said }
   function strangerNote(raw, id, stage) {
+    const t = now();
     const ending = HOLD_ENDS.includes(stage);
-    const s = strangers.get(id) || { going: false, ended: false, pressed: null, court: null };
-    const said = ending ? pressedSaid(raw.pressed) : stage === 'held' ? pressedSaid(raw.pay === 'pressed' ? true : raw.pay) : null;
-    s.pressed = said ?? s.pressed;      // the PC link's "the tool has gone" says nothing of a press: what an earlier note said stands
-    if (!s.pressed) return;
+    const s = strangers.get(id) || { going: false, ended: false, failed: false, pressed: null, court: null };
+    const said = pressOf(raw, stage);
+    s.pressed = said ? stronger(s.pressed || false, said) : s.pressed;   // the PC link's "gone" may say nothing of a press: what an earlier note said stands
+    const couldNot = !ending && stage === 'held' && raw.pay === 'failed' && !s.pressed;
+    if (!s.pressed && !couldNot) return;
     if (!s.court && Object.prototype.hasOwnProperty.call(G.CENTRES, raw.key) && typeof raw.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.date)
       && !Number.isNaN(Date.parse(`${raw.date}T12:00:00Z`)) && Number.isInteger(raw.start) && raw.start >= 0 && raw.start <= 23 * 60 && Number.isInteger(raw.court) && raw.court >= 1 && raw.court <= 20) {
       s.court = { key: raw.key, date: raw.date, start: raw.start, court: raw.court };
     }
     strangers.set(id, s);
     if (strangers.size > 20) strangers.delete(strangers.keys().next().value);
-    if (ending ? s.ended : s.going || s.ended) return;
+    if (couldNot ? s.failed || s.ended : ending ? s.ended : s.going || s.ended) return;
     const chat = owner();
     if (chat === null) return;
-    if (ending) s.ended = true; else s.going = true;
-    const scr = UI.indoorHoldStray(ctx(), { ...(s.court || {}), stage: 'held', pressed: s.pressed, end: ending ? stage : null, why: noteText(raw.why), words: noteText(raw.words),
-      basket: BASKETS.includes(raw.basket) ? raw.basket : '', removed: null, checked: raw.checked === true });
-    log(`A hold I am not following ${ending ? `ended (${stage})` : 'is going on'}, and your PC says Pay ${s.pressed === 'maybe' ? 'may have been' : 'was'} pressed for it: told you so.`);
-    // The message matters more than most: tried a few times if Telegram will not take it.
-    const send = left => say(chat, scr.caption, { reply_markup: scr.keyboard }).catch(err => {
-      log(`Could not tell you about that hold: ${err.message}`);
-      if (left > 0) { const timer = setTimeout(() => send(left - 1), 3000); if (timer.unref) timer.unref(); }
-    });
-    send(3);
+    if (couldNot) s.failed = true; else if (ending) s.ended = true; else s.going = true;
+    const scr = UI.indoorHoldStray(ctx(), { ...(s.court || {}), stage: 'held', pressed: s.pressed || false, end: ending ? stage : null, why: noteText(raw.why), words: noteText(raw.words),
+      basket: BASKETS.includes(raw.basket) ? raw.basket : '', removed: null, checked: raw.checked === true, payFailed: couldNot ? noteText(raw.payWhy) || 'no reason was given' : '' });
+    log(couldNot ? 'A hold I am not following: your PC says it could not pay for it. Told you so.'
+      : `A hold I am not following ${ending ? `ended (${stage})` : 'is going on'}, and your PC says Pay ${s.pressed === 'maybe' ? 'may have been' : 'was'} pressed for it: told you so.`);
+    postNote(id, chat, scr, t);
   }
 
   // A note from the PC's tool about a hold: a step, or how it ended. The answer carries what
@@ -698,30 +764,47 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const t = now();
     const id = raw && typeof raw === 'object' && typeof raw.id === 'string' ? raw.id : null;
     const stage = raw && typeof raw === 'object' && typeof raw.stage === 'string' ? raw.stage : '';
-    const h = hold;
-    if (!id || !h || id !== h.id) {
+    // What this very note says of a press. Whatever was decided here before, a hold whose PC
+    // says Pay was pressed, or may have been, is never told to let go.
+    const says = id ? pressOf(raw, stage) : null;
+    if (says) gaveUp.delete(id);
+    const h = hold && id === hold.id ? hold : (id && former.get(id)) || null;
+    if (!h) {
       if (id && gaveUp.has(id)) return { ok: true, order: 'release' };
       if (id && /^[0-9a-f]{6,40}$/.test(id)) strangerNote(raw, id, stage);
       return { ok: true, unknown: true };
     }
     const ending = HOLD_ENDS.includes(stage);
     // Over already. What the PC itself says of the ending replaces one this bot only assumed.
-    if (h.end && !(ending && stage !== 'gone' && HOLD_OURS.includes(h.end))) return gaveUp.has(id) && !ending ? { ok: true, order: 'release' } : { ok: true };
+    if (h.end && !(ending && stage !== 'gone' && HOLD_OURS.includes(h.end))) {
+      // ...and a press that is heard of only now (in a late beat, or in the PC link's "gone",
+      // which knows of the tool's note of a press) still goes on a card that was ended on a guess.
+      if (says && HOLD_OURS.includes(h.end) && stronger(h.pressed, says) !== h.pressed) {
+        h.pressed = says;
+        if (!ending) { h.payState = says === true ? 'pressed' : 'maybe'; h.pressedAt = h.pressedAt ?? t; }
+        log(`Hold: ${holdName(h)} was over here, and your PC now says Pay ${says === true ? 'was' : 'may have been'} pressed.`);
+        drawHold(h);
+      }
+      return gaveUp.has(id) && !ending ? { ok: true, order: 'release' } : { ok: true };
+    }
     state.lastSeen = t;                                                  // a note from the PC shows it is awake, as a ping does
     h.heard = t;
     const text = noteText;
     let redraw = h.silent;
     h.silent = false;
     if (ending) {
+      // Whether Pay was pressed. The tool's own word with its ending counts first; failing
+      // that, what it said while the hold was going. "gone" is the PC link's word: the link
+      // knows only whether the tool noted a press, so there the stronger of the two counts.
+      const own = pressedSoFar(h, stage === 'gone');
+      h.pressed = stage === 'gone' ? stronger(own, says || false) : says ?? own;
       h.end = stage;
       h.why = text(raw.why);
       h.words = text(raw.words);
       h.basket = BASKETS.includes(raw.basket) ? raw.basket : '';
       h.removed = Number.isInteger(raw.removed) && raw.removed >= 0 ? raw.removed : null;
       h.checked = raw.checked === true;
-      // Whether Pay was pressed: the tool's own word with the ending; failing that, what it said
-      // while the hold was going. ("gone" is the PC link's word, and the link does not know.)
-      h.pressed = pressedSaid(raw.pressed) ?? pressedSoFar(h, stage === 'gone');
+      h.order = null;
       if (raw.kind === 'challenge') {                                    // the site was checking visitors: no holds, and no looks by the PC, for an hour
         holdQuiet = t + HOLD_QUIET_MS;
         if (indoor.turnedAway) indoor.turnedAway('pc', 'the site was checking its visitors when your PC went to hold a court');
@@ -745,14 +828,17 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         h.payWhy = h.pay && h.pay !== 'ready' ? text(raw.payWhy) : '';
         if (h.pay === 'ready' && !pinned) {
           h.pay = 'unpinned';
-          h.payWhy = `this bot is not locked to you, so whoever came to own it could spend from your card. Add the variable TELEGRAM_CHAT_ID = ${owner()} in Railway`;
+          h.payWhy = envOwner !== null ? 'TELEGRAM_CHAT_ID in Railway is a group, and paying is only taken from you in your own chat with me'
+            : `this bot is not locked to you, so whoever came to own it could spend from your card. Add the variable TELEGRAM_CHAT_ID = ${owner()} in Railway`;
         }
         log(`Hold: ${holdName(h)} is in the basket${h.price ? ` (${h.price})` : ''}${h.pay === 'ready' ? '; your PC can pay for it if you say so' : h.pay === 'unpinned' ? '; your PC could pay for it, but Pay is not offered without TELEGRAM_CHAT_ID' : ''}.`);
       }
     } else if (stage === 'held' && h.stage === 'held') {
       // How paying went, once you had confirmed it: Pay pressed, or it may have been (Chrome
       // gave the PC no answer to the press), in which case the wait for the page's answer runs
-      // on the PC's clock, sent along; or not pressed and why.
+      // on the PC's clock, sent along; or not pressed and why. What was heard first stands: a
+      // "may have" does not turn into a "pressed" on a later note, nor the other way.
+      const expired = h.payState === 'asked' && t - h.payAskedAt > PAY_ORDER_MS;
       if (raw.pay === 'pressed' || raw.pay === 'maybe') {
         const left = Number(raw.left);
         if (left > 0 && left <= 30 * 60 * 1000) h.until = t + left;
@@ -765,20 +851,31 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       } else if (raw.pay === 'failed' && (h.payState === 'asked' || h.payState === 'confirm')) {
         h.payState = 'failed'; h.payFailed = text(raw.payWhy) || 'no reason was given'; h.order = null; redraw = true;
         log(`Hold: your PC could not pay for ${holdName(h)} (${h.payFailed}).`);
-      } else if (h.payState === 'asked' && h.payTold >= 2) {
-        // Told to pay in the answers to its last two notes, it has come back with neither a
-        // press nor a reason: it is not acting on it, so Pay was not pressed.
-        h.payState = 'failed'; h.payFailed = 'your PC did not act on it'; h.order = null; redraw = true;
-        log('Hold: your PC did not act on the order to pay.');
+      } else if (h.payState === 'asked' && (h.payTold >= 2 || (h.payTold >= 1 && expired))) {
+        // Told to pay in the answers to its last two notes (or in one, with half a minute gone
+        // since), it has come back with neither a press nor a reason: it is not acting on it,
+        // so Pay was not pressed. (While it pays, the PC sends no notes at all.)
+        withdrawPay(h, 'your PC did not act on it'); redraw = true;
+      } else if (expired && h.payTold === 0) {
+        // It never went out in an answer, so it cannot have been acted on.
+        withdrawPay(h, 'your PC could not be told within half a minute, so I took the order back'); redraw = true;
       }
     }
+    if (h.order === 'pay') {
+      // Handed over with this answer, and with the next ones until the PC says how it went.
+      h.payTold++;
+      if (h.payTold === 1) redraw = true;                                // the card can now say the PC has been told
+      if (redraw) drawHold(h);
+      return { ok: true, order: 'pay', amount: h.payAmount };
+    }
     if (redraw) drawHold(h);
-    if (h.order === 'pay') { h.payTold++; return { ok: true, order: 'pay', amount: h.payAmount }; }
     return h.order ? { ok: true, order: h.order } : { ok: true };
   }
   // Looked at by the timer: a hold the PC never collected, one it has gone silent on, and one
   // that has run past any time it could still be going.
   async function checkHold(t) {
+    // The last word on the card of a hold that has made way for another, if it did not get there.
+    for (const f of former.values()) if (f !== hold && f.redrawAt && t >= f.redrawAt) await drawHold(f);
     const h = hold;
     if (!h) return;
     if (h.redrawAt && t >= h.redrawAt) await drawHold(h);                // the last redraw did not get through
@@ -801,6 +898,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       log(`Hold: nothing more was heard about ${holdName(h)}.`);
       await drawHold(h);
       return;
+    }
+    // A Pay you confirmed that the PC has not come to collect within half a minute is taken
+    // back: it has not gone out, so nothing was pressed. One that did go out and was not
+    // answered is no longer handed over, and the card says where that stands.
+    if (h.order === 'pay' && t - h.payAskedAt > PAY_ORDER_MS) {
+      if (h.payTold === 0) withdrawPay(h, 'your PC could not be told within half a minute, so I took the order back');
+      else { h.order = null; log(`Hold: your PC was told to pay for ${holdName(h)} and has not said how it went.`); }
+      await drawHold(h);
     }
     const silent = h.stage !== 'asked' && t - h.heard >= HOLD_SILENT_MS;        // before its first step, "never started" covers it
     if (silent !== h.silent) {
@@ -1057,6 +1162,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     let data = String(q.data || '');
     const fresh = data.startsWith('n:');                                   // on a booking message: keep it, open a new card
     if (fresh) data = data.slice(2);
+    // Paying (gy, gb, gz) is taken from you yourself, in your own chat with me: never from
+    // somebody else in a chat this bot happens to be in.
+    if (/^g[ybz]:/.test(data) && !(q.from && q.from.id === owner() && q.message.chat.type === 'private')) { await answer('Paying is only taken from you, in your own chat with me.'); return; }
     const indoorMatch = /^g([drt]):([gs]):(\d{8})(?::(\d{4}))?$/.exec(data);
     const holdMatch = /^gh:([gs]):(\d{8}):(\d{4}):(\d{1,2})$/.exec(data);
     if (indoorMatch || holdMatch) {
@@ -1495,6 +1603,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       if (pastOnce.length) { state.once = state.once.filter(o => civilOf(o.date) >= today); save(); }
       await refreshNewest(t);
       await checkHold(t);
+      await flushNotes(t);
       const chat = owner();
       if (chat === null || state.paused || !linked) return;
       await checkAhead(t, chat);
