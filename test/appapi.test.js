@@ -400,7 +400,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.10.0', api: 3 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.10.1', api: 3 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -657,7 +657,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.10.0',
+    bot: '2.10.1',
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
     venues: venuesOn(TUE),
     // Nothing stands in the way of a look or Book now at a park: the PC is awake, and it is midday.
@@ -685,12 +685,12 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
     plan: [{ day: 'tue', start: 960, hours: 2 }, { day: 'thu', start: 1140, hours: 1 }],
     // 2.10: the same, as weekly entries (Kelvingrove's), each with the day it is next booked for and when that opens.
     weekly: [
-      { id: 'f7de6e62', venue: 'kelvingrove', type: 'outdoor', day: 'tue', start: 960, hours: 2, end: 1080, on: true, next: { date: '2026-11-24', opensAt: at('2026-11-17T22:00:00Z') } },
-      { id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 1, end: 1200, on: true, next: { date: '2026-11-26', opensAt: at('2026-11-19T22:00:00Z') } },
+      { id: 'f7de6e62', venue: 'kelvingrove', type: 'outdoor', day: 'tue', start: 960, hours: 2, end: 1080, on: true, next: { date: '2026-11-24', opensAt: at('2026-11-17T22:00:00Z') }, signed: false },
+      { id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 1, end: 1200, on: true, next: { date: '2026-11-26', opensAt: at('2026-11-19T22:00:00Z') }, signed: false },
     ],
     once: [
-      { id: '2026-11-20@19:00', date: FRI, start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-13T22:00:00Z'), open: true, venue: 'kelvingrove', type: 'outdoor' },
-      { id: '2026-11-27@10:00', date: '2026-11-27', start: 600, hours: 1, end: 660, opensAt: at('2026-11-20T22:00:00Z'), open: false, venue: 'kelvingrove', type: 'outdoor' },
+      { id: '2026-11-20@19:00', date: FRI, start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-13T22:00:00Z'), open: true, venue: 'kelvingrove', type: 'outdoor', signed: false },
+      { id: '2026-11-27@10:00', date: '2026-11-27', start: 600, hours: 1, end: 660, opensAt: at('2026-11-20T22:00:00Z'), open: false, venue: 'kelvingrove', type: 'outdoor', signed: false },
     ],
     order: [3, 4, 5, 2, 1, 6],
     // Today and later first, soonest first; then what is past, newest first.
@@ -916,7 +916,7 @@ test('a one-off date from the app is the same as /book: added, already there, or
   let r = await ask(t, phone, 'once', { date: '2026-11-25', start: 1140, hours: 2 });
   assert.equal(r.status, 200);
   assert.deepEqual(Object.keys(r.body), ['ok', 'etag', 'state']);
-  assert.deepEqual(r.body.state.once, [{ id: '2026-11-25@19:00', venue: 'kelvingrove', type: 'outdoor', date: '2026-11-25', start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-18T22:00:00Z'), open: false }]);
+  assert.deepEqual(r.body.state.once, [{ id: '2026-11-25@19:00', venue: 'kelvingrove', type: 'outdoor', date: '2026-11-25', start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-18T22:00:00Z'), open: false, signed: false }]);
   assert.equal(r.body.etag, t.app.appState(phone.device).etag);
   assert.deepEqual(t.store.load().once, [{ date: '2026-11-25', start: 1140, hours: 2 }]);
   assert.deepEqual(t.app.state.once, (await inTelegram(NOON, {}, '/book 25 nov 19:00 2h')).state.once);

@@ -28,7 +28,7 @@ const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 
-const VERSION = '2.10.0';
+const VERSION = '2.10.1';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -42,6 +42,7 @@ const PREFLIGHT_MS = 20 * 60 * 1000;       // this long before a release, make s
 const PREFLIGHT_WAIT_MS = 3 * 60 * 1000;   // how long the PC gets to answer that wake-up before you are told
 const NO_WORD_MS = 8 * 60 * 1000;          // a run that started should have reported by this long after the release
 const NO_WORD_FOR_MS = 60 * 60 * 1000;     // ...and after this the bot stops watching for it
+const PRE_210_COPY = 'state.pre-2.10.json';         // the settings as a bot older than 2.10 kept them (see createApp)
 const NO_WORD_CLUB_MS = 25 * 60 * 1000;    // a Glasgow Club booking (paid, perhaps with your bank's approval) by this long after its midnight
 const GONE = ['test', 'free', 'signin', 'style', 'lead', 'warn', 'go', 'code'];   // link-alert commands from version 1
 // Said to a button, and to the app, that asks for an indoor day or time which is not on offer.
@@ -50,7 +51,7 @@ const TIME_GONE = 'That time is no longer on offer. Pick again.';
 // Said to the app when it asks to hold a court that no look showed it free in the last 15 minutes.
 const LIST_OLD = 'That list is old. Read the day again, then hold a court.';
 // What the iPhone app can ask for (POST /app/<name>, docs/app-api.md).
-const APP_ASKS = ['unpair', 'once', 'once/remove', 'plan', 'plan/remove', 'weekly', 'weekly/change', 'weekly/on', 'weekly/remove', 'order', 'pause', 'pc/sleep', 'pc/wake',
+const APP_ASKS = ['unpair', 'once', 'once/remove', 'plan', 'plan/remove', 'weekly', 'weekly/change', 'weekly/on', 'weekly/remove', 'weekly/auth', 'order', 'pause', 'pc/sleep', 'pc/wake',
   'indoor/look', 'hold', 'hold/order', 'card', 'card/forget', 'card/auto', 'card/auto/off', 'push'];
 
 // The banner pictures (made by art/make-banners.cjs): the menu card in three versions, one for
@@ -155,10 +156,13 @@ function loadState(raw, env = {}) {
 }
 
 // The settings as one line, for the COURT_SETTINGS variable, and back again. The phones linked
-// to the app are left out on purpose: a line that is copied about should open no door.
+// to the app are left out on purpose: a line that is copied about should open no door. So are the
+// app's signatures for bookings (2.10.1), which are said nowhere: after a start from this line the
+// app signs them again (POST /app/weekly/auth).
+const unsigned = list => list.map(({ auth, ...e }) => e);
 function backupLine(state) {
-  return JSON.stringify({ v: STATE_VERSION, owner: state.owner, plan: cleanPlan(state.plan), weekly: cleanWeekly(state.weekly), once: cleanOnce(state.once),
-    onceAway: cleanOnceAway(state.onceAway), order: state.order });
+  return JSON.stringify({ v: STATE_VERSION, owner: state.owner, plan: cleanPlan(state.plan), weekly: unsigned(cleanWeekly(state.weekly)), once: unsigned(cleanOnce(state.once)),
+    onceAway: unsigned(cleanOnceAway(state.onceAway)), order: state.order });
 }
 function readBackup(text) {
   try {
@@ -178,7 +182,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const indoor = glasgow || G.createGlasgowClub({ now, log });
   const pushOut = push || createExpoPush({ log });
   const fromVariable = readBackup(env.COURT_SETTINGS);
-  const state = loadState(store.load() ?? fromVariable, env);
+  const stored = store.load();
+  // Settings kept by a bot older than 2.10 (no weekly list in them) are copied once, as they were,
+  // beside the settings file, before 2.10 first saves them in its own shape: an older bot started
+  // again on 2.10's settings keeps Kelvingrove's bookings but drops the other venues' (README,
+  // "Going back to an older version").
+  if (stored && typeof stored === 'object' && !Array.isArray(stored.weekly) && typeof store.keepCopy === 'function' && store.keepCopy(PRE_210_COPY)) {
+    log(`The settings as they were before 2.10 are kept beside them, in ${PRE_210_COPY}.`);
+  }
+  const state = loadState(stored ?? fromVariable, env);
   const variableLine = fromVariable ? backupLine(loadState(fromVariable, env)) : null;
   const save = () => store.save(state);
   const envOwner = intIn(env.TELEGRAM_CHAT_ID, -1e15, 1e15);
@@ -1207,14 +1219,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     for (const w of [...waiters].reverse()) w.wake();                    // the newest ping first, as for a look
     return { ok: true };
   }
+  // Off is always sent to the PC (2.10.1), even when its last ping said it keeps no code: what the
+  // bot was told may be out of date, and off done twice is off. An "on" not collected yet is dropped.
   function autoOffFromApp() {
     const t = now();
     if (!linked) return { no: 'Your PC is not linked to me, and it is your PC that keeps the code.' };
-    if (autoAsk && autoAsk.kind === 'on' && !autoAsk.takenAt) {
-      autoAsk = null;                                 // not collected yet: dropped, unseen by the PC
-      log('A request for automatic payments that had not reached your PC was dropped: off was asked for.');
-      if (!pcAuto) return { ok: true };
-    } else if (!pcAuto && !(autoAsk && autoAsk.kind === 'on')) return { ok: true };        // off already: nothing to do
+    if (autoAsk && autoAsk.kind === 'on' && !autoAsk.takenAt) log('A request for automatic payments that had not reached your PC was dropped: off was asked for.');
     autoAsk = { id: crypto.randomBytes(6).toString('hex'), kind: 'off', sealed: null, at: t, takenAt: null };
     autoWhy = null;
     log('Asked your PC to turn automatic payments off.');
@@ -1376,15 +1386,23 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // many as it may; `allowance`: because of the weekly allowance, lib/allowance.js), { already:
   // true } when that venue, date and time are on the list, or { added: true }. Kelvingrove's go on
   // its own list, as they always have (`once`); every other venue's on theirs (`onceAway`, 2.10).
-  function addOnce(dateIso, start, hours, t, venue = V.SCHEDULED, type = 'outdoor') {
+  // `auth` (2.10.1): the app's signature for it, kept to hand to your PC (never shown or logged).
+  // A one-off already on the list keeps its hours; a signature sent with it again takes the place
+  // of the one it had.
+  function addOnce(dateIso, start, hours, t, venue = V.SCHEDULED, type = 'outdoor', auth = null) {
     const date = civilOf(dateIso), today = todayCivil(t);
     if (date < today || londonInstant(date, start) <= t) return { no: `${label(date)} at ${hhmm(start)} has already passed.` };
     if (date > addDays(today, MAX_AHEAD_DAYS)) return { no: `That is more than ${MAX_AHEAD_DAYS} days away. Try a nearer date.` };
     const home = venue === V.SCHEDULED;
-    if ((home ? state.once : state.onceAway.filter(o => o.venue === venue)).some(o => o.date === dateIso && o.start === start)) return { already: true };
+    const had = (home ? state.once : state.onceAway.filter(o => o.venue === venue)).find(o => o.date === dateIso && o.start === start);
+    if (had) {
+      if (auth && had.auth !== auth) { had.auth = auth; save(); }
+      return { already: true };
+    }
     if (state.once.length + state.onceAway.length >= MAX_ONCE) return { no: `Your list already has ${MAX_ONCE} one-off dates, which is as many as I keep. Remove one first.`, full: true };
-    const once = home ? cleanOnce([...state.once, { date: dateIso, start, hours }]) : state.once;
-    const away = home ? state.onceAway : cleanOnceAway([...state.onceAway, { date: dateIso, start, hours, venue, type }]);
+    const signed = auth ? { auth } : {};
+    const once = home ? cleanOnce([...state.once, { date: dateIso, start, hours, ...signed }]) : state.once;
+    const away = home ? state.onceAway : cleanOnceAway([...state.onceAway, { date: dateIso, start, hours, venue, type, at: t, ...signed }]);
     const over = W.overIfPlanned(cfg(), { ...cfg(), once, away }, state.results, t);
     if (over) return { no: over, allowance: true };
     state.once = once; state.onceAway = away; save();
@@ -1407,7 +1425,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   function setWeekly(day, start, hours) {
     const same = state.weekly.find(w => w.venue === V.SCHEDULED && w.day === day && w.start === start);
     const others = state.weekly.filter(w => !(w.venue === V.SCHEDULED && w.day === day));
-    const entry = { id: same ? same.id : newWeeklyId(state.weekly), venue: V.SCHEDULED, type: 'outdoor', day, start, hours, on: true };
+    const entry = { id: same ? same.id : newWeeklyId(state.weekly), venue: V.SCHEDULED, type: 'outdoor', day, start, hours, on: true, ...(same && same.auth && same.hours === hours ? { auth: same.auth } : {}) };
     const list = cleanWeekly([...others, entry]);
     if (!list.some(w => w.id === entry.id)) return `Your list already has ${MAX_WEEKLY} weekly bookings, which is as many as I keep. Remove one first.`;
     const over = W.overIfPlanned(cfg(), { ...cfg(), weekly: list, plan: planOf(list) }, state.results, now());
@@ -1443,14 +1461,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return { list };
   }
   function addWeekly(v) {
-    const entry = { id: newWeeklyId(state.weekly), venue: v.venue, type: v.type, day: v.day, start: v.start, hours: v.hours, on: v.on !== false };
+    const entry = { id: newWeeklyId(state.weekly), venue: v.venue, type: v.type, day: v.day, start: v.start, hours: v.hours, on: v.on !== false, ...(v.auth ? { auth: v.auth } : {}) };
     const r = weeklyCheck(entry);
     if (r.no) return r;
     setWeeklyList(r.list); save();
     log(`Weekly booking added from the app: ${V.placeName(entry.venue, entry.type)} ${dayName(entry.day)}s ${hhmm(entry.start)}.`);
     return { ok: true, entry };
   }
-  function changeWeekly(id, fields) {
+  function changeWeekly(id, fields, auth = null) {
     const was = state.weekly.find(w => w.id === id);
     if (!was) return { status: 409, no: WEEKLY_GONE };
     // The entry as it will be, read whole as a new one would be (a venue changed without a type
@@ -1459,7 +1477,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (fields.venue !== undefined && fields.type === undefined) delete merged.type; else merged.type = fields.type !== undefined ? fields.type : was.type;
     const v = A.readWeekly({ ...merged, on: was.on });
     if (v.why) return { status: 400, no: v.why };
-    const entry = { id, venue: v.venue, type: v.type, day: v.day, start: v.start, hours: v.hours, on: was.on };
+    // Its signature (2.10.1): a new one if sent; else the old one, while what it signs stays the
+    // same (a change of venue, type, day, start or hours makes it no longer the app's word).
+    const same = ['venue', 'type', 'day', 'start', 'hours'].every(k => v[k] === was[k]);
+    const sign = auth || (same ? was.auth : null);
+    const entry = { id, venue: v.venue, type: v.type, day: v.day, start: v.start, hours: v.hours, on: was.on, ...(sign ? { auth: sign } : {}) };
     const r = weeklyCheck(entry, was);
     if (r.no) return r;
     setWeeklyList(r.list); save();
@@ -1474,6 +1496,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (r.no) return r;
     setWeeklyList(r.list); save();
     log(`Weekly booking switched ${on ? 'on' : 'off'} from the app: ${V.placeName(was.venue, was.type)} ${dayName(was.day)}s ${hhmm(was.start)}.`);
+    return { ok: true };
+  }
+  // Signatures made afresh by the app (2.10.1): for weekly bookings by their id, and one-off dates
+  // by theirs (state.once). All or nothing: one that is no longer on the list refuses the lot.
+  function signEntries(items) {
+    const found = items.map(it => ({ it, e: state.weekly.find(w => w.id === it.id)
+      || state.once.find(o => jobId(o.date, o.start) === it.id) || state.onceAway.find(o => V.resultId(o.venue, o.date, o.start) === it.id) }));
+    const gone = found.find(f => !f.e);
+    if (gone) return { status: 409, no: `${/^[0-9a-f]{8}$/.test(gone.it.id) ? 'That weekly booking' : 'That one-off date'} is no longer on your list (${gone.it.id}). Nothing was changed.` };
+    for (const { it, e } of found) e.auth = it.auth;
+    save();
+    log(`Signatures from the app for ${items.length} booking${items.length === 1 ? '' : 's'}.`);
     return { ok: true };
   }
   function removeWeekly(id) {
@@ -1689,7 +1723,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     save();
     return {
-      jobs: jobs.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end, hours: j.hours, releaseAt: j.releaseAt, ...placeOfJob(j) })),
+      jobs: jobs.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end, hours: j.hours, releaseAt: j.releaseAt, ...placeOfJob(j), ...signOfJob(j) })),
       order: c.order, releaseMin, daysAhead,
     };
   }
@@ -1699,6 +1733,22 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (!j.venue) return {};
     const park = V.parkOf(j.venue);
     return park ? { venue: j.venue, type: j.type, address: park.address } : { venue: j.venue, type: j.type, centre: G.centreFor(j.venue, j.type) };
+  }
+
+  // What your PC needs to check a Glasgow Club job before it pays for it (2.10.1): the app's
+  // signature for the weekly booking or the one-off date it comes from (`auth`), which of the two
+  // that is (`from`), and `open` for a one-off added after its day opened, to book straight away.
+  // A weekly booking's signature is taken first, then the one-off's; with neither, the job goes
+  // unsigned, and your PC takes no court for it. An open one-off goes with its own signature alone
+  // (a weekly booking's names a weekday, not a date): your PC takes an open job only so.
+  function signOfJob(j) {
+    if (!j.venue || !V.clubOf(j.venue)) return {};
+    const day = dayKey(civilOf(j.date));
+    const same = e => e.venue === j.venue && e.type === j.type && e.start === j.start && e.hours === j.hours && !!e.auth;
+    const w = state.weekly.find(e => e.on !== false && e.day === day && same(e));
+    const o = state.onceAway.find(e => e.date === j.date && same(e));
+    const sign = w && !j.open ? { from: 'weekly', auth: w.auth } : o ? { from: 'once', auth: o.auth } : { from: j.open || j.kind === 'once' ? 'once' : 'weekly' };
+    return { ...sign, ...(j.open ? { open: true } : {}) };
   }
 
   // A job the weekly allowance keeps from the nightly run: said once, in its result.
@@ -2282,13 +2332,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       later: releases.slice(1).map(releaseOf),
       open: open.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end })),
       plan: [1, 2, 3, 4, 5, 6, 0].map(i => DAY_KEYS[i]).filter(k => state.plan[k]).map(k => ({ day: k, start: state.plan[k].start, hours: state.plan[k].hours })),
-      weekly: state.weekly.map(w => ({ id: w.id, venue: w.venue, type: w.type, day: w.day, start: w.start, hours: w.hours, end: slotEnd(w.start, w.hours), on: w.on, next: w.on ? nextOf(w, t) : null })),
+      weekly: state.weekly.map(w => ({ id: w.id, venue: w.venue, type: w.type, day: w.day, start: w.start, hours: w.hours, end: slotEnd(w.start, w.hours), on: w.on, next: w.on ? nextOf(w, t) : null, signed: !!w.auth })),
       once: [...state.once.map(o => ({ ...o, venue: V.SCHEDULED, type: 'outdoor' })), ...state.onceAway]
         .filter(o => londonInstant(civilOf(o.date), o.start) > t)
         .sort((a, b) => (a.date === b.date ? a.start - b.start || V.VENUE_KEYS.indexOf(a.venue) - V.VENUE_KEYS.indexOf(b.venue) : a.date < b.date ? -1 : 1))
         .map(o => {
           const opens = opensAtFor(o.venue, civilOf(o.date), c);
-          return { id: V.resultId(o.venue, o.date, o.start), venue: o.venue, type: o.type, date: o.date, start: o.start, hours: o.hours, end: slotEnd(o.start, o.hours), opensAt: opens, open: opens <= t };
+          return { id: V.resultId(o.venue, o.date, o.start), venue: o.venue, type: o.type, date: o.date, start: o.start, hours: o.hours, end: slotEnd(o.start, o.hours), opensAt: opens, open: opens <= t, signed: !!o.auth };
         }),
       order: state.order.slice(),
       results,
@@ -2356,7 +2406,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (/^clubspark\/(look|book)$/.test(name)) { log(`From the app: ${name}`); return cs.appAsk(name.slice('clubspark/'.length), body, done); }
     if (!APP_ASKS.includes(name)) return null;
     const read = { once: A.readOnce, 'once/remove': A.readOnceRemove, plan: A.readPlan, 'plan/remove': A.readPlanRemove, order: A.readOrder, pause: A.readPause,
-      weekly: A.readWeekly, 'weekly/change': A.readWeeklyChange, 'weekly/on': A.readWeeklyOn, 'weekly/remove': A.readWeeklyRemove,
+      weekly: A.readWeekly, 'weekly/change': A.readWeeklyChange, 'weekly/on': A.readWeeklyOn, 'weekly/remove': A.readWeeklyRemove, 'weekly/auth': A.readWeeklyAuth,
       'indoor/look': A.readLook, hold: A.readHold, 'hold/order': A.readHoldOrder, card: A.readCard, 'card/forget': A.readForget,
       'card/auto': A.readAuto, 'card/auto/off': A.readAutoOff, push: A.readPush }[name];
     const v = read ? read(body) : {};
@@ -2368,7 +2418,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         log(`A phone unlinked itself from the app: ${me.name}.`);
         return { status: 200, body: { ok: true } };
       case 'once': {
-        const r = addOnce(v.date, v.start, v.hours, t, v.venue, v.type);
+        const r = addOnce(v.date, v.start, v.hours, t, v.venue, v.type, v.auth || null);
         if (r.no) return no(r.full || r.allowance ? 409 : 400, r.no);
         if (r.added) log(`Added ${v.venue ? `${V.placeName(v.venue, v.type)} ` : ''}${v.date} ${hhmm(v.start)} from the app`);
         return done(r.already ? { already: true } : {});
@@ -2381,7 +2431,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         return r.ok ? done() : no(r.status, r.no);
       }
       case 'weekly/change': {
-        const r = changeWeekly(v.id, v.fields);
+        const r = changeWeekly(v.id, v.fields, v.auth || null);
         return r.ok ? done() : no(r.status, r.no);
       }
       case 'weekly/on': {
@@ -2390,6 +2440,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       }
       case 'weekly/remove': {
         const r = removeWeekly(v.id);
+        return r.ok ? done() : no(r.status, r.no);
+      }
+      case 'weekly/auth': {
+        const r = signEntries(v.items);
         return r.ok ? done() : no(r.status, r.no);
       }
       case 'plan': {

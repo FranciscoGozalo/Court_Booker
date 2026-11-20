@@ -138,7 +138,7 @@ test('weekly bookings from the app: added at any venue, changed, switched off an
   assert.equal(r.status, 200);
   const [g] = r.body.state.weekly;
   assert.match(g.id, /^[0-9a-f]{8}$/);
-  assert.deepEqual(g, { id: g.id, venue: 'gorbals', type: 'indoor', day: 'wed', start: 1080, hours: 1, end: 1140, on: true, next: { date: '2026-11-25', opensAt: at('2026-11-18T00:00:00Z') } });
+  assert.deepEqual(g, { id: g.id, venue: 'gorbals', type: 'indoor', day: 'wed', start: 1080, hours: 1, end: 1140, on: true, next: { date: '2026-11-25', opensAt: at('2026-11-18T00:00:00Z') }, signed: false });
   r = await ask(t, phone, 'weekly', { venue: 'queenspark', day: 'wed', start: 1080, hours: 2 });
   r = await ask(t, phone, 'weekly', { venue: 'kelvingrove', day: 'wed', start: 1080, hours: 1 });
   r = await ask(t, phone, 'weekly', { venue: 'kelvingrove', day: 'wed', start: 1200, hours: 1 });            // several a day
@@ -156,7 +156,7 @@ test('weekly bookings from the app: added at any venue, changed, switched off an
   // Changed: the whole entry is read again (a venue changed without a type takes the venue's own).
   r = await ask(t, phone, 'weekly/change', { id: g.id, venue: 'scotstoun', type: 'outdoor', day: 'thu', start: 600 });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body.state.weekly.find(w => w.id === g.id), { id: g.id, venue: 'scotstoun', type: 'outdoor', day: 'thu', start: 600, hours: 1, end: 660, on: true, next: { date: '2026-11-26', opensAt: at('2026-11-19T00:00:00Z') } });
+  assert.deepEqual(r.body.state.weekly.find(w => w.id === g.id), { id: g.id, venue: 'scotstoun', type: 'outdoor', day: 'thu', start: 600, hours: 1, end: 660, on: true, next: { date: '2026-11-26', opensAt: at('2026-11-19T00:00:00Z') }, signed: false });
   assert.deepEqual(await ask(t, phone, 'weekly/change', { id: g.id, venue: 'gorbals', type: 'outdoor' }), refused(400, 'Gorbals has indoor courts only.'));
   assert.deepEqual(await ask(t, phone, 'weekly/change', { id: 'ffffffff', start: 600 }), refused(409, 'That weekly booking is no longer on your list.'));
   // Off and on.
@@ -188,10 +188,10 @@ test('one-offs at any venue, from the app; Telegram\'s /set and /off stay Kelvin
   const t = makeBot();
   const phone = await linkPhone(t);
   let r = await ask(t, phone, 'once', { venue: 'gorbals', date: '2026-11-25', start: 1080, hours: 1 });
-  assert.deepEqual(r.body.state.once, [{ id: 'gorbals/2026-11-25@18:00', venue: 'gorbals', type: 'indoor', date: '2026-11-25', start: 1080, hours: 1, end: 1140, opensAt: at('2026-11-18T00:00:00Z'), open: false }]);
+  assert.deepEqual(r.body.state.once, [{ id: 'gorbals/2026-11-25@18:00', venue: 'gorbals', type: 'indoor', date: '2026-11-25', start: 1080, hours: 1, end: 1140, opensAt: at('2026-11-18T00:00:00Z'), open: false, signed: false }]);
   assert.deepEqual(await ask(t, phone, 'once', { venue: 'gorbals', date: '2026-11-25', start: 1080, hours: 2 }), refused(400, 'Glasgow Club courts are booked an hour at a time.'));
   assert.deepEqual(t.store.load().once, []);                                 // Kelvingrove's list, as an older bot reads it, has none of it
-  assert.deepEqual(t.store.load().onceAway, [{ date: '2026-11-25', start: 1080, hours: 1, venue: 'gorbals', type: 'indoor' }]);
+  assert.deepEqual(t.store.load().onceAway, [{ date: '2026-11-25', start: 1080, hours: 1, venue: 'gorbals', type: 'indoor', at: t.clock.t }]);
   r = await ask(t, phone, 'weekly', { venue: 'gorbals', day: 'thu', start: 1080, hours: 1 });
   await t.app.handleUpdate(say(OWNER, '/set thu 19:00 2h'));
   await t.app.handleUpdate(say(OWNER, '/plan'));
@@ -217,7 +217,7 @@ test('the jobs handed to the PC: Kelvingrove\'s as always; another park with its
   assert.deepEqual(got.jobs, [
     { id: '2026-11-25@18:00', date: '2026-11-25', start: 1080, end: 1140, hours: 1, releaseAt: at('2026-11-18T22:00:00Z') },
     { id: 'queenspark/2026-11-25@18:00', date: '2026-11-25', start: 1080, end: 1200, hours: 2, releaseAt: at('2026-11-18T22:00:00Z'), venue: 'queenspark', type: 'outdoor', address: 'QueensParkTennisCourtsGlasgow' },
-    { id: 'scotstoun/2026-11-26@10:00', date: '2026-11-26', start: 600, end: 660, hours: 1, releaseAt: at('2026-11-19T00:00:00Z'), venue: 'scotstoun', type: 'outdoor', centre: 'o' },
+    { id: 'scotstoun/2026-11-26@10:00', date: '2026-11-26', start: 600, end: 660, hours: 1, releaseAt: at('2026-11-19T00:00:00Z'), venue: 'scotstoun', type: 'outdoor', centre: 'o', from: 'weekly' },     // unsigned: no auth
   ]);
   // An older PC's booker would book any of them at Kelvingrove: it is handed Kelvingrove's alone, and the others have a result saying why.
   const old = makeBot('2026-11-18T21:55:00Z', { state: { weekly } });
@@ -317,8 +317,20 @@ test('automatic payments: the sealed code goes to the PC once and is not kept he
   assert.deepEqual(Object.keys(off), ['ok', 'autoOff']);
   await ping({ auto: false, autoDone: { id: off.autoOff.id, ok: true } });
   assert.deepEqual([state(t, phone).card.auto, state(t, phone).card.autoAsked], [false, null]);
-  assert.equal((await ask(t, phone, 'card/auto/off')).status, 200);             // off already: nothing to do
-  assert.deepEqual(await ping({ auto: false }), { ok: true });
+  // Off again, while the PC says it keeps no code: still sent (2.10.1), since what the PC last
+  // said may be out of date, and off twice is off.
+  assert.equal((await ask(t, phone, 'card/auto/off')).status, 200);
+  const again = await ping({ auto: false });
+  assert.deepEqual(Object.keys(again), ['ok', 'autoOff']);
+  await ping({ auto: false, autoDone: { id: again.autoOff.id, ok: true } });
+  assert.deepEqual([state(t, phone).card.auto, state(t, phone).card.autoAsked], [false, null]);
+  // An "on" not collected yet, then off: the on is dropped unseen, and off still goes.
+  await ask(t, phone, 'card/auto', { sealed: sealedOf() });
+  await ask(t, phone, 'card/auto/off');
+  assert.equal(t.app.sealedHeld(), 0);
+  const only = await ping({ auto: false });
+  assert.deepEqual(Object.keys(only), ['ok', 'autoOff']);
+  await ping({ auto: false, autoDone: { id: only.autoOff.id, ok: true } });
   // The PC's no, in its words.
   r = await ask(t, phone, 'card/auto', { sealed: sealedOf() });
   const on2 = await ping({ auto: false });
@@ -337,4 +349,149 @@ test('automatic payments: the sealed code goes to the PC once and is not kept he
   const keyless = makeBot();
   const kp = await linkPhone(keyless);
   assert.deepEqual(await ask(keyless, kp, 'card/auto', { sealed: sealedOf() }), refused(409, 'Your PC has not given me its card key yet. It does with every ping while it is awake: wake it, or wait a minute, then try again.'));
+});
+
+// ---------- signed bookings (2.10.1) ----------
+
+// The app's signature for a booking, as docs/app-api.md gives it: the first 16 bytes of an
+// HMAC-SHA-512 made with the card's pay key, in lowercase hex.
+const PAY = Buffer.alloc(32, 0x5a);
+const sign = msg => crypto.createHmac('sha512', PAY).update(msg, 'utf8').digest().subarray(0, 16).toString('hex');
+
+test('signatures: the worked example of docs/app-api.md', () => {
+  assert.equal(PAY.toString('base64'), 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=');
+  assert.equal(sign('court-broker/weekly/v1|gorbals|indoor|wed|1080|1'), 'c019d5fd3bab087b5a29d9b76c6c69a7');
+  assert.equal(sign('court-broker/once/v1|gorbals|indoor|2026-11-25|1080|1'), '7e8fea3af1d796d60bf594483ef7a054');
+});
+
+test('signed bookings: kept with the entry and handed to the PC with Glasgow Club\'s jobs; shown only as signed, never logged; a change that alters what was signed drops it', async () => {
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  const tag = sign('court-broker/weekly/v1|gorbals|indoor|wed|1080|1');
+  let r = await ask(t, phone, 'weekly', { venue: 'gorbals', day: 'wed', start: 1080, hours: 1, auth: tag });
+  assert.equal(r.status, 200);
+  const g = r.body.state.weekly[0];
+  assert.equal(g.signed, true);
+  assert.ok(!JSON.stringify(r.body).includes(tag));                              // never in what the app is shown
+  assert.equal(t.app.state.weekly[0].auth, tag);
+  assert.equal(t.store.load().weekly[0].auth, tag);                              // kept, to hand to the PC
+  // Only 32 lowercase hex characters will do.
+  for (const auth of ['C019D5FD3BAB087B5A29D9B76C6C69A7', tag.slice(0, 31), `${tag}0`, 12, {}]) {
+    assert.deepEqual(await ask(t, phone, 'weekly', { venue: 'gorbals', day: 'thu', start: 1080, hours: 1, auth }), refused(400, A.WHY.auth));
+  }
+  // Switched off and on, or changed with nothing it signs changed: still signed.
+  await ask(t, phone, 'weekly/on', { id: g.id, on: false });
+  r = await ask(t, phone, 'weekly/on', { id: g.id, on: true });
+  assert.equal(r.body.state.weekly[0].signed, true);
+  r = await ask(t, phone, 'weekly/change', { id: g.id, day: 'wed' });
+  assert.equal(r.body.state.weekly[0].signed, true);
+  // Changed in what it signs, with no signature: no longer signed. With one: signed again.
+  r = await ask(t, phone, 'weekly/change', { id: g.id, start: 1140 });
+  assert.equal(r.body.state.weekly[0].signed, false);
+  assert.equal(t.app.state.weekly[0].auth, undefined);
+  const tag2 = sign('court-broker/weekly/v1|gorbals|indoor|wed|1140|1');
+  r = await ask(t, phone, 'weekly/change', { id: g.id, start: 1080, auth: tag });
+  assert.equal(r.body.state.weekly[0].signed, true);
+  // A one-off, signed.
+  const onceTag = sign('court-broker/once/v1|gorbals|indoor|2026-11-26|1080|1');
+  r = await ask(t, phone, 'once', { venue: 'gorbals', date: '2026-11-26', start: 1080, hours: 1, auth: onceTag });
+  assert.equal(r.body.state.once.find(o => o.id === 'gorbals/2026-11-26@18:00').signed, true);
+  // Signed afresh, all at once (a new card): weekly bookings by their id, one-offs by theirs.
+  r = await ask(t, phone, 'weekly/auth', { items: [{ id: g.id, auth: tag2 }, { id: 'gorbals/2026-11-26@18:00', auth: tag }] });
+  assert.equal(r.status, 200);
+  assert.deepEqual([t.app.state.weekly[0].auth, t.app.state.onceAway[0].auth], [tag2, tag]);
+  // All or nothing: one that is gone refuses the lot, and nothing changes.
+  assert.deepEqual(await ask(t, phone, 'weekly/auth', { items: [{ id: g.id, auth: tag }, { id: 'ffffffff', auth: tag }] }),
+    refused(409, 'That weekly booking is no longer on your list (ffffffff). Nothing was changed.'));
+  assert.equal(t.app.state.weekly[0].auth, tag2);
+  for (const body of [{}, { items: [] }, { items: [{ id: g.id }] }, { items: [{ id: 'not an id', auth: tag }] }, { items: [{ id: g.id, auth: tag }, { id: g.id, auth: tag }] },
+    { items: Array.from({ length: 31 }, (_, i) => ({ id: `0000000${(i % 10)}`, auth: tag })) }]) {
+    assert.deepEqual(await ask(t, phone, 'weekly/auth', body), refused(400, A.WHY.authItems), JSON.stringify(body).slice(0, 80));
+  }
+  // Never in the log, or in Telegram.
+  for (const s of [tag, tag2, onceTag]) {
+    assert.ok(!t.logs.join('\n').includes(s));
+    assert.ok(!JSON.stringify(t.tg.calls).includes(s));
+  }
+});
+
+test('the PC is handed each Glasgow Club job\'s signature and where it comes from; a one-off added after its day opened is open, one that waited for its midnight is not tried after it', async () => {
+  const wTag = sign('court-broker/weekly/v1|gorbals|indoor|wed|1080|1');
+  const oTag = sign('court-broker/once/v1|scotstoun|outdoor|2026-11-26|600|1');
+  const weekly = [{ id: 'aaaaaaa3', venue: 'gorbals', day: 'wed', start: 1080, hours: 1, auth: wTag }, { id: 'aaaaaaa1', venue: 'kelvingrove', day: 'wed', start: 1080, hours: 1, auth: wTag }];
+  const onceAway = [{ date: '2026-11-26', start: 600, hours: 1, venue: 'scotstoun', type: 'outdoor', auth: oTag, at: at('2026-11-15T09:00:00Z') }];
+  // Tuesday 21:55: Gorbals's Wednesday 25 Nov at the coming midnight, signed as a weekly booking.
+  const t = makeBot(`${TUE}T21:55:00Z`, { state: { weekly, onceAway } });
+  assert.deepEqual(t.app.jobsForAgent(HOME, { run: true, venues: true }).jobs, [
+    { id: 'gorbals/2026-11-25@18:00', date: '2026-11-25', start: 1080, end: 1140, hours: 1, releaseAt: at('2026-11-18T00:00:00Z'), venue: 'gorbals', type: 'indoor', centre: 'g', from: 'weekly', auth: wTag },
+  ]);
+  // Wednesday 21:55: Kelvingrove's job as always (no signature handed for a park); Scotstoun's one-off at the coming midnight, signed as a one-off.
+  t.clock.t = at('2026-11-18T21:55:00Z');
+  assert.deepEqual(t.app.jobsForAgent(HOME, { run: true, venues: true }).jobs, [
+    { id: '2026-11-25@18:00', date: '2026-11-25', start: 1080, end: 1140, hours: 1, releaseAt: at('2026-11-18T22:00:00Z') },
+    { id: 'scotstoun/2026-11-26@10:00', date: '2026-11-26', start: 600, end: 660, hours: 1, releaseAt: at('2026-11-19T00:00:00Z'), venue: 'scotstoun', type: 'outdoor', centre: 'o', from: 'once', auth: oTag },
+  ]);
+  // Its midnight gone by (and its half hour): it was that release's to book, so it is not tried again later.
+  t.clock.t = at('2026-11-19T21:55:00Z');
+  assert.deepEqual(t.app.jobsForAgent(HOME, { run: true, venues: true }).jobs, []);
+  assert.equal(t.app.appState((await linkPhone(t)).device).state.open.length, 0);
+  // Added after its day opened: open, booked at the next run.
+  const late = makeBot('2026-11-19T12:00:00Z', { state: { onceAway: [{ ...onceAway[0], at: at('2026-11-19T11:00:00Z') }] } });
+  late.clock.t = at('2026-11-19T21:55:00Z');
+  assert.deepEqual(late.app.jobsForAgent(HOME, { run: true, venues: true }).jobs, [
+    { id: 'scotstoun/2026-11-26@10:00', date: '2026-11-26', start: 600, end: 660, hours: 1, releaseAt: at('2026-11-19T00:00:00Z'), venue: 'scotstoun', type: 'outdoor', centre: 'o', from: 'once', auth: oTag, open: true },
+  ]);
+  // Unsigned: handed without a signature (your PC then takes no court for it).
+  const bare = makeBot(`${TUE}T21:55:00Z`, { state: { weekly: [{ id: 'aaaaaaa3', venue: 'gorbals', day: 'wed', start: 1080, hours: 1 }] } });
+  assert.deepEqual(bare.app.jobsForAgent(HOME, { run: true, venues: true }).jobs.map(j => [j.id, j.from, j.auth]), [['gorbals/2026-11-25@18:00', 'weekly', undefined]]);
+});
+
+test('settings kept before 2.10 are copied once, as they were, before 2.10 first saves them; settings kept by 2.10 are not', () => {
+  const os = require('os');
+  const fs = require('fs');
+  const path = require('path');
+  const { createStore } = require('../lib/store');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-pre210-'));
+  const old = { v: 4, owner: OWNER, plan: { thu: { start: 1140, hours: 2 } }, once: [{ date: '2026-11-27', start: 600, hours: 1 }], order: [3, 4, 5, 2, 1, 6] };
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(old));
+  const start = () => {
+    const logs = [];
+    const clock = { t: at(NOON) };
+    const app = createApp({ now: () => clock.t, tg: fakeTelegram(clock), store: createStore(dir, { env: {} }), pictures: PICTURES, linked: true, log: l => logs.push(l),
+      glasgow: { day: async () => ({ at: clock.t, slots: [], listed: 0 }), peek: () => null, health: () => null }, push: async () => {}, wake: async () => 3 });
+    return { app, logs };
+  };
+  const first = start();
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'state.pre-2.10.json'), 'utf8')), old);
+  assert.ok(first.logs.some(l => l === 'The settings as they were before 2.10 are kept beside them, in state.pre-2.10.json.'));
+  // Saved in 2.10's shape, then started again: the copy stays as it was, and is not made again.
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ ...old, weekly: [] }));
+  const second = start();
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'state.pre-2.10.json'), 'utf8')), old);
+  assert.ok(!second.logs.some(l => /before 2\.10/.test(l)));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('an open one-off goes to the PC with its own signature alone, even when a signed weekly booking is for the same slot', () => {
+  const wTag = sign('court-broker/weekly/v1|gorbals|indoor|fri|1080|1');
+  const oTag = sign('court-broker/once/v1|gorbals|indoor|2026-11-20|1080|1');
+  const weekly = [{ id: 'aaaaaaa3', venue: 'gorbals', day: 'fri', start: 1080, hours: 1, auth: wTag }];
+  const added = at('2026-11-17T09:00:00Z');                                       // after Friday 20 Nov opened (Fri 13 Nov 00:00)
+  const t = makeBot(`${TUE}T21:55:00Z`, { state: { weekly, onceAway: [{ date: '2026-11-20', start: 1080, hours: 1, venue: 'gorbals', type: 'indoor', at: added, auth: oTag }] } });
+  assert.deepEqual(t.app.jobsForAgent(HOME, { run: true, venues: true }).jobs.map(j => [j.id, j.from, j.auth, j.open]), [['gorbals/2026-11-20@18:00', 'once', oTag, true]]);
+  // The one-off unsigned: handed unsigned (your PC takes no court for it), never with the weekly booking's.
+  const u = makeBot(`${TUE}T21:55:00Z`, { state: { weekly, onceAway: [{ date: '2026-11-20', start: 1080, hours: 1, venue: 'gorbals', type: 'indoor', at: added }] } });
+  assert.deepEqual(u.app.jobsForAgent(HOME, { run: true, venues: true }).jobs.map(j => [j.id, j.from, j.auth, j.open]), [['gorbals/2026-11-20@18:00', 'once', undefined, true]]);
+});
+
+test('the one-line backup leaves the signatures out, as it does the phones', async () => {
+  const { backupLine } = require('../app');
+  const tag = sign('court-broker/weekly/v1|gorbals|indoor|wed|1080|1');
+  const t = makeBot(NOON, { state: { weekly: [{ id: 'aaaaaaa3', venue: 'gorbals', day: 'wed', start: 1080, hours: 1, auth: tag }],
+    onceAway: [{ date: '2026-11-26', start: 1080, hours: 1, venue: 'gorbals', type: 'indoor', auth: tag, at: at(NOON) }], once: [{ date: '2026-11-27', start: 600, hours: 1, auth: tag }] } });
+  const line = backupLine(t.app.state);
+  assert.ok(!line.includes(tag));
+  assert.deepEqual(JSON.parse(line).weekly, [{ id: 'aaaaaaa3', venue: 'gorbals', type: 'indoor', day: 'wed', start: 1080, hours: 1, on: true }]);
+  await t.app.handleUpdate(say(OWNER, '/backup'));
+  assert.ok(!JSON.stringify(t.tg.calls).includes(tag));
 });

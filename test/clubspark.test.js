@@ -752,7 +752,7 @@ test('scheduling at any park (2.10): a one-off may name another park; the weekly
   assert.equal(r.status, 200);
   assert.equal((await ask(t, phone, 'once', { venue: 'kelvingrove', date: '2026-11-27', start: 1140, hours: 1 })).status, 200);
   assert.deepEqual(t.app.state.once, [{ date: '2026-11-27', start: 1140, hours: 1 }]);
-  assert.deepEqual(t.app.state.onceAway, [{ date: '2026-11-27', start: 1140, hours: 1, venue: 'queenspark', type: 'outdoor' }]);
+  assert.deepEqual(t.app.state.onceAway, [{ date: '2026-11-27', start: 1140, hours: 1, venue: 'queenspark', type: 'outdoor', at: t.clock.t }]);     // with when it was added (2.10.1)
   assert.deepEqual(r.body.state.once.map(o => [o.id, o.venue]), [['queenspark/2026-11-27@19:00', 'queenspark']]);
   // The same park, date and start again: already there.
   assert.equal((await ask(t, phone, 'once', { venue: 'queenspark', date: '2026-11-27', start: 1140, hours: 2 })).body.already, true);

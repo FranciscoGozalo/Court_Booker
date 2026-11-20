@@ -19,7 +19,8 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.10.0 (`api: 3`). `api: 3` adds weekly bookings and one-off dates at every
+This file describes the API as built in version 2.10.1 (`api: 3`; 2.10.1 added signed bookings: `auth` on the requests that
+save one, `signed` in the state, and `POST /app/weekly/auth`, see "Signed bookings"). `api: 3` adds weekly bookings and one-off dates at every
 venue (`state.weekly`, `POST /app/weekly` and its change, on and remove, a `venue` and `type` on `POST /app/once`), Glasgow
 Club's courts booked and paid by your PC at midnight (`venues[].release`, `.paid` and `.allowance`; `price` and `paid` on
 results), and the switch for automatic payments (`card.auto`, `POST /app/card/auto` and `/off`): see "Weekly bookings at
@@ -96,7 +97,7 @@ week's 7 sessions and 14 hours, one card on its way to the PC at a time, and one
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.10.0", api: 3 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.10.1", api: 3 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -136,7 +137,7 @@ current etag the answer waits up to `wait` seconds for a change and then, if the
 
 ```
 state = {
-  now, bot: "2.10.0",
+  now, bot: "2.10.1",
   venue: { name: "Kelvingrove Park", short: "KP", first: 540, last: 1260, lengths: [1, 2],
            courts: [1,2,3,4,5,6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
   venues: [ { key, name, club: "clubspark" | "glasgow", types: ["outdoor"] | ["indoor"] | ["indoor", "outdoor"],
@@ -155,8 +156,8 @@ state = {
   later:   [ the same, for the releases after it (up to 3) ],
   open:    [ { id, date, start, end } ],             // one-off dates already open, which the PC books at its next run
   plan:    [ { day: "mon".."sun", start, hours } ],  // Kelvingrove's weekly bookings, one a day (api 2's view of weekly)
-  weekly:  [ { id, venue, type, day, start, hours, end, on, next } ],     // weekly bookings at every venue (api 3)
-  once:    [ { id, venue, type, date, start, hours, end, opensAt, open } ],   // one-off dates still ahead, at every venue
+  weekly:  [ { id, venue, type, day, start, hours, end, on, next, signed } ],     // weekly bookings at every venue (api 3)
+  once:    [ { id, venue, type, date, start, hours, end, opensAt, open, signed } ],   // one-off dates still ahead, at every venue
   order:   [3, 6, 1, 2, 4, 5],
   results: [ { id, venue, status: "booked" | "none" | "failed", date, start, end, court, gate, why, at, past, type, price, paid } ],   // soonest upcoming first, then past ones newest first
   run:     null | { stage: "started" | "ready" | "trouble", at, why },    // tonight's run, as the PC reports it
@@ -349,12 +350,14 @@ ids made from its day and start, the same each time). `venue`: a `venues` key. `
 Club). `end`: `start` plus the hours. `on`: an entry switched off is kept, and never booked.
 `next`: `{ date, opensAt }`, the date it is booked for next and when that day opens (ms), or null
 when it is off. One venue, day and start once; several entries on a day are fine. The parks' count
-toward the weekly allowance; Glasgow Club's do not.
+toward the weekly allowance; Glasgow Club's do not. `signed` (2.10.1): whether the bot keeps the
+app's signature for it (see "Signed bookings"); never the signature itself.
 
 **`once`**: the one-off dates whose start is still ahead (one that has started is left out, though
 the bot keeps it until midnight), at every venue (api 3), by date, start and venue. `id` as above;
 `venue` and `type` as in `weekly` (`"kelvingrove"`, `"outdoor"` for Kelvingrove's); `end` is `start`
 plus the hours; `opensAt` is when that day opens for booking at that venue; `open` is whether it has.
+`signed` (2.10.1) as in `weekly`.
 
 **`results`**: what the PC reported, kept for 60 days. First those dated today or later, soonest
 first; then the past ones, newest first. `past`: the date is before today (UK).
@@ -527,14 +530,15 @@ is fine, and things as they stand refuse it (the same request may work later).
 
 | Request | The same as | Body |
 | --- | --- | --- |
-| `POST /app/once` | `/book` | `{ date, start, hours }`; `already: true` in the answer if it was there |
+| `POST /app/once` | `/book` | `{ venue?, type?, date, start, hours, auth? }`; `already: true` in the answer if it was there |
 | `POST /app/once/remove` | `/cancel` | `{ date, start }` |
 | `POST /app/plan` | `/set` | `{ day, start, hours }` (Kelvingrove's) |
 | `POST /app/plan/remove` | `/off` | `{ day }` (Kelvingrove's) |
-| `POST /app/weekly` | (app only, api 3) | `{ venue, type, day, start, hours, on }`: a weekly booking at any venue |
-| `POST /app/weekly/change` | (app only, api 3) | `{ id, venue?, type?, day?, start?, hours? }` |
+| `POST /app/weekly` | (app only, api 3) | `{ venue, type, day, start, hours, on, auth? }`: a weekly booking at any venue |
+| `POST /app/weekly/change` | (app only, api 3) | `{ id, venue?, type?, day?, start?, hours?, auth? }` |
 | `POST /app/weekly/on` | (app only, api 3) | `{ id, on }` |
 | `POST /app/weekly/remove` | (app only, api 3) | `{ id }` |
+| `POST /app/weekly/auth` | (app only, 2.10.1) | `{ items: [{ id, auth }] }`: signatures made afresh, for weekly bookings and one-off dates |
 | `POST /app/order` | `/order` | `{ order: [six courts, each once] }` |
 | `POST /app/pause` | `/pause`, `/resume` | `{ paused }` |
 | `POST /app/pc/sleep` | Sleep my PC | `{}` |
@@ -688,7 +692,7 @@ without "It did not work: "):
 
 ### Each request, and every `why` it can give
 
-**`POST /app/once`** `{ venue, type, date, start, hours }`. `hours` is 1 or 2. As `/book`, any start on the hour
+**`POST /app/once`** `{ venue, type, date, start, hours, auth }`. `hours` is 1 or 2. As `/book`, any start on the hour
 or half hour that ends by midnight is taken; `venue.first` and `venue.last` are the hours to offer.
 If that date and start are on the list already, nothing changes (not the hours either) and the
 answer has `already: true`. The list holds 60 one-off dates at most, however they were asked for
@@ -700,7 +704,11 @@ Club's are an hour long, on the hour (Scotstoun's outdoor courts from 08:00 to 1
 would pass the week's allowance (see `allowance`; the parks only) is refused too, in the words
 `/book` and the Add button use.
 
+`auth` (2.10.1, optional): the app's signature for it (see "Signed bookings"), kept with it. Sent
+again with a one-off already on the list, it takes the place of the one that had.
+
 - 400 "A one-off booking needs a date (YYYY-MM-DD), a start in minutes after midnight, and hours (1 or 2)."
+- 400 "auth, when sent, must be the 32 lowercase hex characters the app makes with the card's pay key."
 - 400 "There is no such venue: send one of the keys in state.venues."
 - 400 "Gorbals has indoor courts only." (or "<Park> has outdoor courts only.")
 - 400 "Scotstoun has indoor and outdoor courts: send type, indoor or outdoor."
@@ -733,18 +741,21 @@ to a week whose release for that day has gone by.
 **`POST /app/plan/remove`** `{ day }`. `day` may be `"all"`, as `/off all`. Kelvingrove's entries that
 day (or every day) go; the other venues' stay. A day that was not set is no error.
 
-**`POST /app/weekly`** `{ venue, type, day, start, hours, on }` (api 3): a weekly booking at any venue.
-`type` as for `POST /app/once`; `on` true when left out. The answer's `state.weekly` has it, with its id.
+**`POST /app/weekly`** `{ venue, type, day, start, hours, on, auth }` (api 3): a weekly booking at any venue.
+`type` as for `POST /app/once`; `on` true when left out; `auth` (2.10.1, optional) its signature. The
+answer's `state.weekly` has it, with its id.
 
 - 400 "A weekly booking needs a venue, a day (mon to sun), a start in minutes after midnight, and hours (1 or 2)."
-- 400 the venue, type and slot sentences of `POST /app/once`
+- 400 the venue, type, slot and `auth` sentences of `POST /app/once`
 - 409 "There is already a weekly booking at Gorbals on Wednesdays at 18:00." (that venue, day and time)
 - 409 "Your list already has 30 weekly bookings, which is as many as I keep. Remove one first."
 - 409 "That would be 8 sessions in the week of Mon 23 Nov; the limit is 7." (or 14 hours; the parks only)
 
-**`POST /app/weekly/change`** `{ id, venue?, type?, day?, start?, hours? }`: the entry as it will be is
+**`POST /app/weekly/change`** `{ id, venue?, type?, day?, start?, hours?, auth? }`: the entry as it will be is
 read whole, as a new one is (a venue changed without a type takes that venue's own, or must say
-which), and checked against the others and the allowance; it keeps its id and whether it is on.
+which), and checked against the others and the allowance; it keeps its id and whether it is on. Its
+signature (2.10.1): the `auth` sent; else the one it had, as long as its venue, type, day, start and
+hours stay as they were; a change of any of them without a new `auth` leaves it unsigned.
 
 - 400 "To change or remove a weekly booking, send its id."
 - 400 any sentence of `POST /app/weekly` about the entry itself
@@ -760,6 +771,15 @@ which), and checked against the others and the allowance; it keeps its id and wh
 
 - 400 "To change or remove a weekly booking, send its id."
 - 409 "That weekly booking is no longer on your list."
+
+**`POST /app/weekly/auth`** `{ items: [{ id, auth }] }` (2.10.1): signatures made afresh (with a new
+card, or when automatic payments are switched on), one to 30 at a time: weekly bookings by their
+`id` (8 hex characters), one-off dates by theirs as `state.once` gives them (`"gorbals/2026-11-25@18:00"`;
+Kelvingrove's `"2026-11-25@18:00"`). All or nothing: one that is no longer on the list refuses the
+lot, and nothing changes.
+
+- 400 "To sign bookings, send items: [{ id, auth }], one to 30 of them, each a weekly booking's or a one-off date's id and its 32 hex characters." (also for an id twice)
+- 409 "That weekly booking is no longer on your list (<id>). Nothing was changed." (or "That one-off date ...")
 
 - 400 "To stop a weekly booking, send its day (mon to sun, or all)."
 
@@ -1042,8 +1062,26 @@ result says so: booked, with `court`, `price` and `paid: true`; or not, with `wh
 automatic payments off nothing is taken: the result is "failed", "automatic payments are off on your
 PC, so it did not take a court", `paid: false`. A court taken and then not paid for (a check that did
 not pass, a price over the cap) is taken out of the basket again; after a press nothing is taken out.
-Each booking is paid for once at most, whatever happens (a run that starts again pays nothing twice).
+Each booking is paid for once at most, whatever happens (a run that starts again pays nothing twice):
+since 2.10.1 by what it is (venue, court type, date, start and length), whatever id it is handed with.
 None of it counts toward the allowance.
+
+Since 2.10.1 your PC also takes no court for a Glasgow Club job:
+- that the app has not signed with the card your PC keeps ("this booking was not signed in the app
+  with your card: open it in the app and save it again"; see "Signed bookings");
+- more than half an hour after its day opened, by your PC's own clock ("it was 00:40 when your PC came
+  to it, more than half an hour after Glasgow Club opened the day at 00:00, so it took no court (you may
+  have booked it by hand meanwhile)"), or after it was asleep while it waited for 00:00 ("your PC was
+  asleep (or stood still) from 22:10 to 07:10 while it waited for 00:00, so it took no court");
+- while anything is in your basket (an earlier booking's court whose payment is not known, say: it is
+  left as it is); and a court it gives back is that booking's own line, nothing else in the basket.
+A payment page that comes back saying the payment did not go through after Pay was pressed is
+`paid: "maybe"`, with the page's words: whether money moved is for your banking app to say. What
+cannot be paid for at all (automatic payments off, unsigned, too late) is said as soon as the run
+starts, and the PC is not kept awake for it. A one-off at Glasgow Club is booked at its midnight; one
+added after its day opened is booked at the next run, before midnight (`open`), in a sign-in of its
+own; one that was on the list at its midnight is not tried again after it (by then you may have
+booked it by hand after hearing it was not booked).
 
 Around a night's Glasgow Club job your PC is left to it: Sleep is refused from 23:00 ("Your PC books
 Glasgow Club at 00:00, so it stays awake until then."), holds from 23:25 to 00:30 ("Your PC books
@@ -1086,8 +1124,37 @@ payments on again", "the security code does not read as one", "no card is kept o
 - 409 "Your new card has not reached your PC yet. Try again in a moment."
 - 409 "Your PC is paying for a court just now. Try again once that is over."
 
-**`POST /app/card/auto/off`** `{}`: turns them off: the PC deletes the code with its next ping. Off
-already, nothing is asked of the PC; an "on" that has not reached it yet is dropped, unseen.
+**`POST /app/card/auto/off`** `{}`: turns them off: the PC deletes the code with its next ping. Since
+2.10.1 this is asked of the PC every time, even when its last ping said it keeps no code (off twice
+is off); an "on" that has not reached it yet is dropped, unseen.
+
+### Signed bookings (2.10.1)
+
+Your PC pays automatically only for a Glasgow Club job whose booking the app signed with the card's
+pay key, which only the app and your PC know (it is sealed with the card; see "The sealed box"). The
+bot keeps each signature with its weekly booking or one-off date and hands it to the PC with the job
+(`auth`, and `from`: `"weekly"` or `"once"`), but cannot make one: so it cannot have your PC pay for
+anything you did not save in your app.
+
+- The signature: the first 16 bytes of HMAC-SHA-512, keyed with the pay key's 32 raw bytes (its
+  standard base64, decoded), over the UTF-8 words, as 32 lowercase hex characters.
+- The words: a weekly booking `court-broker/weekly/v1|<venue>|<type>|<day>|<start>|<hours>`; a one-off
+  date `court-broker/once/v1|<venue>|<type>|<date>|<start>|<hours>`. `venue` a `venues` key, `type`
+  `indoor` or `outdoor`, `day` `mon` to `sun`, `date` YYYY-MM-DD, `start` minutes after midnight and
+  `hours` a whole number, both written as plain numbers.
+- Worked example: pay key 32 bytes of 0x5a (`WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=`);
+  `court-broker/weekly/v1|gorbals|indoor|wed|1080|1` → `c019d5fd3bab087b5a29d9b76c6c69a7`;
+  `court-broker/once/v1|gorbals|indoor|2026-11-25|1080|1` → `7e8fea3af1d796d60bf594483ef7a054`.
+- The app sends it with `POST /app/weekly`, `/app/weekly/change` and `/app/once` (`auth`), and signs
+  everything afresh with `POST /app/weekly/auth` when the card changes (the signatures go with the old
+  pay key) or automatic payments are switched on. The state says `signed` for each; Kelvingrove's and
+  the other parks' are kept too, though nothing is paid there. The one-line `/backup` leaves them out, as it does the
+  linked phones: after a start from it, `signed` is false until the app signs again.
+- The PC checks it before it takes a court, with the pay key of the card it keeps, over the job's own
+  venue, type, start and hours, and the weekday of its date (`from: "weekly"`) or its date
+  (`from: "once"`). A job at its midnight goes with its weekly booking's signature when there is one,
+  else its one-off's; an `open` one-off with its own alone (a weekly signature names a weekday, not a
+  date), and the PC takes an open job only so.
 
 ## Notes and notifications
 
@@ -1137,8 +1204,15 @@ phone's push token: the phone stays linked, and gets notifications again once th
   `pc.cardKey` could read whatever the app sealed for its own key instead, the card and its pay key
   included, and could then order payments with them. So the app keeps the first key it used and
   asks before using another, and the owner can compare fingerprints with the PC (`node book.js
-  --card-key`). With the PC's real key, the bot can neither read the card nor order a payment: that
-  takes the pay key, which only the app and the PC have.
+  --card-key`). With the PC's real key, the bot can neither read the card nor order a payment of its
+  own: Pay takes a code sealed with the pay key, and an automatic payment a booking signed with it,
+  and only the app and the PC have that key.
+- With automatic payments on, your PC pays at midnight for the Glasgow Club bookings the bot hands it,
+  if the app signed them (2.10.1). A bot that is not what it should be can hand it only those: one
+  you have since switched off or removed, too (a signature stays good while the card's pay key does:
+  forget the card, or switch automatic payments off, to stop them all), at its midnight or, for a
+  one-off, once its day is open; each booking once at most, at most `GLASGOW_AUTO_PAY_MAX` (£30), and
+  within the PC's daily limit (`GLASGOW_PAY_PER_DAY`, 2). It can also keep one from the PC.
 - A bot that is not what it should be can still start holds, drop or delay what the app sends, or
   ask the PC to forget its card: nuisances, not payments.
 - A restart of the bot loses `pc.cardKey` and `card` until the PC's next ping (within a minute while
