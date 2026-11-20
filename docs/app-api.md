@@ -2,12 +2,18 @@
 
 What the iPhone app (the Court_Booker_App repository) asks of the bot. It sits on the same small
 HTTP server as the PC's endpoint (`lib/server.js`), under `/app/`. Everything the app can do, the
-owner can already do in Telegram: the API adds no new powers, only another way in. Each request is
-carried out by the function behind the Telegram command or button of the same name (`app.js`), so
-the checks and the words are the same.
+owner can already do in Telegram, with one exception: paying for a held court with the card your
+PC keeps (see "Paying from the app"), which only the app can ask for, because only the app has the
+card's security code. Each request is carried out by the function behind the Telegram command or
+button of the same name (`app.js`), so the checks and the words are the same.
 
-This file describes the API as built in version 2.8 (`api: 1`). The pure parts are in
-`lib/appapi.js`, the push sender in `lib/push.js`, and the checks in `test/appapi.test.js`.
+This file describes the API as built in version 2.9 (`api: 2`). `api: 2` adds the card and Pay:
+`pc.cardKey`, `card`, `hold.can.pay`, the hold stages `"paying"` and `"approve"`, `POST /app/card`,
+`POST /app/card/forget` and `what: "pay"` in `POST /app/hold/order`. Everything of `api: 1` is as it
+was, but for the words of a hold in the basket (they no longer say to pay on the phone: signing in
+to Glasgow Club on a phone does not show the basket your PC filled). The pure parts are in
+`lib/appapi.js`, the push sender in `lib/push.js`, and the checks in `test/appapi.test.js` and
+`test/pay.test.js`.
 
 Bodies are JSON, at most 4 KB. Instants (`at`, `seenAt`, `until`, `opensAt`…) are milliseconds since
 1970. `start` and `end` are minutes after midnight, UK time. Dates are `YYYY-MM-DD`, UK calendar dates.
@@ -59,12 +65,13 @@ for the whole of it (the connection is closed). That is about sending a request,
 for the answer: `GET /app/state` may wait its 25 seconds, and a look its 20.
 
 What the app cannot overdo (each is spelt out where it belongs below): 12 looks that need a fresh
-read in any minute, 60 one-off dates on the list, 4 waits open at once for one phone, and a hold
-only for a court that a look showed the app free in the last 15 minutes.
+read in any minute, 60 one-off dates on the list, 4 waits open at once for one phone, a hold
+only for a court that a look showed the app free in the last 15 minutes, one card on its way to the
+PC at a time, and one Pay for each hold.
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.8", api: 1 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.9", api: 2 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -104,13 +111,14 @@ current etag the answer waits up to `wait` seconds for a change and then, if the
 
 ```
 state = {
-  now, bot: "2.8",
+  now, bot: "2.9",
   venue: { name: "Kelvingrove Park", short: "KP", first: 540, last: 1260, lengths: [1, 2],
            courts: [1,2,3,4,5,6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
   paused: false,
   kept: "disk" | "variable" | "no",
   pc: { state: "awake" | "asleep" | "offline", linked, seenAt, line,      // line: the menu's own line about the PC, plain text
-        canWake, wakeWhy, canSleep, sleepWhy, sleepAsked, wokeAt },
+        canWake, wakeWhy, canSleep, sleepWhy, sleepAsked, wokeAt,
+        cardKey },                                                      // the PC's key for sealing a card (base64), or null
   release: null | { at, night, jobs: [ { id, date, start, end, from: "weekly" | "once" } ] },   // the next release that books something
   later:   [ the same, for the releases after it (up to 3) ],
   open:    [ { id, date, start, end } ],             // one-off dates already open, which the PC books at its next run
@@ -121,6 +129,7 @@ state = {
   run:     null | { stage: "started" | "ready" | "trouble", at, why },    // tonight's run, as the PC reports it
   indoor:  { linked, days: 9, quietUntil, holdNo,                         // holdNo: why no hold can start now (plain text), or null
              centres: [ { key: "g", name: "Gorbals", site }, { key: "s", name: "Scotstoun", site } ] },
+  card:    null | { brand, last4, expMonth, expYear, pending, forgetting, why },   // the card your PC keeps, for Pay
   hold:    null | hold,
   notes:   [ { id, at, kind: "booked" | "missed" | "warn" | "hold" | "info", title, body } ],   // newest first, the last 30
   devices: [ { id, name, at, seenAt, me } ],
@@ -129,7 +138,7 @@ state = {
 hold = { id, startedBy: "app" | "telegram", centre, centreName, date, start, end, court, courtName,
          stage, live, ended: null | "released" | "booked" | …, price, until, heardAt,
          title, lines: [ … ],                // the Telegram card's own words, without markup
-         can: { release, done },
+         can: { release, done, pay },
          links: { basket, site, sheet } }
 ```
 
@@ -166,6 +175,10 @@ when a day opens (22:00 unless `RELEASE_TIME` says otherwise) and `daysAhead` ho
 - `sleepAsked`: when sleep was asked for, while the PC has not collected the request yet (it has
   two minutes to; after that, or once collected, null). `wokeAt`: when the last wake-up was sent
   since the bot started, or null.
+- `cardKey`: your PC's key for sealing a card or a security code to it: standard base64 (44
+  characters) of a 32-byte X25519 public key, made once on the PC, whose secret half never leaves
+  it. As the PC's last ping gave it; null until a ping has, since the bot started (a PC whose
+  booker is older than 2.9 never does). See "Paying from the app".
 
 **`release`**: the next release that books something, or null (nothing asked for, or paused).
 `at`: the moment it opens. `night`: the date of that night. `jobs`: what it books, by start time;
@@ -210,6 +223,35 @@ Telegram's message, such as "ClubSpark did not load. Your PC is trying again (at
 - `centres[].site`: a web address: that centre's booking sheet on Glasgow Club's own site, for
   today. (For another day use `look.sheet`, or change the date in `activityDate=`.)
 
+**`card`**: the card your PC keeps for paying from the app, as the PC's pings say (the bot keeps
+none of it across a restart: the PC's next ping, within a minute while it is awake, says it again).
+Null when the PC keeps no card as far as the bot knows, none is on its way and there is nothing to say.
+
+- `brand`: "Visa", "Mastercard", "American Express", "Maestro", "Discover", "Diners Club", "JCB"
+  or "Card". `last4`: the last four digits, a string. `expMonth` (1 to 12) and `expYear` (four
+  digits). All four are null while the PC keeps no card (`pending` or `why` is then what there is).
+  Nothing more of the card ever reaches the bot.
+- `pending`: true from `POST /app/card` until the PC has said how that card went (it collects it
+  with its next ping, within seconds while it is awake, and answers on the ping after), or two
+  minutes have gone. The card shown meanwhile is the one kept before.
+- `forgetting`: true from `POST /app/card/forget` until the PC has said how that went.
+- `why`: why the last card (or forget) did not go through, or null. One of:
+  - "Your PC did not keep that card: <the PC's reason>." The PC's reasons: "the card number does
+    not pass the check every card number passes (a digit may be wrong)", "the card number should be
+    12 to 19 digits", "the card number is missing", "the expiry month should be 1 to 12", "the
+    expiry year should be four digits", "the card has expired", "the expiry is more than 20 years
+    away, which I take for a slip", "the name on the card should be at most 60 characters", "it
+    could not be opened with this PC's key (it was sealed for another key, or changed on the way)",
+    "it is not a sealed box (it does not read as base64)", "it is too short to be a sealed box",
+    "it is longer than a sealed box may be (1024 characters)", "Windows would not protect it, so it
+    was not kept".
+  - "Your PC could not forget its card: <the PC's reason>."
+  - "Your PC did not collect the card within two minutes, so I dropped it. Send it again while your PC is awake."
+  - "Your PC took the card but did not say whether it kept it. The card shown here is the one your PC says it keeps."
+  - "Your PC took the order to forget its card but did not say how that went. The card shown here is the one your PC says it keeps."
+
+  It stays until the next `POST /app/card` or `/app/card/forget`, or until the bot restarts.
+
 **`hold`**: the hold being followed, or the last one. It stays after it has ended, with how it
 ended, until another is started or the bot restarts (it is kept in memory only). One hold at a
 time, whoever started it.
@@ -219,7 +261,11 @@ time, whoever started it.
 - `centre`: `"g"` or `"s"`; `centreName`: "Gorbals" or "Scotstoun". `date`, `start`, `end`: the
   hour held (`end` is `start` + 60). `court`: its number; `courtName`: "Court 3".
 - `stage`: how far it has got: `"asked"` → `"signing-in"` → `"signed-in"` → `"adding"` → `"held"`
-  (in the basket). It only moves forwards, and stays where it was when the hold ends.
+  (in the basket) → `"paying"` (your PC took up Pay from the app: it is typing in the card and
+  pressing Pay, or waiting for the answer) → `"approve"` (your bank wants you to approve the
+  payment in your banking app; your PC waits up to five minutes). It only moves forwards, with one
+  exception: `"paying"` goes back to `"held"` when the PC stops before it has pressed Pay (nothing
+  was paid, and the court is in the basket as before). It stays where it was when the hold ends.
 - `live`: true while it is under way; the same as `ended === null`.
 - `ended`: null while under way, else how it ended:
   `"released"` (let go: asked for, or its time was up), `"booked"` (the PC saw it on the Bookings
@@ -230,14 +276,55 @@ time, whoever started it.
   PC collected it), `"nopickup"` (the PC did not collect it within 25 seconds), `"nostart"`
   (collected, then nothing for 90 seconds) and `"timeout"` (nothing more heard). After `timeout` or
   `nostart` the PC's own word may still replace it later.
-- `price`: such as `"£23.00"`, once it is in the basket; null before, or if it did not read as a
-  price. `until`: when the PC lets it go unpaid; null before it is in the basket.
+- `price`: such as `"£23.00"` (or `"£23"`), once it is in the basket: the amount on the payment
+  page's Pay button as the PC read it. Null before, or if it did not read as a price. `until`: when
+  the PC lets it go unpaid; null before it is in the basket. While it pays, `until` is when the PC
+  stops waiting for the payment's answer (it moves on the PC's word: up to six minutes after the
+  press, five after your bank asks for approval).
   `heardAt`: when the PC last said anything about it (at first, when it was asked for).
 - `title`: such as "Gorbals · Fri 20 Nov · 18:00–19:00 · Court 3". `lines`: what the card says
   under it, one sentence or more per line, in the words of Telegram's card for that moment.
 - `can.release`: Telegram would show Stop or Let it go. `can.done`: it would show I have paid
-  (only once the court is in the basket). Both are false once one has been asked, and once it is over.
-- `links.basket`: the basket on Glasgow Club's site. `links.site`: the site's front page.
+  (only once the court is in the basket). Both are false once one has been asked, once Pay has been
+  asked for (while the order is on its way and while the PC pays), and once it is over.
+- `can.pay`: `POST /app/hold/order` with `what: "pay"` and the right amount would be taken now:
+  the same check, so it is false exactly when that request would be refused (but for the amount),
+  and the refusal's sentence says why. Telegram has no Pay button.
+- `lines` while paying (the card's words, as they stand):
+  - in the basket, the PC able to pay: "Pay from the app: your PC pays £23.00 with the card it keeps
+    (Visa ending 4242), once you confirm it there." then "Or pay in the Chrome window on your PC,
+    then tap I have paid." and "Unpaid, your PC lets it go at 12:12." When it cannot: "Paying from
+    the app is not on for this court: <the PC's reason>." then "Pay in the Chrome window on your PC,
+    then tap I have paid." A PC with an older booker says nothing of paying, and neither line is there.
+  - Pay asked for: "In your basket: £23.00 to pay." and "Telling your PC to pay £23.00, as you asked
+    in the app…"; told, and no word from the PC for half a minute: "Your PC was told to pay and has
+    not said how it went. Before you pay any other way, look at the Chrome window on your PC, under
+    Bookings on Glasgow Club's site and in your banking app."
+  - `"paying"`: "Paying £23.00: your PC is typing in the card it keeps and pressing Pay…"; once
+    pressed: "Your PC pressed Pay £23.00; I heard so at 12:03. If your bank asks you to approve it,
+    do that in your banking app." and "Waiting for Glasgow Club's answer…"; or, when Chrome gave the
+    PC no answer to the press: "Your PC may have pressed Pay £23.00: <why>. I heard so at 12:03."
+    and what to do then. What the payment page says after the press may follow: "The payment page
+    says: “…”".
+  - `"approve"`: "Approve the payment in your banking app. Your bank wants you to approve £23.00 to
+    Glasgow Club before it pays." and "Your PC pressed Pay and is waiting for the answer until 12:09."
+  - back in the basket after Pay: "Your PC could not pay: <the PC's reason>. Pay was not pressed, so
+    nothing was paid." (it does not try again for this court), or "Not paid from the app: <why>.
+    Nothing was pressed, so you can ask again there." (the order never reached the PC).
+  - how it ended after a press (`ended` as before): "Booked and paid. Your PC pressed Pay, and the
+    court is on your Bookings page at Glasgow Club now; it was not before."; "Your PC pressed Pay,
+    but the payment did not go through: …" (with what the payment page said); "Your PC pressed
+    Pay, and then your bank asked for a code to be typed into the payment page. Your PC never types
+    or passes on such a code, so it stopped there: the payment was not finished." (`"failed"`);
+    "Your PC pressed Pay and your bank asked you to approve the payment, but no approval had come
+    when your PC stopped waiting, and I could not see the court as a new booking on your Bookings
+    page." (`"unsure"`); and for every ending that cannot know how the payment went (the Chrome
+    window closed, the PC asleep, its tool gone, nothing more heard): that Pay was pressed (or may
+    have been, or was ordered and never answered for), that whether the payment went through is not
+    known here, and to look under Bookings on Glasgow Club's site and in the banking app. After a
+    press nothing is ever taken out of the basket, and the PC is never told to let the court go.
+- `links.basket`: the basket on Glasgow Club's site (kept for `api: 1`; of no use on a phone, whose
+  basket is not the one your PC filled). `links.site`: the site's front page.
   `links.sheet`: that centre's sheet for the hold's date.
 
 **`notes`**: see the last section. **`devices`**: the linked phones. `at`: when each was linked;
@@ -262,7 +349,9 @@ is fine, and things as they stand refuse it (the same request may work later).
 | `POST /app/pc/wake` | Wake my PC | `{}` |
 | `POST /app/indoor/look` | free indoor courts for a day | `{ centre: "g" | "s", date, fresh }` → `{ ok: true, look }` |
 | `POST /app/hold` | Hold | `{ centre, date, start, court }` |
-| `POST /app/hold/order` | Let it go / I have paid | `{ id, what: "release" | "done" }` |
+| `POST /app/hold/order` | Let it go / I have paid; Pay (app only) | `{ id, what: "release" | "done" }`, or `{ id, what: "pay", amount, sealed }` |
+| `POST /app/card` | (app only) | `{ sealed }`: a card, sealed for `pc.cardKey` |
+| `POST /app/card/forget` | (app only) | `{}` |
 | `POST /app/push` | | `{ token }`: this phone's Expo push token, or null to stop |
 
 ```
@@ -384,22 +473,153 @@ whether that time is on offer at all, then this, then the guards.
   - "Your PC is not linked to me, and it is your PC that signs in and holds the court." (not over HTTP)
 
 **`POST /app/hold/order`** `{ id, what }`. `release` is Stop (before the basket) or Let it go;
-`done` is I have paid. It works on a hold started from either side, as Telegram's buttons do. The
+`done` is I have paid (`pay` is under "Paying from the app"). It works on a hold started from either side, as Telegram's buttons do. The
 PC hears of it within a few seconds; until then `can.release` and `can.done` are false and the
 hold's `lines` say what is being done. A `release` before the PC has collected the hold ends it
 there and then (`ended: "stopped"`). A `done` before the court is in the basket is refused and
 changes nothing, whether or not the PC has collected the hold yet: it never stops a hold.
 
-- 400 "To act on a hold, send its id and what to do: release or done."
+- 400 "To act on a hold, send its id and what to do: release, done or pay."
 - 409 "I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up."
 - 409 "That hold is over."
 - 409 "It is not in your basket yet." (`done` at any stage before `"held"`)
 - 409 "Already letting it go." or "Already checking."
+- 409 while your PC pays: "Your PC has been told to pay. Wait for its answer." / "Your PC is paying
+  for it. Wait for its answer." / "Your PC has pressed Pay. Wait for the answer." / "Your PC may have
+  pressed Pay. Wait for the answer."
 
 **`POST /app/push`** `{ token }`. An Expo push token (`ExponentPushToken[…]` or `ExpoPushToken[…]`),
 or null to stop. A token is kept for one phone only: given by a second, it moves to that one.
 
 - 400 "That is not an Expo push token. Send one, or null to stop notifications."
+
+## Paying from the app
+
+The card is typed into the app, sealed there for your PC's key, and kept on your PC. Pay sends the
+price the owner confirmed in the app and the card's security code, sealed the same way. The PC types
+the card and the code into Glasgow Club's payment page and presses Pay, once. The bot only passes
+sealed boxes on: it has no key to open them with. Telegram has no Pay button, since the security
+code only ever comes from the app; its card says "Pay from the app" where the app can pay.
+
+### The sealed box
+
+Both the card and the security code travel as a sealed box: standard base64 (the `+` `/` alphabet,
+with `=` padding, and nothing else: no spaces, no line breaks) of
+
+```
+ephemeral public key (32 bytes) ‖ nonce (24 bytes) ‖ nacl.box(utf8(JSON), nonce, pcPublicKey, ephemeralSecretKey)
+```
+
+`pcPublicKey` is `pc.cardKey`, decoded. The ephemeral key pair is made afresh for each box
+(`nacl.box.keyPair()`) and its secret half dropped once the box is made; the nonce is 24 random
+bytes. With tweetnacl 1.0.3:
+
+```js
+const eph = nacl.box.keyPair();
+const nonce = nacl.randomBytes(24);
+const box = nacl.box(new TextEncoder().encode(JSON.stringify(what)), nonce, fromBase64(state.pc.cardKey), eph.secretKey);
+const sealed = toBase64(Uint8Array.from([...eph.publicKey, ...nonce, ...box]));
+```
+
+A box is at most 1024 base64 characters, and at least 74 bytes once decoded. That, and that it is
+canonical base64, is all the bot checks; it passes on exactly what came. It never writes a sealed
+box to its log or to disk, and drops it once it is handed to the PC (or dropped unsent).
+
+- The card: `{ number, expMonth, expYear, name }`. `number`: a string of 12 to 19 digits (spaces and
+  dashes are ignored) that passes the Luhn check. `expMonth`: 1 to 12 (a number; "01" is taken too).
+  `expYear`: four digits (two are taken as 20YY). The card must not have expired (it is good to the
+  end of its month), and must expire within 20 years. `name`: the name on the card, up to 60
+  characters, or left out. There is no security code in it: the PC never keeps one.
+- The security code, for one payment: `{ cvc, id, amount }`. `cvc`: 3 or 4 digits, as a string.
+  `id`: the hold's `id`. `amount`: the amount the owner confirmed, exactly as in the order
+  (`"£23.00"`). The PC refuses a code sealed for another hold or another amount: a box kept by
+  anyone on the way is of no use for any other payment.
+
+The app should keep the first `pc.cardKey` it sealed for, and ask the owner before sealing for a
+different one. (The PC makes its key once, and a new one only if Windows can no longer unlock the
+old; its card must then be given again.) The owner can compare the two: `node book.js --card-key` on
+the PC prints the key and its fingerprint, the first 16 hex characters of the SHA-256 of the key's 32
+bytes in groups of four ("a1b2 c3d4 e5f6 0718"), which the app can show as well.
+
+### Each request, and every `why` it can give
+
+**`POST /app/card`** `{ sealed }`: a card for your PC to keep, in place of any card kept before.
+The answer is the state, with `card.pending` true. The card waits for the PC's next ping (within
+seconds while it is awake), two minutes at most; a newer card takes its place. The PC opens it,
+checks it, keeps it (protected by Windows for the user signed in there, in the booker's `vault`
+folder) and says how it went on the ping after: `card` then shows the card kept, or `card.why` why not.
+
+- 400 "To keep a card on your PC, send it sealed for your PC's card key: { sealed }."
+- 400 "That is not a sealed box I can pass on: it must be standard base64, at most 1024 characters, of a key, a nonce and the box."
+- 409 "Your PC has not given me its card key yet. It does with every ping while it is awake: wake it, or wait a minute, then try again."
+- 409 "Your PC is not awake, and it is your PC that keeps the card. Wake it and try again."
+- 409 "Your PC is paying for a court just now. Try again once that is over."
+
+**`POST /app/card/forget`** `{}`: your PC deletes the card it keeps, on its next ping, whenever that
+comes (`card.forgetting` until then). A card on its way that the PC has not collected yet is dropped
+at once, unseen by the PC; if the PC keeps no other card, that is all there is to do.
+
+- 409 "Your PC keeps no card." (the PC has said so, and nothing is on its way)
+- 409 "Your PC is paying for a court just now. Try again once that is over."
+
+**`POST /app/hold/order`** `{ id, what: "pay", amount, sealed }`: pay for the held court with the card
+your PC keeps. `amount`: the price the owner confirmed, which must be `hold.price` exactly. `sealed`:
+the security code, sealed as above. The answer is the state: the hold's lines say the PC is being
+told. The order waits for the PC's next note about the hold (one comes every few seconds), half a
+minute at most, and goes with the answer to it, once; the sealed code is not kept after that. The PC
+says `"paying"` before it types a key. If its next note is from the basket instead, the order did
+not reach it: nothing was pressed, and Pay may be asked for again. The checks come in this order:
+
+- 400 "To act on a hold, send its id and what to do: release, done or pay."
+- 400 "To pay, send the hold's id, what: "pay", the amount you confirmed (such as "£23.00") and the sealed security code."
+- 400 "That is not a sealed box I can pass on: it must be standard base64, at most 1024 characters, of a key, a nonce and the box."
+- 409 "I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up."
+- 409 "That hold is over."
+- 409 "Your PC is paying for it already." (a second Pay while it pays, or after the press)
+- 409 "Your PC has been told to pay for it already." (a second Pay while the order is on its way)
+- 409 "Your PC tried to pay for it once and could not, so it will not try again. Pay at your PC, or let it go."
+- 409 "It is not in your basket yet."
+- 409 "Already letting it go." or "Already checking."
+- 409 "Your PC is forgetting its card."
+- 409 "Your new card has not reached your PC yet. Try again in a moment."
+- 409 "There is no card on your PC. Add one in the app first."
+- 409 "Your PC cannot pay for this court: <the PC's reason>." The PC's reasons: "no card is kept on
+  this PC", "the card kept on this PC has expired", "this PC has no card key yet (the PC link makes
+  it when it starts)", "the payment page does not have the three card boxes I know", "that would be
+  more than 2 payments from this PC today (GLASGOW_PAY_PER_DAY)", "GLASGOW_PAY_PER_DAY in .env is 0,
+  so no payment is made from this PC", "BOT_URL in the .env file on your PC is not an https address,
+  and an order to pay is only taken from a bot reached over https", and the PC's own note of
+  payments made being unreadable.
+- 409 "Your PC has not said that it can pay for this court." (its booker is older than 2.9)
+- 409 "Your PC could not read the price, so it cannot pay for this court."
+- 409 "I have not heard from your PC for over a minute, so I am not asking it to pay."
+- 409 "Too little of the hold's time is left to pay for it from here. Pay at your PC, or let it go." (under 30 seconds of `until`)
+- 409 "The price is £23.00, not £25.00. Look at it again before you pay." (`amount` is not `hold.price`)
+
+### What the PC does
+
+1. It opens the code (sealed for this hold and this amount), unlocks the card it keeps, and checks
+   the payment page: one Pay button reading exactly "Pay " and the amount, and the payment
+   provider's three card boxes (card number, expiry, security code). If anything is not as it should
+   be it types nothing and says why: the hold stays `"held"`, and its lines say "Your PC could not pay: …".
+2. `"paying"`: it types the card and the code into the three boxes and reads each back, notes the
+   payment for its daily limit (`GLASGOW_PAY_PER_DAY` on the PC, two unless set), and presses Pay,
+   once. Stopped before the press, it goes back to `"held"`, unpaid.
+3. It waits for the answer. Your bank wanting your approval (its page, with no box to type in):
+   `"approve"`, and the PC waits five minutes for it. Your bank asking for a code to be typed in: the
+   PC stops there, and never types or passes on such a code (`"failed"`). The payment page coming back
+   with an error and its Pay button: `"failed"`, with what the page said. The payment page moving on:
+   the PC looks at the Bookings page, and calls it `"booked"` only if the court is listed there as new.
+   No answer in time: `"unsure"`.
+4. After the press nothing is taken out of the basket, and every ending says that Pay was pressed,
+   or may have been (Chrome gave the PC no answer to the press). The CVC is held in the PC's memory
+   for that one payment, never written down.
+
+None of this has met Glasgow Club's real payment page or a real bank's check. The PC tells your
+bank's approval page from its code page by the page's shape (a new frame, or a page off Glasgow
+Club's site, with or without a box to type in), and could read a real one wrongly either way: taken
+wrongly for a code page, the payment is left unfinished; wrongly for an approval page, the PC waits
+five minutes and then looks at the Bookings page.
 
 ## Notes and notifications
 
@@ -431,6 +651,7 @@ goes for every sentence in the state.
 | `warn` | 2 minutes before, the run has not started | "The booking run has not started" or "Your PC has not checked in" | the two lines of Telegram's warning |
 | `warn` | 8 minutes after, no result | "No word from your PC" | "It started on Tue 24 Nov · 16:00–18:00 but has not said how it went. Check ClubSpark, and book by hand if it is not there." |
 | `hold` | a hold ended, whoever started it | "Hold ended · Gorbals court 3", or "Booked · Gorbals court 3" | "Fri 20 Nov · 18:00–19:00. " and then the hold's last `lines` |
+| `hold` | after a restart of the bot, the PC says of a hold the bot no longer follows that Pay was pressed (or may have been), or that it could not pay: once while it goes on, once when it ends | "Paying · Gorbals court 3", "Not paid · Gorbals court 3", then "Booked · …" or "Hold ended · …" ("… · a court your PC was holding" when the PC's note does not say which) | "Fri 20 Nov · 18:00–19:00. I am not following this hold any more (I was restarted while your PC had it), so its card does not change. This is what your PC says: …" |
 | `info` | the PC started tonight's run | "Booking at 22:00" | "Tue 24 Nov · 16:00–18:00. Your PC is awake and signing in." |
 | `info` | the PC would not go to sleep | "Your PC stayed awake" | "It did not go to sleep: <reason>." |
 
@@ -442,6 +663,19 @@ phone's push token: the phone stays linked, and gets notifications again once th
 `POST /app/push` with a token. A phone that has been unlinked is sent nothing.
 
 ## Known limits
+
+- The bot passes on the card key that the PC's signed pings give it. A bot that lied about
+  `pc.cardKey` could read a card sealed for its own key: so the app keeps the first key it used and
+  asks before using another, and the owner can compare fingerprints with the PC (`node book.js
+  --card-key`). It could not use a security code for a payment other than the one it was sealed for.
+- A restart of the bot loses `pc.cardKey` and `card` until the PC's next ping (within a minute while
+  it is awake), and a card or a Pay waiting for the PC: send it again. While the PC pays, the bot
+  follows a restart as it can: in a message and a note (see above).
+- The card on the PC is protected by Windows for the user signed in there: a program running as that
+  user can unlock it. While the PC types it in, the card and the code pass through the browser
+  driver on the PC itself, as anything typed into Chrome does.
+- Pay is one payment for one hold, tried once. If the PC could not pay, the owner pays at the PC or
+  lets the court go; the app cannot try again for that hold.
 
 - A restart of the bot during a hold loses the bot's handle on it: `state.hold` is null
   afterwards, `hold/order` answers "I am no longer following that hold…", and the one-at-a-time

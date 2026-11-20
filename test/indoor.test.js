@@ -381,7 +381,7 @@ test('one start time: which courts are free, whether the next hour is too, and t
     '<b>Gorbals · Fri 20 Nov · 18:00–19:00</b>',
     'Free: courts 1, 3 and 4, as Glasgow Club showed it at 12:00.',
     'Free for the hour after as well, to 20:00: courts 3 and 4.',
-    '<b>Hold</b> one and your PC signs in to Glasgow Club, puts it in your basket and opens the payment page. Paying is yours: I never can.',
+    '<b>Hold</b> one and your PC signs in to Glasgow Club, puts it in your basket and opens the payment page. Then pay from the app (your PC pays with the card it keeps) or at your PC. I never see a card.',
     'Or book it yourself: open the sheet, press 18:00 under a free court, then Book and Continue to payment, and pay by card there. It asks you to sign in.',
     'The price shows before you pay. The court is yours once the payment has gone through.',
   ].join('\n'));
@@ -612,7 +612,7 @@ test('Kelvingrove is one tap further on, and everything about it is as before', 
   await t.app.handleUpdate(say(OWNER, '/help'));
   assert.match(t.tg.last().text, /\/gorbals {2}and {2}\/scotstoun/);
   await t.app.handleUpdate(say(OWNER, '/status'));
-  assert.match(t.tg.last().text, /\(version 2\.8\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
+  assert.match(t.tg.last().text, /\(version 2\.9\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
 });
 
 test('the look at Glasgow Club on start-up is said in the log, whichever way it goes, and /status has it', async () => {
