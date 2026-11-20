@@ -38,9 +38,10 @@ CORS headers: the API is meant for the phone app, not for a page in a browser.
   one use. Five wrong tries cancel it, and a new `/app` replaces it. `/app/pair` takes at most 10
   tries in any 10 minutes at a code that is waiting, whoever they come from (`429 { ok: false, why:
   "slow" }`; tries that are turned away are not counted). A try while no code is waiting is
-  answered `none` or `expired` at once and counts for nothing, so nobody can keep the owner out by
-  asking. When a phone is linked the bot says so in Telegram. `/app forget` in Telegram unlinks
-  every phone and cancels a code that is waiting.
+  answered `none` or `expired` at once and counts for nothing, so asking now and then keeps nobody
+  out. Someone who asks without stopping can still see the moment a code is waiting and spend it
+  (see "Known limits"). When a phone is linked the bot says so in Telegram. `/app forget` in
+  Telegram unlinks every phone and cancels a code that is waiting.
 
 Answers every request can get:
 
@@ -450,3 +451,11 @@ phone's push token: the phone stays linked, and gets notifications again once th
   `/app forget` is sent, or when the bot comes to answer to another chat.
 - Telegram can only unlink every phone at once (`/app forget`). One phone can only be unlinked
   from that phone (`POST /app/unpair`).
+- Someone who calls `/app/pair` without stopping sees the moment a code is waiting (the answer
+  turns from `none` to `wrong`) and can spend it with five wrong tries, or, over two codes, use up
+  the ten tries in ten minutes, so the owner's code is refused for up to ten minutes. They get no
+  more guesses than the limits allow (five a code, ten in ten minutes: about one in a hundred
+  thousand a code). The owner sends `/app` again later. Limits kept per address would end this.
+- A phone linked while the bot answered to one chat is unlinked when it starts answering to
+  another, even if that was a mistake in `TELEGRAM_CHAT_ID` put right later: link it again with
+  `/app`. (Kept, it would go on getting the new chat's notifications.)
