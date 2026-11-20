@@ -28,6 +28,7 @@ const COMMANDS = [
   ['status', 'Clock, your PC and settings'],
   ['wake', 'Wake your PC from sleep'],
   ['sleep', 'Put your PC to sleep'],
+  ['app', 'Link the iPhone app'],
   ['pause', 'Stop booking'],
   ['resume', 'Start booking again'],
   ['help', 'Everything I understand'],
@@ -73,9 +74,11 @@ async function main() {
   if (!app.hasPictures) log('Some banner pictures are missing from assets/ (see art/make-banners.cjs), so cards will come as plain text.');
 
   // The endpoint your PC talks to. Also answers a plain /health, which lets Railway give the
-  // service a public domain.
+  // service a public domain. The iPhone app comes in by the same server, under /app/, with its
+  // own tokens (docs/app-api.md), so it is there only where this is.
   if (linked) {
-    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onLook: app.lookFromAgent, onHold: app.holdFromAgent, onProgress: app.progressFromAgent, picture: app.picture, token: agentToken, publicKey, log });
+    const appApi = { hello: app.appHello, pair: app.appPair, auth: app.appAuth, state: app.appState, ask: app.appAsk };
+    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onLook: app.lookFromAgent, onHold: app.holdFromAgent, onProgress: app.progressFromAgent, picture: app.picture, token: agentToken, publicKey, log, appApi });
     const port = Number(process.env.PORT) || 8080;
     server.listen(port, () => log(`Listening for your PC on port ${port} (${[publicKey && 'signed requests', agentToken && 'AGENT_TOKEN'].filter(Boolean).join(' or ')}).`));
     server.on('error', e => log(`The endpoint for your PC could not start: ${e.message}`));

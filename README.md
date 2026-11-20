@@ -11,6 +11,8 @@ Your ClubSpark password stays on your PC. The bot never sees it and never touche
 
 It also finds free **indoor courts at Gorbals and Scotstoun** (Glasgow Club), and can have your PC put one in your basket for you to pay for; see [Indoor courts](#indoor-courts-glasgow-club).
 
+There is an **iPhone app** too, which does the same things as the Telegram chat; see [The iPhone app](#the-iphone-app).
+
 ## What a booking night looks like
 
 Kelvingrove opens each day 7 days ahead at 22:00. So a Thursday is booked on the Thursday before.
@@ -61,6 +63,7 @@ If your PC is asleep, the card says so and offers **Wake my PC** (when waking is
 | `/status` | Clock check, version, your PC's state and when it was last in touch, whether waking is ready, and whether settings are kept. |
 | `/wake` | Wake your PC from sleep (the same as **Wake my PC** on the menu). See [Waking your PC](#waking-your-pc). |
 | `/sleep` | Put your PC to sleep (the same as **Sleep my PC** on the menu, without the "are you sure?"). See [Sleeping your PC](#sleeping-your-pc). |
+| `/app` | A code to link the iPhone app to the bot. `/app forget` unlinks every phone. See [The iPhone app](#the-iphone-app). |
 | `/wide` | A trial: the menu with the banner as a large link preview, which Telegram may draw wider than a picture on a tablet. |
 | `/backup` | Your settings as one line, for the `COURT_SETTINGS` variable. |
 | `/id` | Your chat ID. |
@@ -110,6 +113,18 @@ While the dot is green, the same place on the menu has **Sleep my PC** (and ther
 - **Only when it can wake for the booking:** the PC sleeps only if its booking task (21:55 each night, 5 minutes before the 22:00 release) is there, switched on, set to wake the computer and due to run, and wake timers are allowed. Otherwise it stays awake and you get a message saying why.
 - **Never late:** a request that no ping collects within 2 minutes is dropped, so the PC doesn't fall asleep the next time it wakes.
 - Nothing open on the PC is closed. Wake it again with **Wake my PC**.
+
+## The iPhone app
+
+The app (the separate Court_Booker_App repository) is another way in to the same bot. It shows what the Telegram chat shows: your weekly and one-off bookings, the next booking run, what was booked and the gate codes, your PC's dot, the free indoor courts and a court being held. And it asks for the same things: book or remove a date, set a weekday, court order, pause, wake or sleep your PC, hold an indoor court. Each request is carried out by the same code as the Telegram command or button, with the same checks and the same words when the answer is no. **The app adds no powers**: it can do nothing that you cannot already do in the chat, and paying for an indoor court stays yours.
+
+- **Link a phone:** send `/app`. The bot answers with a six-digit code (and its own address, if the app asks where the bot is). Type the code into the app within 10 minutes. It works once, five wrong tries cancel it, and a new `/app` replaces it. The bot tells you in Telegram when a phone has been linked. Up to five phones can be linked.
+- **Unlink:** `/app forget` unlinks every phone at once; the app can also unlink its own phone.
+- **What is kept:** the app proves itself with a long random token it is given once, when it pairs. The bot keeps only a fingerprint of it (its SHA-256) in the settings file, so the file opens no door, and the one-line `/backup` leaves the phones out. Without a Railway volume the links are lost at each restart, and `/app` says so.
+- **Notifications:** what the bot tells you unprompted in Telegram (a court booked or not, trouble before a booking, your PC not answering, how a hold ended) it also keeps as the last 30 notes for the app, and sends as a notification to each linked phone that asked for them, by Expo's push service. A notification that cannot be sent never delays or stops the Telegram message.
+- **Where it comes in:** on the same web address as your PC's link, under `/app/`, so the app works wherever the PC is linked (`AGENT_PUBLIC_KEY` or `AGENT_TOKEN` is set). The two are kept apart: a phone's token opens nothing of the PC's, and the PC's key opens nothing of the app's.
+
+The contract between the bot and the app, request by request and field by field, is [docs/app-api.md](docs/app-api.md).
 
 ## The pictures
 
@@ -161,7 +176,10 @@ lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /age
                   for an instruction such as sleep, a look at Glasgow Club or a court to hold there,
                   POST /agent/look, POST /agent/hold,
                   POST /agent/progress, POST /agent/result),
-                  and the public banner pages for /wide
+                  the public banner pages for /wide, and the iPhone app's door (/app/...)
+lib/appapi.js     the iPhone app's API, the parts that need nothing else: pairing codes, tokens,
+                  the linked phones, the notes, and what each request must look like
+lib/push.js       notifications to the linked phones, by Expo's push service
 lib/ui.js         the tap-through screens and their buttons
 lib/wake.js       the Wake-on-LAN magic packet, and where it may go
 lib/glasgowclub.js  Glasgow Club's free indoor courts, read as a visitor (by your PC, or from here
@@ -170,6 +188,7 @@ lib/telegram.js   Telegram Bot API client
 lib/store.js      the settings file
 assets/           the banners
 art/              the pictures the banners are made from, and the script that makes them
+docs/app-api.md   what the iPhone app asks of the bot, and what it is told
 ```
 
 Version 1 of this bot sent court links for you to tap; version 2 books for you. Settings saved by version 1 keep your owner, weekly plan, court order and pictures.

@@ -7,19 +7,23 @@
 // "Hold" has your PC sign in there and put a court in your basket; paying is always yours
 // (lib/glasgowclub.js says why it goes no further). Glasgow Club's site turns Railway away too,
 // so while your PC is awake it does the reading as well.
+// The iPhone app (docs/app-api.md) is another way in to the same things: what it asks is done by
+// the functions the Telegram commands and buttons use, with the same checks.
 
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { iso, label, hhmm, todayCivil, addDays, londonInstant, londonWall, civil, DAY_KEYS, DAY_LONG } = require('./lib/time');
 const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, slotText, slotEnd } = require('./lib/plan');
-const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf, upcoming, releaseAround, MISSING_MS, SEEN_FRESH_MS } = require('./lib/schedule');
+const { jobsFor, jobId, missingFor, msToNextCheck, opensAt, civilOf, upcoming, releaseAround, MISSING_MS, SEEN_FRESH_MS } = require('./lib/schedule');
 const M = require('./lib/messages');
 const UI = require('./lib/ui');
 const { readMac, publicIPv4, sendWake } = require('./lib/wake');
 const G = require('./lib/glasgowclub');
+const A = require('./lib/appapi');
+const { createExpoPush } = require('./lib/push');
 
-const VERSION = '2.7';
+const VERSION = '2.8';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -33,6 +37,11 @@ const PREFLIGHT_WAIT_MS = 3 * 60 * 1000;   // how long the PC gets to answer tha
 const NO_WORD_MS = 8 * 60 * 1000;          // a run that started should have reported by this long after the release
 const NO_WORD_FOR_MS = 60 * 60 * 1000;     // ...and after this the bot stops watching for it
 const GONE = ['test', 'free', 'signin', 'style', 'lead', 'warn', 'go', 'code'];   // link-alert commands from version 1
+// Said to a button, and to the app, that asks for an indoor day or time which is not on offer.
+const DAY_GONE = 'That day is no longer on offer. Pick again.';
+const TIME_GONE = 'That time is no longer on offer. Pick again.';
+// What the iPhone app can ask for (POST /app/<name>, docs/app-api.md).
+const APP_ASKS = ['unpair', 'once', 'once/remove', 'plan', 'plan/remove', 'order', 'pause', 'pc/sleep', 'pc/wake', 'indoor/look', 'hold', 'hold/order', 'push'];
 
 // The banner pictures (made by art/make-banners.cjs): the menu card in three versions, one for
 // each state of your PC (the coloured dot), and one each for a court booked and not booked.
@@ -83,6 +92,7 @@ function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, once: [], order: [1, 2, 3, 4, 5, 6], paused: false,
     results: {}, sent: {}, pics: {}, lastSeen: null, lastRun: null, home: null,
+    apps: [], notes: [],
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -104,11 +114,13 @@ function loadState(raw, env = {}) {
       if (typeof raw.lastRun === 'number') state.lastRun = raw.lastRun;     // when the PC's booking run last started, or said how it is going
       const h = raw.home;                                         // where your PC last called from, for waking it
       if (h && publicIPv4(h.ip) && typeof h.at === 'number') state.home = { ip: h.ip, at: h.at };
+      state.notes = A.cleanNotes(raw.notes);                      // what the bot told you unprompted, kept for the app
     }
     for (const kind of KINDS) {                                   // what Telegram calls each picture, once it has it
       const p = raw.pics && raw.pics[kind];
       if (p && typeof p.hash === 'string' && typeof p.id === 'string') state.pics[kind] = { hash: p.hash, id: p.id };
     }
+    state.apps = A.cleanApps(raw.apps);                           // the phones linked to the app: a hash of each one's token, never the token
   } else {
     state.plan = parsePlan(env.COURT_PLAN);
     state.order = parseOrder(env.COURT_ORDER) || state.order;
@@ -116,7 +128,8 @@ function loadState(raw, env = {}) {
   return state;
 }
 
-// The settings as one line, for the COURT_SETTINGS variable, and back again.
+// The settings as one line, for the COURT_SETTINGS variable, and back again. The phones linked
+// to the app are left out on purpose: a line that is copied about should open no door.
 function backupLine(state) {
   return JSON.stringify({ v: STATE_VERSION, owner: state.owner, plan: cleanPlan(state.plan), once: cleanOnce(state.once), order: state.order });
 }
@@ -131,9 +144,11 @@ function readBackup(text) {
 // magic packet (lib/wake.js), and `glasgow` reads Glasgow Club's free indoor courts
 // (lib/glasgowclub.js); both are swapped out in tests. `pcLookMs` is how long your PC gets to
 // answer when it is asked to read Glasgow Club's sheet, and `pcHoldMs` how long it gets to
-// collect a court to hold.
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000, pcHoldMs = 25000 }) {
+// collect a court to hold. `push` sends a notification to the phones linked to the app
+// (lib/push.js: Expo's push service); tests swap it out too.
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000, pcHoldMs = 25000, push = null }) {
   const indoor = glasgow || G.createGlasgowClub({ now, log });
+  const pushOut = push || createExpoPush({ log });
   const fromVariable = readBackup(env.COURT_SETTINGS);
   const state = loadState(store.load() ?? fromVariable, env);
   const variableLine = fromVariable ? backupLine(loadState(fromVariable, env)) : null;
@@ -152,6 +167,30 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const say = (chat, text, extra = {}) => tg.send(chat, text, { ...html, ...extra });
   const next = () => M.esc(M.nextLine(cfg(), now(), state.paused));
   const toldPrivate = new Set();
+
+  // ---------- notes: what the bot tells you unprompted, kept for the iPhone app ----------
+  // The last 30 are kept, and each also goes as a notification to every linked phone that gave
+  // a push token. Best effort, and never in the way: the Telegram message has gone before this
+  // is called, the notification is not waited for, and nothing here can throw.
+  function note(kind, title, body) {
+    try {
+      const n = A.makeNote(kind, title, body, now());
+      state.notes = [n, ...state.notes].slice(0, A.NOTES_KEEP);
+      save();
+      const tokens = [...new Set(state.apps.map(d => d.push).filter(Boolean))];
+      if (tokens.length) {
+        Promise.resolve().then(() => pushOut(tokens, { title: n.title, body: n.body }))
+          .catch(e => log(`A notification could not be sent: ${(e && e.message) || e}`));
+      }
+    } catch (e) {
+      log(`Could not keep a note for the app: ${(e && e.message) || e}`);
+    }
+  }
+  // A message's own words as a note: its first line is the title, the `lines` after it the body.
+  const noteOf = (text, lines) => {
+    const [title, ...rest] = String(text).split('\n').map(A.plain);
+    return { title, body: rest.slice(0, lines).join(' ') };
+  };
 
   // ---------- banner cards ----------
   // A card is a banner picture with the words as its caption. A picture must never cost a
@@ -215,13 +254,21 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (!state.home || state.home.ip !== ip) log(state.home ? 'Your home\'s public address changed.' : 'Learned your home\'s public address, for waking your PC.');
     state.home = { ip, at: now() };
   }
-  // The Wake button and /wake. Returns a note for the tap and, when it makes sense, the menu.
-  async function wakePc() {
-    const t = now();
+  // What stands in the way of a wake-up now: { toast, menu } (`menu`: the menu is still worth
+  // showing), or null. The Wake button, /wake and the app all go by it.
+  function wakeBlocker(t) {
     if (wakeState() === 'off') return { toast: 'Waking is not set up: add WAKE_MAC on Railway.' };
     if (!state.home) return { toast: 'I do not know your home address yet. Your PC must be in touch once first.' };
-    if (pcState(t) === 'awake') return { toast: 'Your PC is already awake.', screen: UI.home(ctx()), view: 'h' };
+    if (pcState(t) === 'awake') return { toast: 'Your PC is already awake.', menu: true };
     if (wokeAt && t - wokeAt < 30000) return { toast: 'Sent a moment ago. Give it a minute.' };
+    return null;
+  }
+  // The Wake button and /wake. Returns a note for the tap and, when it makes sense, the menu;
+  // `sent` says the wake-up went.
+  async function wakePc() {
+    const t = now();
+    const no = wakeBlocker(t);
+    if (no) return no.menu ? { toast: no.toast, screen: UI.home(ctx()), view: 'h' } : { toast: no.toast };
     try {
       await wake({ host: state.home.ip, port: wakePort, mac: wakeMac });
     } catch (err) {
@@ -230,7 +277,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     wokeAt = t;
     log('Wake-up sent to your PC.');
-    return { toast: 'Wake-up sent', screen: UI.home(ctx()), view: 'h' };
+    return { toast: 'Wake-up sent', screen: UI.home(ctx()), view: 'h', sent: true };
   }
 
   // ---------- sleeping your PC ----------
@@ -244,17 +291,24 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const [rel] = upcoming(t, cfg(), 1);
     return rel && t >= rel.releaseAt - SLEEP_GUARD_MS ? rel : null;
   }
+  // What stands in the way of putting your PC to sleep now, in words, or null. Sleep my PC,
+  // /sleep and the app all go by it.
+  function sleepNo(t) {
+    if (!linked) return 'Your PC is not linked to me.';
+    if (pcState(t) !== 'awake') return 'Your PC is not awake.';
+    if (sleepBlocker(t)) return `Your PC books at ${hhmm(releaseMin)}, so it stays awake until then.`;
+    if (holdLive(t)) return 'Your PC is holding a court for you. Let it go first.';
+    return null;
+  }
+  // `sent` says the request is waiting for the PC.
   function requestSleep() {
     const t = now();
-    if (!linked) return { toast: 'Your PC is not linked to me.' };
-    if (pcState(t) !== 'awake') return { toast: 'Your PC is not awake.', screen: UI.home(ctx()), view: 'h' };
-    const rel = sleepBlocker(t);
-    if (rel) return { toast: `Your PC books at ${hhmm(releaseMin)}, so it stays awake until then.`, screen: UI.home(ctx()), view: 'h' };
-    if (holdLive(t)) return { toast: 'Your PC is holding a court for you. Let it go first.', screen: UI.home(ctx()), view: 'h' };
+    const no = sleepNo(t);
+    if (no) return linked ? { toast: no, screen: UI.home(ctx()), view: 'h' } : { toast: no };
     sleepAsk = t;
     for (const w of waiters) w.wake();
     log('Asked your PC to sleep.');
-    return { toast: 'Sleep sent', screen: UI.home(ctx()), view: 'h' };
+    return { toast: 'Sleep sent', screen: UI.home(ctx()), view: 'h', sent: true };
   }
   // What the PC should do now, collected by its ping: { look } (read a day of Glasgow Club's
   // sheet: someone is waiting for it, so it goes first), { hold } (put a court in your basket)
@@ -387,6 +441,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     h.end = end;
     gaveUp.add(h.id);
     if (gaveUp.size > 50) gaveUp.delete(gaveUp.values().next().value);
+    holdEnded(h);
+  }
+  // How a hold ended, as a note for the app: the card's own words about the ending, whoever
+  // started the hold. (Said again if the PC's own word later replaces an ending assumed here.)
+  function holdEnded(h) {
+    try {
+      const [, ...lines] = UI.indoorHold(ctx(), h).caption.split('\n').map(A.plain);
+      note('hold', `${h.end === 'booked' ? 'Booked' : 'Hold ended'} · ${G.CENTRES[h.key].name} court ${h.court}`,
+        `${label(civilOf(h.date))} · ${hhmm(h.start)}–${hhmm(h.start + 60)}. ${lines.join(' ')}`);
+    } catch (e) {
+      log(`Could not keep a note about the hold: ${e.message}`);
+    }
   }
   // Until when Glasgow Club's site is to be left alone by your PC: it met a "checking your
   // browser" page there, holding a court or reading the sheet. 0 when it is not.
@@ -416,7 +482,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return null;
   }
   // Redraws a hold's card as the hold stands now. One at a time, in order; never throws.
+  // A hold started from the app has no card (`cardless`) unless a Hold tap in Telegram brings
+  // it one: until then there is nothing to redraw, and the app reads the hold from its state.
   function drawHold(h) {
+    if (h.cardless) return Promise.resolve();
     h.draws = (h.draws || Promise.resolve()).then(async () => {
       h.redrawAt = null;
       h.card = await show(h.chat, UI.indoorHold(ctx(), h), h.card, { wide: h.wide });
@@ -426,46 +495,61 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     });
     return h.draws;
   }
+  // The checks behind the Hold button, and the start of a hold when nothing stands in the way.
+  // The app goes through here as well. `where` says who asked and where the hold's card is:
+  // { by: 'telegram' | 'app', chat, card, wide, cardless }. Returns { bad: true } (not a time on
+  // offer), { no } (what holdBlocker said) or { h } (the hold, now waiting for the PC's ping).
+  function holdStart(key, dateIso, start, court, where) {
+    const t = now(), date = civilOf(dateIso), today = todayCivil(t);
+    if (iso(date) !== dateIso || date < today || date > addDays(today, UI.INDOOR_DAYS - 1) || !(court >= 1 && court <= 20)
+      || !(start >= 0 && start <= 23 * 60 && start % 5 === 0) || londonInstant(date, start) <= t) return { bad: true };
+    const no = holdBlocker(t);
+    if (no) return { no };
+    if (hold && !hold.end) {                                             // one that went silent long ago: it is over, and a PC that still has it lets go
+      giveUpOn(hold, 'timeout');
+      drawHold(hold);
+    }
+    const h = { id: crypto.randomBytes(6).toString('hex'), by: where.by, chat: where.chat, card: where.card, wide: where.wide, cardless: !!where.cardless,
+      key, date: dateIso, start, court, at: t, heard: t,
+      taken: false, takenAt: null, stage: 'asked', end: null, order: null, price: '', heldAt: null, until: null, why: '', basket: '', removed: null, words: '', checked: false, silent: false, draws: null, redrawAt: null };
+    hold = h;
+    holdStarts.push(t);
+    log(`Hold asked for: ${holdName(h)}.`);
+    for (const w of [...waiters].reverse()) w.wake();                    // the newest ping first, as for a look
+    return { h };
+  }
   // "Hold court N" was tapped (gh). The tap is answered, the PC's waiting ping is woken, and
   // the card says what is going on; everything after that comes from the PC.
   async function holdTap(q, chat, m, answer, newCard) {
     const [, key, d, hmText, courtText] = m;
     const dateIso = UI.fromD8(d), start = UI.fromHm(hmText), court = Number(courtText);
-    const t = now(), date = civilOf(dateIso), today = todayCivil(t);
     const wide = typeof q.message.text === 'string' && !newCard;
     const card = newCard ? null : q.message.message_id;
-    if (iso(date) !== dateIso || date < today || date > addDays(today, UI.INDOOR_DAYS - 1) || !(court >= 1 && court <= 20)
-      || !(start >= 0 && start <= 23 * 60 && start % 5 === 0) || londonInstant(date, start) <= t) {
-      await answer('That time is no longer on offer. Pick again.');
+    const r = holdStart(key, dateIso, start, court, { by: 'telegram', chat, card, wide });
+    if (r.bad) {
+      await answer(TIME_GONE);
       await show(chat, UI.indoorDays(ctx(), key), card, { wide });
       return;
     }
-    const no = holdBlocker(t);
-    if (no) {
+    if (r.no) {
+      const no = r.no;
       await answer(no.toast);
       if (!no.busy) await show(chat, UI.indoorHoldNo(ctx(), key, dateIso, start, court, no), card, { wide });
-      else if (hold.card !== card) {                                     // the hold's own card may be far up the chat by now: it moves here
+      else if (hold.cardless || hold.card !== card) {                    // the hold's own card may be far up the chat by now, or it was started from the app and has none: it moves here
+        hold.cardless = false;
+        hold.chat = chat;
         hold.card = card;
         hold.wide = wide;
         await drawHold(hold);
       }
       return;
     }
-    if (hold && !hold.end) {                                             // one that went silent long ago: it is over, and a PC that still has it lets go
-      giveUpOn(hold, 'timeout');
-      drawHold(hold);
-    }
-    const h = { id: crypto.randomBytes(6).toString('hex'), chat, card, wide, key, date: dateIso, start, court, at: t, heard: t,
-      taken: false, takenAt: null, stage: 'asked', end: null, order: null, price: '', heldAt: null, until: null, why: '', basket: '', removed: null, words: '', checked: false, silent: false, draws: null, redrawAt: null };
-    hold = h;
-    holdStarts.push(t);
-    log(`Hold asked for: ${holdName(h)}.`);
-    for (const w of [...waiters].reverse()) w.wake();                    // the newest ping first, as for a look
     await answer('Asking your PC');
-    await drawHold(h);
+    await drawHold(r.h);
   }
-  // "Let it go" or "Stop" (gx: release) and "I have paid" (gp: done) on a hold's card. The PC
-  // hears of it on its next note, a few seconds on.
+  // "Let it go" or "Stop" (gx: release) and "I have paid" (gp: done) on a hold's card, or the
+  // same asked by the app. The PC hears of it on its next note, a few seconds on. `ok` says
+  // the order was taken; without it the toast says why not.
   function holdOrder(id, what) {
     const h = hold;
     if (!h || h.id !== id) return { toast: 'I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up.' };
@@ -474,14 +558,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       giveUpOn(h, 'stopped');
       log('Hold stopped before the PC collected it.');
       drawHold(h);
-      return { toast: 'Stopped' };
+      return { toast: 'Stopped', ok: true };
     }
     if (what === 'done' && h.stage !== 'held') return { toast: 'It is not in your basket yet.' };
     if (h.order) return { toast: h.order === 'release' ? 'Already letting it go.' : 'Already checking.' };
     h.order = what;
     log(`Hold: you tapped ${what === 'done' ? 'I have paid' : 'Let it go'}.`);
     drawHold(h);
-    return { toast: what === 'done' ? 'Checking your Bookings page' : 'Letting it go' };
+    return { toast: what === 'done' ? 'Checking your Bookings page' : 'Letting it go', ok: true };
   }
   // A note from the PC's tool about a hold: a step, or how it ended. The answer carries what
   // you have tapped since. A hold given up on here is told to let go; one this bot does not
@@ -513,6 +597,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       }
       log(`Hold ${stage}: ${holdName(h)}${h.why ? ` (${h.why})` : ''}.`);
       drawHold(h);
+      holdEnded(h);
       return { ok: true };
     }
     if (HOLD_STAGES.indexOf(stage) > HOLD_STAGES.indexOf(h.stage)) {      // forwards only ("asked" comes before them all)
@@ -644,6 +729,36 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
   }
 
+  // ---------- what you ask for ----------
+  // The changes behind the commands, the buttons and the app, so that all three do the same
+  // thing with the same checks. What is said about each is the caller's business.
+  // A one-off Kelvingrove date: { no } with the sentence that refuses it, { already: true }
+  // when that date and time are on the list, or { added: true }.
+  function addOnce(dateIso, start, hours, t) {
+    const date = civilOf(dateIso), today = todayCivil(t);
+    if (date < today || londonInstant(date, start) <= t) return { no: `${label(date)} at ${hhmm(start)} has already passed.` };
+    if (date > addDays(today, MAX_AHEAD_DAYS)) return { no: `That is more than ${MAX_AHEAD_DAYS} days away. Try a nearer date.` };
+    if (state.once.some(o => o.date === dateIso && o.start === start)) return { already: true };
+    state.once = cleanOnce([...state.once, { date: dateIso, start, hours }]); save();
+    return { added: true };
+  }
+  // Takes a one-off off the list. Returns it, or null if it was not there.
+  function removeOnce(dateIso, start) {
+    const gone = state.once.find(o => o.date === dateIso && o.start === start);
+    state.once = state.once.filter(o => o !== gone); save();
+    return gone || null;
+  }
+  function setWeekly(day, start, hours) { state.plan[day] = { start, hours }; save(); }
+  // Stops a weekday ('all': every one). Says whether there was anything to stop.
+  function stopWeekly(day) {
+    const had = day === 'all' ? Object.keys(state.plan).length > 0 : !!state.plan[day];
+    if (day === 'all') state.plan = {}; else delete state.plan[day];
+    save();
+    return had;
+  }
+  function setOrder(order) { state.order = order; save(); }
+  function setPaused(paused) { state.paused = paused; save(); }
+
   const DAY_RE = '(sun|mon|tue|wed|thu|fri|sat)';
   // What a button does. Returns the screen to show next and a short note for the tap.
   function route(data) {
@@ -664,15 +779,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       if (date > addDays(today, UI.MAX_AHEAD_DAYS) || londonInstant(date, start) <= c.now || start + hours * 60 > UI.LAST_END) {
         return { screen: UI.calendar(c), toast: 'That time is no longer available. Pick again.' };
       }
-      if (state.once.some(o => o.date === dateIso && o.start === start)) return { screen: UI.added(c, dateIso, start, hours, true), toast: 'Already on your list' };
-      state.once = cleanOnce([...state.once, { date: dateIso, start, hours }]); save();
+      const r = addOnce(dateIso, start, hours, c.now);
+      if (r.no) return { screen: UI.calendar(c), toast: 'That time is no longer available. Pick again.' };
+      if (r.already) return { screen: UI.added(c, dateIso, start, hours, true), toast: 'Already on your list' };
       log(`Added ${dateIso} ${hhmm(start)} by button`);
       return { screen: UI.added(ctx(), dateIso, start, hours), toast: 'Added' };
     }
     if ((m = /^x:(\d{8}):(\d{4})$/.exec(data))) {
       const dateIso = UI.fromD8(m[1]), start = UI.fromHm(m[2]);
-      const gone = state.once.find(o => o.date === dateIso && o.start === start);
-      state.once = state.once.filter(o => o !== gone); save();
+      const gone = removeOnce(dateIso, start);
       return { screen: UI.bookings(ctx(), gone ? `Removed ${label(civilOf(dateIso))} · ${slotText(gone)}` : ''), toast: gone ? 'Removed' : 'Already gone' };
     }
     if (data === 'w') return { screen: UI.weekly(c) };
@@ -682,23 +797,23 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if ((m = new RegExp(`^wl:${DAY_RE}:(\\d{4}):([12])$`).exec(data))) {
       const start = UI.fromHm(m[2]), hours = +m[3];
       if (start < UI.FIRST_START || start + hours * 60 > UI.LAST_END) return { screen: UI.weekly(c), toast: 'Pick a time between 09:00 and 21:00.' };
-      state.plan[m[1]] = { start, hours }; save();
+      setWeekly(m[1], start, hours);
       log(`Weekly ${m[1]} set by button`);
       return { screen: UI.weeklySaved(ctx(), m[1]), toast: 'Saved' };
     }
     if ((m = new RegExp(`^woff:${DAY_RE}$`).exec(data))) {
-      delete state.plan[m[1]]; save();
+      stopWeekly(m[1]);
       return { screen: UI.weekly(ctx()), toast: `Stopped ${DAY_LONG[DAY_KEYS.indexOf(m[1])]}s` };
     }
     if (data === 'm') return { screen: UI.bookings(c) };
     if (data === 'o') return { screen: UI.order(c) };
     if ((m = /^o:([1-6]{1,6})$/.exec(data)) && new Set(m[1]).size === m[1].length) return { screen: UI.order(c, m[1]) };
     if ((m = /^os:([1-6]{1,6})$/.exec(data)) && new Set(m[1]).size === m[1].length) {
-      state.order = parseOrder(m[1].split('').join(' ')); save();
+      setOrder(parseOrder(m[1].split('').join(' ')));
       return { screen: UI.home(ctx()), view: 'h', toast: `Court order: ${state.order.join(', ')}` };
     }
     if (data === 'p') {
-      state.paused = !state.paused; save();
+      setPaused(!state.paused);
       return { screen: UI.home(ctx()), view: 'h', toast: state.paused ? 'Paused: nothing will be booked' : 'Booking is on' };
     }
     if (data === 's') return { screen: UI.status(c, statusInfo()), view: 's' };
@@ -721,7 +836,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     let id = newCard ? null : q.message.message_id;
     const draw = async scr => { id = await show(chat, scr, id, { wide }); };
     if (iso(date) !== dateIso || date < today || date > addDays(today, UI.INDOOR_DAYS - 1) || (kind === 't') !== !!hmText) {
-      await answer('That day is no longer on offer. Pick again.');
+      await answer(DAY_GONE);
       await draw(UI.indoorDays(ctx(), key));
       return;
     }
@@ -801,6 +916,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // A run starting is what the "has not started" warning watches for, and before a release it
   // brings the heads-up card, once per release.
   let headsUp = null;                       // tonight's heads-up card, so "signed in" can be written on it
+  // How the PC's booking run stands, as it last said, for the app: { stage, at, why }. "started"
+  // when it asked what to book, "ready" once it has signed in, "trouble" while it tries again.
+  let runNote = null;
   // What has been said is remembered for a few days, so nothing is said twice; then forgotten.
   const forgetOld = t => { for (const k of Object.keys(state.sent)) if (t - state.sent[k] > SENT_KEEP_MS) delete state.sent[k]; };
   function jobsForAgent(from = {}, { run } = {}) {
@@ -808,6 +926,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const starting = run !== false;
     state.lastSeen = t;
     if (starting) state.lastRun = t;
+    if (starting) runNote = { stage: 'started', at: t, why: null };
     noteHome(from);
     const c = cfg();
     const jobs = state.paused || owner() === null ? [] : jobsFor(t, c, state.results);
@@ -818,8 +937,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         forgetOld(t);
         state.sent[key] = t;
         const card = { chat: owner(), coming, id: null, photo: false, ready: false };
-        card.sent = sendCard(card.chat, 'home-awake', M.headsUp(c, coming))
-          .then(sent => { card.id = (sent && sent.message_id) || null; card.photo = !!(sent && sent.photo); })
+        const text = M.headsUp(c, coming);
+        card.sent = sendCard(card.chat, 'home-awake', text)
+          .then(sent => {
+            card.id = (sent && sent.message_id) || null; card.photo = !!(sent && sent.photo);
+            const lines = text.split('\n').map(A.plain);         // the same card, as a note for the app
+            note('info', lines[0], `${coming.map(j => M.slotOf(j)).join(' and ')}. ${lines[lines.length - 1]}`);
+          })
           .catch(e => { delete state.sent[key]; log(`Heads-up not sent: ${e.message}`); });
         headsUp = card;
       }
@@ -843,7 +967,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       sleptAt = null;
       log(`Your PC stayed awake: ${refused}`);
       const chat = owner();
-      if (chat !== null) say(chat, `<b>Your PC stayed awake</b>\nIt did not go to sleep: ${M.esc(refused)}.`).catch(e => log(`Could not say so: ${e.message}`));
+      if (chat !== null) {
+        say(chat, `<b>Your PC stayed awake</b>\nIt did not go to sleep: ${M.esc(refused)}.`).catch(e => log(`Could not say so: ${e.message}`));
+        note('info', 'Your PC stayed awake', `It did not go to sleep: ${refused}.`);
+      }
     }
     if (wait > 0) tryPcOnce(now());
     let order = takeOrder(now());
@@ -864,6 +991,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (stage !== 'ready' && stage !== 'trouble') return { ok: false, why: 'that is not a stage I know (ready or trouble)' };
     state.lastSeen = state.lastRun = now();           // the run is going: the wait for its result starts again
     save();
+    let trouble = null;
+    if (stage === 'trouble') {
+      const why = String(raw.why || 'no reason given').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '').slice(0, 300);
+      const text = M.troubleText(why, intIn(raw.attempt, 2, 9), intIn(raw.of, 2, 9));
+      trouble = { why, text, about: noteOf(text, 2) };
+    }
+    runNote = { stage, at: now(), why: trouble ? trouble.about.body : null };
     if (chat === null) return { ok: true };
     if (stage === 'ready') {
       const card = headsUp;
@@ -884,9 +1018,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const t = now();
     if (t - lastTrouble < 15000) return { ok: true };            // never a flood of these
     lastTrouble = t;
-    const why = String(raw.why || 'no reason given').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '').slice(0, 300);
-    await say(chat, M.troubleText(why, intIn(raw.attempt, 2, 9), intIn(raw.of, 2, 9)));
-    log(`Your PC reported trouble before the booking: ${why}`);
+    await say(chat, trouble.text);
+    note('warn', trouble.about.title, trouble.about.body);
+    log(`Your PC reported trouble before the booking: ${trouble.why}`);
     return { ok: true };
   }
 
@@ -907,6 +1041,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     for (const k of Object.keys(state.results)) if (now() - state.results[k].at > RESULTS_KEEP_MS) delete state.results[k];
     save();
     log(`Result from the PC: ${r.id} ${r.status}${r.court ? ` (Court ${r.court})` : ''}`);
+    if (!same && chat !== null) {                     // what the card said, as a note for the app
+      if (r.status === 'booked') note('booked', `Court ${r.court} booked`, `${M.slotOf(r)} · ${r.gate ? `gate ${r.gate}` : 'gate code not shown'}`);
+      else note('missed', 'Not booked', `${M.slotOf(r)}. ${A.plain(M.failedWhy(r))}`);
+    }
     return { ok: true };
   }
 
@@ -984,18 +1122,17 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         const day = parseDay(args[0]);
         const slot = parseSlot(args.slice(1));
         if (!day || !('start' in slot)) { await say(chat, (slot.why ? `${slot.why}\n` : '') + usage); break; }
-        state.plan[day] = { start: slot.start, hours: slot.hours }; save();
+        setWeekly(day, slot.start, slot.hours);
         const name = DAY_LONG[DAY_KEYS.indexOf(day)];
         await say(chat, `<b>${name}s · ${slotText(state.plan[day])}</b>\nBooked every week, ${daysAhead} days before at ${hhmm(releaseMin)}, when the day opens.\n\n${next()}${keepNote()}`);
         break;
       }
 
       case 'off': {
-        if ((args[0] || '').toLowerCase() === 'all') { state.plan = {}; save(); await say(chat, `Every weekly booking removed. One-off dates stay; see /plan.\n\n${next()}`); break; }
+        if ((args[0] || '').toLowerCase() === 'all') { stopWeekly('all'); await say(chat, `Every weekly booking removed. One-off dates stay; see /plan.\n\n${next()}`); break; }
         const day = parseDay(args[0]);
         if (!day) { await say(chat, 'Use it like this:  /off thu   (or /off all)'); break; }
-        const had = !!state.plan[day];
-        delete state.plan[day]; save();
+        const had = stopWeekly(day);
         await say(chat, `${had ? 'Removed' : 'There was no weekly booking for'} ${DAY_LONG[DAY_KEYS.indexOf(day)]}s.\n\n${next()}${keepNote()}`);
         break;
       }
@@ -1010,13 +1147,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         const today = todayCivil(t);
         const got = parseBooking(args, today);
         if (!('date' in got)) { await say(chat, (got.why ? `${got.why}\n` : '') + usage); break; }
-        const date = got.date, dateIso = iso(date);
-        if (date < today || londonInstant(date, got.start) <= t) {
-          await say(chat, `${label(date)} at ${hhmm(got.start)} has already passed.`); break;
-        }
-        if (date > addDays(today, MAX_AHEAD_DAYS)) { await say(chat, `That is more than ${MAX_AHEAD_DAYS} days away. Try a nearer date.`); break; }
-        if (state.once.some(o => o.date === dateIso && o.start === got.start)) { await say(chat, `${label(date)} at ${hhmm(got.start)} is already on your list. See /plan.`); break; }
-        state.once = cleanOnce([...state.once, { date: dateIso, start: got.start, hours: got.hours }]); save();
+        const date = got.date;
+        const added = addOnce(iso(date), got.start, got.hours, t);
+        if (added.no) { await say(chat, added.no); break; }
+        if (added.already) { await say(chat, `${label(date)} at ${hhmm(got.start)} is already on your list. See /plan.`); break; }
         const opens = opensAt(date, c);
         const when = opens > t
           ? `Booked when it opens: ${label(addDays(date, -daysAhead))} at ${hhmm(releaseMin)}.`
@@ -1048,7 +1182,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         if (!rest) { await show(chat, UI.order(ctx())); break; }
         const order = parseOrder(rest);
         if (!order) { await say(chat, `Use it like this:  /order 3 4 5 2 1 6\nCourts 1 to 6, each once. Any you leave out go last.\nNow: ${state.order.join(', ')}`); break; }
-        state.order = order; save();
+        setOrder(order);
         await say(chat, `Court order: ${order.join(', ')}`);
         break;
       }
@@ -1057,12 +1191,40 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         await say(chat, `Tap the line below to copy it, then save it in Railway as the variable COURT_SETTINGS. The bot starts from it whenever it has no saved settings, so update it after you change your plan.\n\n<code>${M.esc(backupLine(state))}</code>`); break;
 
       case 'pause':
-        state.paused = true; save();
+        setPaused(true);
         await say(chat, 'Paused. Your PC will not book anything until you send /resume.'); break;
 
       case 'resume':
-        state.paused = false; save();
+        setPaused(false);
         await say(chat, `Booking is on.\n\n${next()}`); break;
+
+      case 'app': {                                  // link the iPhone app, or unlink every phone
+        const word = (args[0] || '').toLowerCase();
+        if (word === 'forget') {
+          const n = state.apps.length;
+          state.apps = [];
+          pairing.cancel();
+          save();
+          if (n) log(`Unlinked ${n === 1 ? 'the phone' : `all ${n} phones`} linked to the app (/app forget).`);
+          await say(chat, n ? `Unlinked ${n === 1 ? 'your phone' : `all ${n} phones`}: the app on ${n === 1 ? 'it' : 'them'} can no longer reach me. Send /app to link a phone again.` : 'No phone was linked. Send /app to link one.');
+          break;
+        }
+        if (word) { await say(chat, 'Use it like this:  /app   (a code to link a phone)   or   /app forget   (unlink every phone)'); break; }
+        if (!linked) { await say(chat, 'The app reaches me at the same address as your PC, and that only opens once your PC is linked. Add AGENT_PUBLIC_KEY in Railway first (see the README), then send /app again.'); break; }
+        const { code } = pairing.issue(t);
+        const names = state.apps.map(d => M.esc(d.name)).join(', ');
+        await say(chat, [
+          '<b>Link the iPhone app</b>',
+          `Code: <code>${code}</code>  (tap to copy)`,
+          'Type it into the app within 10 minutes. It works once, and five wrong tries cancel it. A new /app replaces it.',
+          ...(publicHost ? [`If the app asks where I am: <code>https://${M.esc(publicHost)}</code>`] : []),
+          'The app can do what you do here, and nothing more.',
+          state.apps.length >= A.MAX_DEVICES ? `${A.MAX_DEVICES} phones are linked already (${names}), and that is as many as I keep, so the app will be turned away. Unlink one in the app on that phone, or send /app forget to unlink them all.`
+            : state.apps.length ? `Linked now: ${names}. /app forget unlinks every phone.` : 'No phone is linked yet.',
+          ...(kept() === 'disk' ? [] : ['Note: without a Railway volume mounted at /data, the link to a phone is lost each time I restart.']),
+        ].join('\n'));
+        break;
+      }
 
       default:
         await say(chat, GONE.includes(cmd)
@@ -1079,15 +1241,20 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   //    8 minutes after    the run started, but no result has come back
   let ticking = false;
   const retryAt = {};
-  // Sends a warning once (trying again after a failed send), and notes that it went.
-  async function warnOnce(key, t, send, noted) {
+  // Sends a warning once (trying again after a failed send), and notes that it went. `make`
+  // gives the warning's words: once sent, its first line and the two after it are kept as a
+  // note for the app.
+  async function warnOnce(key, t, make, send, noted) {
     if (state.sent[key] || (retryAt[key] && t < retryAt[key])) return;
     try {
-      await send();
+      const text = make();
+      await send(text);
       forgetOld(t);
       state.sent[key] = t;
       save();
       log(noted);
+      const about = noteOf(text, 2);
+      note('warn', about.title, about.body);
     } catch (err) {
       retryAt[key] = t + (err.retryAfter ? err.retryAfter * 1000 : 5000);
       log(`Could not send the warning: ${err.message}`);
@@ -1105,7 +1272,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       if (wakeState() !== 'ready') {
         // Nothing to wake it with from here: speak up only if it has been silent for over a day.
         if (pc === 'offline') {
-          await warnOnce(warned, t, () => sendCard(chat, 'home-offline', M.notAnsweringText(cfg(), rel, null, !!state.lastSeen), UI.afterNotAnswering(false)),
+          await warnOnce(warned, t, () => M.notAnsweringText(cfg(), rel, null, !!state.lastSeen), text => sendCard(chat, 'home-offline', text, UI.afterNotAnswering(false)),
             `Warned ahead of ${label(rel.playDate)}'s booking that the PC has been out of touch for over a day`);
         }
         return;
@@ -1123,7 +1290,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       return;
     }
     if (t - tried < PREFLIGHT_WAIT_MS || (state.lastSeen && state.lastSeen > tried)) return;     // still waiting, or it answered
-    await warnOnce(warned, t, () => sendCard(chat, 'home-offline', M.notAnsweringText(cfg(), rel, tried), UI.afterNotAnswering(true)),
+    await warnOnce(warned, t, () => M.notAnsweringText(cfg(), rel, tried), text => sendCard(chat, 'home-offline', text, UI.afterNotAnswering(true)),
       `Warned that the PC did not answer a wake-up ahead of ${label(rel.playDate)}'s booking`);
   }
 
@@ -1131,10 +1298,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const rel = missingFor(t, cfg(), state.lastRun);
     if (!rel) return;
     const awake = pcState(t) === 'awake';
-    await warnOnce(`missing:${rel.releaseAt}`, t, () => sendCard(chat, 'home-offline', M.missingText(cfg(), rel, awake), UI.afterMissing()),
+    await warnOnce(`missing:${rel.releaseAt}`, t, () => M.missingText(cfg(), rel, awake), text => sendCard(chat, 'home-offline', text, UI.afterMissing()),
       `Warned that the booking run has not started for ${label(rel.playDate)}${awake ? ' (the PC is awake)' : ''}`);
   }
 
+  // Whether the PC has said how one of a release's bookings went: booked at any time, or any
+  // result since about the time of the run.
+  const reported = (rel, r) => { const got = state.results[r.id]; return !!got && (got.status === 'booked' || got.at >= rel.releaseAt - SEEN_FRESH_MS); };
   async function checkReported(t, chat) {
     const rel = releaseAround(t, cfg(), 0, NO_WORD_FOR_MS);
     // No run for this release at all: the "has not started" warning has already said so.
@@ -1143,10 +1313,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     // starting (or starting over), or the result for another of tonight's bookings.
     const results = rel.requests.map(r => (state.results[r.id] && state.results[r.id].at) || 0);
     if (t < Math.max(rel.releaseAt, state.lastRun, ...results) + NO_WORD_MS) return;
-    const heard = r => { const got = state.results[r.id]; return !!got && (got.status === 'booked' || got.at >= rel.releaseAt - SEEN_FRESH_MS); };
-    const silent = rel.requests.filter(r => !heard(r));
+    const silent = rel.requests.filter(r => !reported(rel, r));
     if (!silent.length) return;
-    await warnOnce(`noword:${rel.releaseAt}`, t, () => sendCard(chat, 'missed', M.noWordText(silent), UI.afterFailed()),
+    await warnOnce(`noword:${rel.releaseAt}`, t, () => M.noWordText(silent), text => sendCard(chat, 'missed', text, UI.afterFailed()),
       `Said there is no word from the PC about ${silent.map(r => r.id).join(', ')}`);
   }
 
@@ -1187,7 +1356,226 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // A banner by name, for the public /banner and /card pages (the wide trial).
   const picture = kind => (pictures && KINDS.includes(kind) ? pictures[kind] : null);
 
-  return { handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, holdFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
+  // ---------- the iPhone app (docs/app-api.md) ----------
+  // Another way in to what you already do in Telegram, over the HTTP server your PC talks to
+  // (lib/server.js, under /app/). A phone is linked with a code from /app. After that it proves
+  // itself with a token, of which only the SHA-256 is kept here (state.apps). Whatever it asks
+  // is done by the function behind the Telegram command or button of the same name, so the
+  // checks and the words are the same, and the app can do nothing you cannot do here.
+  const pairing = A.createPairing();
+  const pairLimiter = A.createLimiter();
+  const appHello = () => ({ ok: true, bot: VERSION, api: A.API });
+
+  // A phone gives the code from /app and is handed its token, once. Returns { status, body }.
+  function appPair(body) {
+    const t = now();
+    if (!pairLimiter.allow(t)) return { status: 429, body: { ok: false, why: 'slow' } };
+    const b = body && typeof body === 'object' ? body : {};
+    const tried = pairing.check(b.code, t);
+    if (tried.why) {
+      if (tried.why === 'wrong') log(`A wrong code was tried for linking a phone (${tried.left} ${tried.left === 1 ? 'try' : 'tries'} left on it).`);
+      return { status: 400, body: { ok: false, why: tried.why, left: tried.left } };
+    }
+    if (state.apps.length >= A.MAX_DEVICES) return { status: 400, body: { ok: false, why: 'full', left: tried.left } };
+    let made;
+    do { made = A.newDevice(b.name, t); } while (state.apps.some(d => d.id === made.device.id));      // an id of its own
+    const { token, device } = made;
+    state.apps.push(device);
+    pairing.use();
+    save();
+    log(`A phone was linked to the app: ${device.name}.`);
+    const chat = owner();
+    if (chat !== null) {
+      say(chat, `<b>Phone linked</b>\n${M.esc(device.name)} can now do what you do here, and nothing more. /app forget unlinks every phone.`)
+        .catch(e => log(`Could not say that a phone was linked: ${e.message}`));
+    }
+    return { status: 200, body: { ok: true, token, device: { id: device.id, name: device.name } } };
+  }
+
+  // The phone a token belongs to, as { id, name }, or null. When it was last heard from is
+  // noted at most once a minute: that is part of the state, and so of its etag.
+  function appAuth(token) {
+    const d = A.findDevice(state.apps, token);
+    if (!d) return null;
+    const t = now();
+    if (t - d.seenAt >= A.SEEN_EVERY_MS) { d.seenAt = t; save(); }
+    return { id: d.id, name: d.name };
+  }
+
+  // How the PC's booking run stands, around a release: from half an hour before it to an hour
+  // after, or until every booking of that release has been reported on. Otherwise null.
+  function runNow(t) {
+    if (!runNote || state.paused) return null;
+    const rel = releaseAround(t, cfg(), HEADS_UP_MS, NO_WORD_FOR_MS);
+    if (!rel || runNote.at < rel.releaseAt - HEADS_UP_MS || rel.requests.every(r => reported(rel, r))) return null;
+    return { stage: runNote.stage, at: runNote.at, why: runNote.why };
+  }
+
+  // The hold being followed, or the last one, as the app sees it: the card's own words, and
+  // which of its buttons Telegram would show now. Null if there has been none since the start.
+  function holdView(x) {
+    const h = hold;
+    if (!h) return null;
+    const centre = G.CENTRES[h.key];
+    const scr = UI.indoorHold(x, h);
+    const [title, ...lines] = scr.caption.split('\n').map(A.plain);
+    const keys = scr.keyboard.inline_keyboard.flat().map(b => b.callback_data);
+    return {
+      id: h.id, startedBy: h.by, centre: h.key, centreName: centre.name, date: h.date, start: h.start, end: h.start + 60,
+      court: h.court, courtName: `Court ${h.court}`, stage: h.stage, live: !h.end, ended: h.end,
+      price: h.price || null, until: h.until, heardAt: h.heard, title, lines,
+      can: { release: keys.includes(`gx:${h.id}`), done: keys.includes(`gp:${h.id}`) },
+      links: { basket: G.basketUrl, site: G.siteUrl, sheet: G.sheetUrl(centre, h.date) },
+    };
+  }
+
+  // Everything the app shows, as it stands now. `meId` is the phone that asks.
+  function buildState(meId) {
+    const t = now(), c = cfg(), x = ctx(), today = todayCivil(t);
+    const booking = !state.paused && owner() !== null;                   // while paused nothing is booked, so nothing is coming
+    const releases = booking ? upcoming(t, c, 4) : [];
+    const releaseOf = r => ({ at: r.releaseAt, night: iso(r.night), jobs: r.requests.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end, from: j.kind })) });
+    const onceIds = new Set(state.once.map(o => jobId(o.date, o.start)));
+    const open = booking ? jobsFor(t, c, state.results).filter(j => j.releaseAt <= t && onceIds.has(j.id)) : [];
+    const byDay = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.start - b.start);
+    const results = Object.values(state.results).map(r => ({
+      id: r.id, status: r.status, date: r.date, start: r.start, end: r.end, court: r.court ?? null, gate: r.gate ?? null,
+      why: r.status === 'booked' ? null : A.plain(M.failedWhy(r)), at: r.at, past: civilOf(r.date) < today,
+    })).sort((a, b) => (a.past !== b.past ? (a.past ? 1 : -1) : a.past ? byDay(b, a) : byDay(a, b)));
+    const noWake = wakeBlocker(t), noSleep = sleepNo(t), noHold = holdBlocker(t), line = UI.pcLine(x);
+    return {
+      now: t, bot: VERSION,
+      venue: { name: 'Kelvingrove Park', short: 'KP', first: UI.FIRST_START, last: UI.LAST_END, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin, daysAhead, maxAheadDays: MAX_AHEAD_DAYS },
+      paused: state.paused,
+      kept: kept(),
+      pc: {
+        state: x.pc, linked, seenAt: state.lastSeen, line: line ? A.plain(line) : null,
+        canWake: !noWake, wakeWhy: noWake ? noWake.toast : null, canSleep: !noSleep, sleepWhy: noSleep,
+        sleepAsked: sleepAsk !== null && t - sleepAsk <= SLEEP_ASK_MS ? sleepAsk : null, wokeAt,
+      },
+      release: releases.length ? releaseOf(releases[0]) : null,
+      later: releases.slice(1).map(releaseOf),
+      open: open.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end })),
+      plan: [1, 2, 3, 4, 5, 6, 0].map(i => DAY_KEYS[i]).filter(k => state.plan[k]).map(k => ({ day: k, start: state.plan[k].start, hours: state.plan[k].hours })),
+      once: state.once.filter(o => londonInstant(civilOf(o.date), o.start) > t).map(o => {
+        const opens = opensAt(civilOf(o.date), c);
+        return { id: jobId(o.date, o.start), date: o.date, start: o.start, hours: o.hours, end: slotEnd(o.start, o.hours), opensAt: opens, open: opens <= t };
+      }),
+      order: state.order.slice(),
+      results,
+      run: runNow(t),
+      indoor: {
+        linked, days: UI.INDOOR_DAYS, quietUntil: siteQuietUntil(t) || null, holdNo: noHold ? (noHold.say || noHold.toast) : null,
+        centres: Object.values(G.CENTRES).map(ce => ({ key: ce.key, name: ce.name, site: G.sheetUrl(ce, iso(today)) })),
+      },
+      hold: holdView(x),
+      notes: state.notes.map(n => ({ id: n.id, at: n.at, kind: n.kind, title: n.title, body: n.body })),
+      devices: state.apps.map(d => ({ id: d.id, name: d.name, at: d.at, seenAt: d.seenAt, me: d.id === meId })),
+    };
+  }
+  // The state for one phone with its fingerprint, { etag, state }, or null if that phone is no
+  // longer linked.
+  function appState(device) {
+    if (!device || !state.apps.some(d => d.id === device.id)) return null;
+    const s = buildState(device.id);
+    return { etag: A.etagOf(s), state: s };
+  }
+
+  // A day's free indoor courts, for the app: what the day's card shows in Telegram, read the
+  // same way (readIndoor) and refused in the same words.
+  async function appLook(v) {
+    const no = why => ({ status: 409, body: { ok: false, why } });
+    const date = civilOf(v.date), today = todayCivil(now());
+    if (iso(date) !== v.date || date < today || date > addDays(today, UI.INDOOR_DAYS - 1)) return { status: 400, body: { ok: false, why: DAY_GONE } };
+    let got;
+    try { got = await readIndoor(v.centre, v.date, v.fresh); } catch (err) { return no(G.whyText(err)); }
+    const slots = [];
+    for (const s of got.slots) {
+      if (s.opensAt !== null) continue;                                  // not open for booking yet: the note says when
+      let at = slots.find(o => o.start === s.start);
+      if (!at) slots.push(at = { start: s.start, end: s.end, courts: [] });
+      at.courts.push({ n: s.court, name: s.name || `Court ${s.court}`, price: null });      // the sheet carries no price: that shows once a court is held
+    }
+    const [, ...words] = UI.indoorDay(ctx(), v.centre, v.date, got).caption.split('\n').map(A.plain);
+    return { status: 200, body: { ok: true, look: {
+      centre: v.centre, date: v.date, at: got.at, by: got.via === 'pc' ? 'pc' : 'bot', note: words.join('\n'), slots,
+      sheet: G.sheetUrl(G.CENTRES[v.centre], v.date),
+    } } };
+  }
+
+  // Something the app asks for, by its name in the address ("once", "pc/sleep", …). Returns
+  // { status, body } for the server, or null when there is no such request.
+  async function appAsk(device, name, body) {
+    const me = state.apps.find(d => d.id === (device && device.id));
+    const no = (status, why) => ({ status, body: { ok: false, why } });
+    if (!me) return no(401, 'unpaired');
+    const t = now();
+    // The answer to a request that was carried out: the state as it now stands.
+    const done = (extra = {}) => { const s = appState(me); return s ? { status: 200, body: { ok: true, ...extra, ...s } } : no(401, 'unpaired'); };
+    if (!APP_ASKS.includes(name)) return null;
+    const read = { once: A.readOnce, 'once/remove': A.readOnceRemove, plan: A.readPlan, 'plan/remove': A.readPlanRemove, order: A.readOrder, pause: A.readPause,
+      'indoor/look': A.readLook, hold: A.readHold, 'hold/order': A.readHoldOrder, push: A.readPush }[name];
+    const v = read ? read(body) : {};
+    if (v.why) return no(400, v.why);
+    log(`From the app: ${name}`);
+    switch (name) {
+      case 'unpair':
+        state.apps = state.apps.filter(d => d !== me); save();
+        log(`A phone unlinked itself from the app: ${me.name}.`);
+        return { status: 200, body: { ok: true } };
+      case 'once': {
+        const r = addOnce(v.date, v.start, v.hours, t);
+        if (r.no) return no(400, r.no);
+        if (r.added) log(`Added ${v.date} ${hhmm(v.start)} from the app`);
+        return done(r.already ? { already: true } : {});
+      }
+      case 'once/remove':
+        removeOnce(v.date, v.start);
+        return done();
+      case 'plan':
+        setWeekly(v.day, v.start, v.hours);
+        return done();
+      case 'plan/remove':
+        stopWeekly(v.day);
+        return done();
+      case 'order':
+        setOrder(v.order);
+        return done();
+      case 'pause':
+        setPaused(v.paused);
+        return done();
+      case 'pc/sleep': {
+        const r = requestSleep();
+        return r.sent ? done() : no(409, r.toast);
+      }
+      case 'pc/wake': {
+        const r = await wakePc();
+        return r.sent ? done() : no(409, r.toast);
+      }
+      case 'indoor/look':
+        return appLook(v);
+      case 'hold': {
+        const r = holdStart(v.centre, v.date, v.start, v.court, { by: 'app', chat: owner(), card: null, wide: false, cardless: true });
+        if (r.bad) return no(400, TIME_GONE);
+        return r.no ? no(409, r.no.say || r.no.toast) : done();
+      }
+      case 'hold/order': {
+        const r = holdOrder(v.id, v.what);
+        return r.ok ? done() : no(409, r.toast);
+      }
+      case 'push':
+        if (v.token) for (const d of state.apps) if (d !== me && d.push === v.token) d.push = null;      // one phone, one entry: no notification twice
+        me.push = v.token; save();
+        return done();
+      default:
+        return null;
+    }
+  }
+
+  return {
+    handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, holdFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures,
+    appHello, appPair, appAuth, appState, appAsk,
+  };
 }
 
 module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, cleanResult, intIn, VERSION, KINDS };
