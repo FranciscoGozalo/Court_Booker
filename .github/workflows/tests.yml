@@ -1,0 +1,20 @@
+# The bot's own tests, run on the Node version it runs on at Railway (the Dockerfile's node:22).
+# The PC they are written on has a newer Node, so this is where a difference between the two would show.
+# Nothing here deploys anything: Railway deploys from main by itself, whatever this says.
+name: Tests
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --version
+      - run: npm test
