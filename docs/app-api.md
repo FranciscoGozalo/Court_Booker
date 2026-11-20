@@ -288,7 +288,8 @@ as the owner gave them do not say. `week`: that Monday, YYYY-MM-DD.
   PC is already awake." / "Sent a moment ago. Give it a minute." (for 30 seconds after a wake-up).
 - `canSleep`, `sleepWhy`: the same for `POST /app/pc/sleep`: "Your PC is not linked to me." / "Your
   PC is not awake." / "Your PC books at 22:00, so it stays awake until then." (from 30 minutes
-  before a release) / "Your PC is holding a court for you. Let it go first."
+  before a release) / "Your PC is holding a court for you. Let it go first." / "Your PC is booking a
+  court for you. Wait for it to finish." (Book now at a park, under way)
 - `sleepAsked`: when sleep was asked for, while the PC has not collected the request yet (it has
   two minutes to; after that, or once collected, null). `wokeAt`: when the last wake-up was sent
   since the bot started, or null.
@@ -476,8 +477,8 @@ is fine, and things as they stand refuse it (the same request may work later).
 | `POST /app/card` | (app only) | `{ sealed }`: a card, sealed for `pc.cardKey` |
 | `POST /app/card/forget` | (app only) | `{}` |
 | `POST /app/push` | | `{ token }`: this phone's Expo push token, or null to stop |
-| `POST /app/clubspark/look` | | `{ venue, date, fresh }` → `{ ok: true, look }` (no state): a park's free courts |
-| `POST /app/clubspark/book` | | `{ venue, date, start, hours, court }`: Book now at a park |
+| `POST /app/clubspark/look` | (app only) | `{ venue, date, fresh }` → `{ ok: true, look }` (no state): a park's free courts |
+| `POST /app/clubspark/book` | (app only) | `{ venue, date, start, hours, court }`: Book now at a park |
 
 ```
 look = { centre, date, at, by: "pc" | "bot", note, sheet,
@@ -516,10 +517,10 @@ look = { venue, date, at, by: "pc", note,
          slots: [ { start, end, courts: [ { n, name } ] } ] }     // free courts only, by start time
 ```
 
-- What your PC reads: that park's ClubSpark booking sheet for the day, in a hidden Chrome of its
-  own, as any visitor would (no sign-in, nothing clicked), once: one page load and the requests
-  that page makes itself. It sends back the sheet's courts and each free interval's "Book" link, the
-  very links its nightly run books from.
+- What your PC reads: that park's ClubSpark booking sheet for the day, in a Chrome window of its
+  own kept off the screen, as any visitor would (no sign-in, nothing clicked), once: one page load
+  and the requests that page makes itself. It sends back the sheet's courts and each free
+  interval's "Book" link, the very links its nightly run books from.
 - `at`: when ClubSpark showed it (when your PC's answer came). `by`: always `"pc"`.
 - `slots`: one per start time with a free court, earliest first, each `end` the end of that
   interval (an hour at Kelvingrove). `n`: the court's number, the number its name ends with (as the
@@ -733,6 +734,7 @@ whether that time is on offer at all, then this, then the guards.
 - 409 "That list is old. Read the day again, then hold a court." (no look in the last 15 minutes showed the app that court free then)
 - 409, one of the `indoor.holdNo` sentences:
   - "Your PC is already holding a court."
+  - "Your PC is booking a court at a park just now. Hold one when it has finished." (Book now, under way)
   - "Your PC is not awake, and it is your PC that signs in to Glasgow Club and holds the court. Wake it and try again."
   - "Your PC's nightly booking run is at 22:00, so it holds nothing else from 21:25 to 22:15. The sheet below still opens."
   - "Glasgow Club's site was checking visitors from your home connection, so your PC is leaving it alone until 13:00."
@@ -968,7 +970,6 @@ phone's push token: the phone stays linked, and gets notifications again once th
   driver on the PC itself, as anything typed into Chrome does.
 - Pay is one payment for one hold, tried once. If the PC could not pay, the owner pays at the PC or
   lets the court go; the app cannot try again for that hold.
-
 - A restart of the bot during a hold loses the bot's handle on it: `state.hold` is null
   afterwards, `hold/order` answers "I am no longer following that hold…", and the one-at-a-time
   and six-an-hour counts start again. The PC still lets the court go by itself when its time is up.
@@ -1000,6 +1001,11 @@ phone's push token: the phone stays linked, and gets notifications again once th
   ClubSpark, but the bot will not have the result. What looks showed the app, the reads counted
   and the two hours after ClubSpark turned your PC away are lost with a restart too (your PC keeps
   its own two hours, and says so on the next look).
+- Your PC's link reads a park for a look before it asks for anything more: up to 40 seconds, most
+  often 10 to 20. A hold, a card or an indoor look asked meanwhile waits for it, and a hold not
+  collected within 25 seconds, or an indoor look not answered within 20, is given up (nothing was
+  started: ask again). A look is allowed while a court is held, Pay included; it opens a Chrome
+  window of its own, off the screen, beside the hold's.
 - Going back to version 2.8 drops the results of bookings at the other six parks from the settings
   file: 2.8 does not know their ids (`queenspark/…`), so it leaves them out when it first saves.
   Moving forward to 2.9 again does not bring them back, and from then on those bookings no longer
