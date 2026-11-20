@@ -1315,7 +1315,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
           `Code: <code>${code}</code>  (tap to copy)`,
           'Type it into the app within 10 minutes. It works once, and five wrong tries cancel it. A new /app replaces it.',
           ...(publicHost ? [`If the app asks where I am: <code>https://${M.esc(publicHost)}</code>`] : []),
-          'The app can do what you do here, and nothing more.',
+          "The app can do what you do here, and one thing more: see the free courts at Glasgow Life's parks and book one now. At most 4 bookings an hour, only a court it was shown free in the last 15 minutes, and it never pays.",
           state.apps.length >= A.MAX_DEVICES ? `${A.MAX_DEVICES} phones are linked already (${names}), and that is as many as I keep, so the app will be turned away. Unlink one in the app on that phone, or send /app forget to unlink them all.`
             : state.apps.length ? `Linked now: ${names}. /app forget unlinks every phone.` : 'No phone is linked yet.',
           ...(kept() === 'disk' ? [] : ['Note: without a Railway volume mounted at /data, the link to a phone is lost each time I restart.']),
@@ -1455,11 +1455,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const picture = kind => (pictures && KINDS.includes(kind) ? pictures[kind] : null);
 
   // ---------- the iPhone app (docs/app-api.md) ----------
-  // Another way in to what you already do in Telegram, over the HTTP server your PC talks to
-  // (lib/server.js, under /app/). A phone is linked with a code from /app. After that it proves
-  // itself with a token, of which only the SHA-256 is kept here (state.apps). Whatever it asks
-  // is done by the function behind the Telegram command or button of the same name, so the
-  // checks and the words are the same, and the app can do nothing you cannot do here.
+  // Another way in to what you do in Telegram, over the HTTP server your PC talks to (lib/server.js,
+  // under /app/). A phone is linked with a code from /app. After that it proves itself with a token,
+  // of which only the SHA-256 is kept here (state.apps). Whatever it asks that Telegram also offers
+  // is done by the function behind the Telegram command or button of the same name, so the checks
+  // and the words are the same. One thing is the app's alone: Glasgow Life's parks, read and booked
+  // now (lib/clubspark.js), within its bounds: at most 4 bookings an hour, only a court a look showed
+  // it free in the last 15 minutes, the weekly allowance, and never a payment.
   const pairing = A.createPairing();
   const pairLimiter = A.createLimiter();
   const lookLimiter = A.createLimiter(A.LOOKS_PER_MIN, A.LOOKS_WINDOW_MS);      // fresh reads asked for through the app, all phones together
@@ -1489,7 +1491,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     log(`A phone was linked to the app: ${device.name}.`);
     const chat = owner();
     if (chat !== null) {
-      say(chat, `<b>Phone linked</b>\n${M.esc(device.name)} can now do what you do here, and nothing more. /app forget unlinks every phone.`)
+      say(chat, `<b>Phone linked</b>\n${M.esc(device.name)} can now do what you do here, and book a court at Glasgow Life's parks now (at most 4 an hour, only one it was shown free in the last 15 minutes, never paying). /app forget unlinks every phone.`)
         .catch(e => log(`Could not say that a phone was linked: ${e.message}`));
     }
     return { status: 200, body: { ok: true, token, device: { id: device.id, name: device.name } } };

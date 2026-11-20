@@ -329,14 +329,14 @@ test('/app gives a code to link a phone, and /app forget unlinks every phone', a
     `Code: <code>${code}</code>  (tap to copy)`,
     'Type it into the app within 10 minutes. It works once, and five wrong tries cancel it. A new /app replaces it.',
     'If the app asks where I am: <code>https://court-booker.example.app</code>',
-    'The app can do what you do here, and nothing more.',
+    "The app can do what you do here, and one thing more: see the free courts at Glasgow Life's parks and book one now. At most 4 bookings an hour, only a court it was shown free in the last 15 minutes, and it never pays.",
     'No phone is linked yet.',
   ]);
   // The code links a phone, and Telegram says so.
   const paired = t.app.appPair({ code, name: 'Pat\'s <iPhone>' });
   assert.equal(paired.status, 200);
   await settle();
-  assert.equal(t.tg.last().text, '<b>Phone linked</b>\nPat\'s &lt;iPhone&gt; can now do what you do here, and nothing more. /app forget unlinks every phone.');
+  assert.equal(t.tg.last().text, '<b>Phone linked</b>\nPat\'s &lt;iPhone&gt; can now do what you do here, and book a court at Glasgow Life\'s parks now (at most 4 an hour, only one it was shown free in the last 15 minutes, never paying). /app forget unlinks every phone.');
   assert.ok(t.logs.includes('A phone was linked to the app: Pat\'s <iPhone>.'));
   // A second /app names the phones linked, and its code replaces the one before.
   const again = await codeFrom(t);

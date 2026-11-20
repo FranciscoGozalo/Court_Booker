@@ -127,6 +127,30 @@ test('the nightly run is handed what fits, in order; the rest is not handed over
   assert.deepEqual(W.fitJobs(jobs, {}).skip, []);
 });
 
+test('tonight\'s release is fitted before a one-off whose day opened earlier and is tried again: the retry never takes the week\'s last session', () => {
+  // One session left in the week of Mon 16 Nov. The retry (opened on the 13th) comes first in the order the PC is handed them.
+  const retry = { id: '2026-11-20@18:00', date: '2026-11-20', start: 1080, end: 1140, releaseAt: at('2026-11-13T22:00:00Z') };
+  const tonight = { id: '2026-11-22@10:00', date: '2026-11-22', start: 600, end: 660, releaseAt: at('2026-11-15T22:00:00Z') };
+  const { keep, skip } = W.fitJobs([retry, tonight], SIX);
+  assert.deepEqual(keep.map(j => j.id), ['2026-11-22@10:00']);
+  assert.deepEqual(skip.map(s => s.job.id), ['2026-11-20@18:00']);
+  // What fits is handed over in the order given, whatever order it was fitted in.
+  const more = { id: '2026-11-21@09:00', date: '2026-11-21', start: 540, end: 600, releaseAt: at('2026-11-14T22:00:00Z') };
+  assert.deepEqual(W.fitJobs([retry, more, tonight], {}).keep.map(j => j.id), ['2026-11-20@18:00', '2026-11-21@09:00', '2026-11-22@10:00']);
+});
+
+test('at the limit, the nightly run is handed tonight\'s booking and not an open one-off\'s retry', async () => {
+  // Six booked in the week of Mon 23 Nov; Thursdays every week (tonight, Thu 19 Nov 22:00, opens the 26th); and a one-off on
+  // Wed 25 Nov, open since last night and not booked yet, which the run would try again.
+  const results = booked([['maryhill', '2026-11-23', 600, 1], ['maryhill', '2026-11-24', 600, 1], ['maryhill', '2026-11-27', 600, 1], ['maryhill', '2026-11-28', 600, 1],
+    ['maryhill', '2026-11-29', 600, 1], ['queenspark', '2026-11-29', 1080, 1]]);
+  const t = makeBot('2026-11-19T21:55:00Z', { results, plan: { thu: { start: 1140, hours: 1 } }, once: [{ date: '2026-11-25', start: 1080, hours: 1 }] });
+  const got = t.app.jobsForAgent({}, { run: true });
+  assert.deepEqual(got.jobs.map(j => j.id), ['2026-11-26@19:00']);
+  await settle();
+  assert.match(t.app.state.results['2026-11-25@18:00'].why, /^that would be 8 sessions in the week of Mon 23 Nov/);
+});
+
 // ---------- in Telegram, the app and the nightly run ----------
 
 test("a one-off that would pass the week's limit is refused, in Telegram and the app alike, in the same words", async () => {
