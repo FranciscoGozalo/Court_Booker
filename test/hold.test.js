@@ -18,12 +18,12 @@ const TITLE = '<b>Gorbals · Fri 20 Nov · 18:00–19:00 · Court 3</b>';
 const LAPSES = 'If the court was in your basket and not paid for, the hold lapses by itself.';
 const LOOK_UNDER = 'Look under Bookings on Glasgow Club\'s site.';
 
-function makeApp(t0, { pcHoldMs = 60, env = {}, glasgow = null } = {}) {
+function makeApp(t0, { pcHoldMs = 60, env = {}, glasgow = null, store = memStore({ owner: OWNER, order: [3, 4, 5, 2, 1, 6] }) } = {}) {
   const clock = { t: at(t0) };
   const tg = fakeTelegram(clock);
   const logs = [];
   const reader = glasgow || { asked: 0, day: async () => { reader.asked++; return { at: clock.t, slots: [], listed: 1 }; }, peek: () => null, health: () => null };
-  const app = createApp({ now: () => clock.t, tg, store: memStore({ owner: OWNER, order: [3, 4, 5, 2, 1, 6] }), pictures: PICTURES, linked: true, glasgow: typeof reader === 'function' ? reader(clock) : reader, log: l => logs.push(l), env, pcHoldMs });
+  const app = createApp({ now: () => clock.t, tg, store, pictures: PICTURES, linked: true, glasgow: typeof reader === 'function' ? reader(clock) : reader, log: l => logs.push(l), env, pcHoldMs, retryMs: 30 });
   return { app, tg, clock, logs, glasgow: reader };
 }
 let tapId = 1;
@@ -63,18 +63,18 @@ const fits = scr => {
 const keysOf = scr => scr.keyboard.inline_keyboard.flat().map(b => b.text);
 const wordsOf = scr => scr.caption.split('\n').slice(1).join('\n');
 
-test('the card of a court in your basket: what to pay, where the payment page is, and the three buttons', () => {
+test('the card of a court in your basket: what to pay, where the payment page is, and the two buttons', () => {
   const s = UI.indoorHold(ctxAt(`${TUE}T12:02:00Z`), holdAt());
+  // Signing in to Glasgow Club on a phone does not show the basket your PC filled (tried by
+  // the owner): nothing says to pay on the phone, and there is no "Open my basket" any more.
   assert.equal(s.caption, [
     TITLE,
     '<b>In your basket</b>: £23.00 to pay. Your PC signed in as you and put it there at 12:01. The payment page is open in Chrome on your PC.',
-    'To pay on this phone: open your basket below and sign in. If the court is there, pay there, then tap <b>I have paid</b>.',
-    'Nobody has tried that yet. If your basket comes up empty, the court is only in the browser on your PC: pay in the Chrome window there, or let it go.',
+    'Pay in the Chrome window on your PC, then tap <b>I have paid</b>.',
     'Unpaid, your PC lets it go at 12:13.',
   ].join('\n'));
   // No Menu while it is going: the card stays the hold's card, with the buttons that matter.
   assert.deepEqual(s.keyboard.inline_keyboard.flat().map(b => [b.text, b.callback_data || b.url]), [
-    ['Open my basket', 'https://glasgowclub.gladstonego.cloud/book/basket'],
     ['I have paid', 'gp:a1b2c3d4e5f6'], ['Let it go', 'gx:a1b2c3d4e5f6'],
   ]);
   fits(s);
@@ -169,7 +169,7 @@ test('Hold: the PC collects it on its ping, the card follows each step, and Let 
   await settle();
   assert.equal(t.tg.last().text.split('\n')[1], '<b>In your basket</b>: £23.00 to pay. Your PC signed in as you and put it there at 12:00. The payment page is open in Chrome on your PC.');
   assert.match(t.tg.last().text, /\nUnpaid, your PC lets it go at 12:12\.$/);
-  assert.deepEqual(texts(t.tg.last()), ['Open my basket', 'I have paid', 'Let it go']);
+  assert.deepEqual(texts(t.tg.last()), ['I have paid', 'Let it go']);
   assert.ok(t.tg.calls.every(c => c.id === 7 && (c.method === 'media' || c.method === 'caption')));
   // The PC asks every few seconds whether you tapped anything: no, and the card is left alone.
   const drawn = t.tg.calls.length;
@@ -361,7 +361,7 @@ test('the PC goes silent: the card says so after a minute or so, and takes it ba
   t.clock.t += 1000;
   await t.app.tick();
   assert.match(t.tg.last().text, /\nNo word from your PC for over a minute\. It may have lost its connection\.$/);
-  assert.deepEqual(texts(t.tg.last()), ['Open my basket', 'I have paid', 'Let it go']);
+  assert.deepEqual(texts(t.tg.last()), ['I have paid', 'Let it go']);
   const drawn = t.tg.calls.length;
   await t.app.tick();
   assert.equal(t.tg.calls.length, drawn);                                                      // said once
@@ -437,7 +437,7 @@ test('one court at a time: a tap while one is held brings its card to where you 
   await settle();
   // Card 8 is now the hold's card, with its buttons; later news goes there.
   assert.deepEqual(t.tg.calls.map(c => c.id), [8]);
-  assert.deepEqual(texts(t.tg.last()), ['Open my basket', 'I have paid', 'Let it go']);
+  assert.deepEqual(texts(t.tg.last()), ['I have paid', 'Let it go']);
   note(t, 'released', { basket: 'empty', removed: 1, why: 'time', checked: true });
   await settle();
   assert.equal(t.tg.last().id, 8);

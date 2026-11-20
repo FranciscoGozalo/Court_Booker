@@ -4,9 +4,10 @@
 // (Cloudflare turns Railway away), then reports back here, and the bot tells you the court,
 // the time and the gate code.
 // For the indoor courts at Gorbals and Scotstoun (Glasgow Club) it looks up what is free, and
-// "Hold" has your PC sign in there and put a court in your basket; paying is always yours
-// (lib/glasgowclub.js says why it goes no further). Glasgow Club's site turns Railway away too,
-// so while your PC is awake it does the reading as well.
+// "Hold" has your PC sign in there and put a court in your basket. Paying is yours: at your PC,
+// or from the iPhone app, which has your PC pay with the card it keeps (the bot passes on the
+// card and its security code sealed for your PC's key, and can open neither). Glasgow Club's
+// site turns Railway away too, so while your PC is awake it does the reading as well.
 // The iPhone app (docs/app-api.md) is another way in to the same things: what it asks is done by
 // the functions the Telegram commands and buttons use, with the same checks.
 
@@ -23,7 +24,7 @@ const G = require('./lib/glasgowclub');
 const A = require('./lib/appapi');
 const { createExpoPush, mask: maskPush } = require('./lib/push');
 
-const VERSION = '2.8';
+const VERSION = '2.9';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -44,7 +45,7 @@ const TIME_GONE = 'That time is no longer on offer. Pick again.';
 // Said to the app when it asks to hold a court that no look showed it free in the last 15 minutes.
 const LIST_OLD = 'That list is old. Read the day again, then hold a court.';
 // What the iPhone app can ask for (POST /app/<name>, docs/app-api.md).
-const APP_ASKS = ['unpair', 'once', 'once/remove', 'plan', 'plan/remove', 'order', 'pause', 'pc/sleep', 'pc/wake', 'indoor/look', 'hold', 'hold/order', 'push'];
+const APP_ASKS = ['unpair', 'once', 'once/remove', 'plan', 'plan/remove', 'order', 'pause', 'pc/sleep', 'pc/wake', 'indoor/look', 'hold', 'hold/order', 'card', 'card/forget', 'push'];
 
 // The banner pictures (made by art/make-banners.cjs): the menu card in three versions, one for
 // each state of your PC (the coloured dot), and one each for a court booked and not booked.
@@ -148,8 +149,9 @@ function readBackup(text) {
 // (lib/glasgowclub.js); both are swapped out in tests. `pcLookMs` is how long your PC gets to
 // answer when it is asked to read Glasgow Club's sheet, and `pcHoldMs` how long it gets to
 // collect a court to hold. `push` sends a notification to the phones linked to the app
-// (lib/push.js: Expo's push service); tests swap it out too.
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000, pcHoldMs = 25000, push = null }) {
+// (lib/push.js: Expo's push service); tests swap it out too. `retryMs`: how long before a message
+// that must not be lost (see strangerNote) is tried again when Telegram will not take it.
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000, pcHoldMs = 25000, push = null, retryMs = 3000 }) {
   const indoor = glasgow || G.createGlasgowClub({ now, log });
   const pushOut = push || createExpoPush({ log });
   const fromVariable = readBackup(env.COURT_SETTINGS);
@@ -343,8 +345,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return { toast: 'Sleep sent', screen: UI.home(ctx()), view: 'h', sent: true };
   }
   // What the PC should do now, collected by its ping: { look } (read a day of Glasgow Club's
-  // sheet: someone is waiting for it, so it goes first), { hold } (put a court in your basket)
-  // or { sleep: true }, each once, or nothing.
+  // sheet: someone is waiting for it, so it goes first), { hold } (put a court in your basket),
+  // { card } or { forgetCard } (keep a card from the app, or forget the one kept: see "your
+  // card") or { sleep: true }, each once, or nothing.
   function takeOrder(t) {
     if (lookAsk && !lookAsk.taken) {
       lookAsk.taken = true;
@@ -357,6 +360,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       drawHold(hold);
       return { hold: { id: hold.id, key: hold.key, date: hold.date, start: hold.start, court: hold.court } };
     }
+    const card = takeCard(t);
+    if (card) return card;
     if (sleepAsk === null) return {};
     const fresh = t - sleepAsk <= SLEEP_ASK_MS && !sleepBlocker(t);
     sleepAsk = null;
@@ -442,10 +447,22 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // "Hold" under a free court: your PC signs in to Glasgow Club, puts that court in your basket
   // and stops at the payment page, in a Chrome window on the PC (tools/glasgow-club-book.js
   // there). The request rides on the PC's ping, like a look. The tool then says each step on
-  // POST /agent/hold, and every note of its is answered with what you have tapped since: "Let it
-  // go" or "I have paid". Paying is always yours: neither the bot nor the PC can do it.
+  // POST /agent/hold, and every note of its is answered with what you have asked for since:
+  // "Let it go", "I have paid", or, from the iPhone app only, "Pay".
+  // Paying: the bot never can, and never sees a card. The card is typed into the app, sealed
+  // there for your PC's own key, and kept on your PC (see "your card", below). Pay in the app
+  // sends the price you confirmed there and the card's security code, sealed the same way. The
+  // bot checks that the court is in the basket, that your PC keeps a card and says it can pay
+  // for this court, and that the price is the one your PC read; then it hands the order to the
+  // PC with the PC's next note, once, and keeps nothing of the sealed code. The PC types the card
+  // in, presses Pay once, and says how it goes: "paying", "approve" (your bank wants you to
+  // approve it in your banking app) and how it ended. Telegram has no Pay button: the security
+  // code only ever comes from the app.
+  // Once the PC says Pay was pressed (`pressed`), or may have been ('maybe': Chrome gave it no
+  // answer to the press), that is said with however the hold ends, whoever ends it, and such a
+  // hold is never told to let go.
   // One court at a time, never around the PC's nightly booking run, at most HOLD_PER_HOUR an hour.
-  const HOLD_STAGES = ['signing-in', 'signed-in', 'adding', 'held'];
+  const HOLD_STAGES = ['signing-in', 'signed-in', 'adding', 'held', 'paying', 'approve'];
   const HOLD_ENDS = ['failed', 'refused', 'released', 'booked', 'left', 'unsure', 'closed', 'slept', 'gone'];
   const HOLD_OURS = ['timeout', 'nostart'];           // endings this bot decided on itself: the PC's own word replaces them
   const HOLD_BEFORE_MS = 35 * 60 * 1000;              // none is started this long before the release time...
@@ -458,8 +475,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const HOLD_PER_HOUR = 6;                            // each is a sign-in to Glasgow Club
   const HOLD_QUIET_MS = 60 * 60 * 1000;               // after Glasgow Club's site checked visitors from home
   const HOLD_REDRAW_MS = 5000;                        // a card Telegram would not redraw is tried again after this
+  const PAY_ORDER_MS = 30 * 1000;                     // an order to pay goes to the PC within this long, or is dropped unsent
+  const PAY_TOLD_MS = 30 * 1000;                      // ...and once it has gone, the PC says it is paying within this long, or the card says so
+  const PAY_ROOM_MS = 30 * 1000;                      // no order to pay is taken with less of the hold's time left than this
+  const PAYING = ['paying', 'approve'];
   let hold = null;                                    // the hold being followed, or the last one
   const gaveUp = new Set();                           // holds given up on here: a PC that still has one is told to let it go
+  // Holds given up on here for a newer one although Pay was pressed, may have been, or was
+  // ordered and never answered: still followed to their end, on their own cards.
+  const former = new Map();
   let holdStarts = [];
   let holdQuiet = 0;
   const clock = ms => { const w = londonWall(ms); return hhmm(w.hh * 60 + w.mm); };
@@ -469,10 +493,36 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const rel = londonInstant(addDays(todayCivil(t), d), releaseMin);
     return t >= rel - HOLD_BEFORE_MS && t <= rel + HOLD_AFTER_MS;
   });
+  // What is known here of a press of Pay for a hold, strongest first: true (the PC said it
+  // pressed), 'maybe' (the PC said it may have: it got no answer to the press; or its link
+  // says a press was noted before the tool went), 'unheard' (an order to pay went out to the PC,
+  // and the PC never said how that went), false.
+  const PRESS_RANK = [false, 'unheard', 'maybe', true];
+  const stronger = (a, b) => (PRESS_RANK.indexOf(a) >= PRESS_RANK.indexOf(b) ? a : b);
+  const pressedSaid = v => (v === true ? true : v === 'maybe' ? 'maybe' : null);
+  const pressedNow = h => h.pressed === true || h.pressed === 'maybe';
+  // `silent`: the ending is not the tool's own word (the bot's own "nothing more was heard",
+  // or the PC link's "the tool has gone"). Only then does an order to pay that went out and was
+  // never answered count for anything: the tool's own endings say for themselves whether it pressed.
+  const pressedSoFar = (h, silent) => (pressedNow(h) ? h.pressed : silent && (h.payState === 'told' || h.payState === 'paying') ? 'unheard' : false);
+  // An order to pay that has not gone out to the PC (any more): the sealed code goes, and with it
+  // the order. Nothing was sent, so nothing was pressed, and Pay may be asked for again.
+  function withdrawPay(h, why) {
+    h.paySealed = null;
+    h.payState = 'lost';
+    h.payFailed = why;
+    log(`Hold: the order to pay for ${holdName(h)} was dropped (${why}).`);
+  }
   function giveUpOn(h, end) {
     h.end = end;
-    gaveUp.add(h.id);
-    if (gaveUp.size > 50) gaveUp.delete(gaveUp.values().next().value);
+    if (end === 'timeout') h.pressed = pressedSoFar(h, true);
+    if (h.payState === 'asked') withdrawPay(h, 'the hold ended before your PC could be told');
+    // A PC that still has a hold given up on here is told to let it go: never one for which
+    // Pay was pressed, may have been, or was ordered and not answered.
+    if (!h.pressed) {
+      gaveUp.add(h.id);
+      if (gaveUp.size > 50) gaveUp.delete(gaveUp.values().next().value);
+    }
     holdEnded(h);
   }
   // How a hold ended, as a note for the app: the card's own words about the ending, whoever
@@ -543,9 +593,30 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       giveUpOn(hold, 'timeout');
       drawHold(hold);
     }
+    // ...unless Pay was pressed for it, may have been, or was ordered and never answered: that
+    // one is followed to its end on its own card, whatever is held next.
+    if (hold && hold.pressed) {
+      former.set(hold.id, hold);
+      if (former.size > 3) former.delete(former.keys().next().value);
+    }
     const h = { id: crypto.randomBytes(6).toString('hex'), by: where.by, chat: where.chat, card: where.card, wide: where.wide, cardless: !!where.cardless,
       key, date: dateIso, start, court, at: t, heard: t,
-      taken: false, takenAt: null, stage: 'asked', end: null, order: null, price: '', heldAt: null, until: null, why: '', basket: '', removed: null, words: '', checked: false, silent: false, draws: null, redrawAt: null };
+      taken: false, takenAt: null, stage: 'asked', end: null, order: null, price: '', heldAt: null, until: null, why: '', basket: '', removed: null, words: '', checked: false, silent: false, draws: null, redrawAt: null,
+      // Paying from the app. `pay`: what the PC says with each of its notes in the basket:
+      // 'ready' (it can pay for this one), 'off' or 'failed' (it cannot, or it tried and could
+      // not: `payWhy`), or '' (it said nothing: an older PC). `payState`: null; 'asked' (the app
+      // asked at `payAskedAt`, and the order waits for the PC's next note, with its sealed code in
+      // `paySealed`); 'told' (it went to the PC at `payToldAt`, and the sealed code is no longer
+      // kept here); 'paying' (the PC said it is paying); 'failed' (the PC said it could not, and
+      // did not press Pay: `payFailed`); 'lost' (it never reached the PC, or the PC did not take
+      // it up: `payFailed`. Nothing was pressed, and Pay may be asked for again). `payAmount`: the
+      // amount confirmed in the app. `pressedAt`: when a press was heard of here. `payDoubt`: why
+      // a press is only "maybe". `payWords`: what the payment page said after the press.
+      // `pressed`: what is known of a press (PRESS_RANK). `bank`: with an ending, 'approve' (your
+      // bank's approval had not come) or 'code' (it asked for a code, which the PC never types).
+      // `payAfter`: notes from the basket heard since the order went to the PC, saying nothing of it.
+      pay: '', payWhy: '', payState: null, payAmount: '', paySealed: null, payAskedAt: null, payToldAt: null, payQuiet: false, payAfter: 0, payFailed: '',
+      payDoubt: '', payWords: '', pressedAt: null, pressed: false, bank: '' };
     hold = h;
     holdStarts.push(t);
     log(`Hold asked for: ${holdName(h)}.`);
@@ -583,11 +654,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
   // "Let it go" or "Stop" (gx: release) and "I have paid" (gp: done) on a hold's card, or the
   // same asked by the app. The PC hears of it on its next note, a few seconds on. `ok` says
-  // the order was taken; without it the toast says why not.
+  // the order was taken; without it the toast says why not. While your PC pays, neither is
+  // taken: it is at the payment page, and only it can say how that ends.
   function holdOrder(id, what) {
     const h = hold;
     if (!h || h.id !== id) return { toast: 'I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up.' };
     if (h.end) return { toast: 'That hold is over.' };
+    if (pressedNow(h)) return { toast: h.pressed === true ? 'Your PC has pressed Pay. Wait for the answer.' : 'Your PC may have pressed Pay. Wait for the answer.' };
+    if (PAYING.includes(h.stage) || h.payState === 'paying') return { toast: 'Your PC is paying for it. Wait for its answer.' };
+    if (h.payState === 'told') return { toast: 'Your PC has been told to pay. Wait for its answer.' };
     if (what === 'done' && h.stage !== 'held') return { toast: 'It is not in your basket yet.' };      // "I have paid" says nothing until there is something to pay for, and never stops a hold
     if (!h.taken) {                                                      // the PC has not collected it: nothing to undo
       giveUpOn(h, 'stopped');
@@ -596,42 +671,219 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       return { toast: 'Stopped', ok: true };
     }
     if (h.order) return { toast: h.order === 'release' ? 'Already letting it go.' : 'Already checking.' };
+    // An order to pay that has not gone out to the PC yet is dropped by this tap: the PC is
+    // never asked for both.
+    if (h.payState === 'asked') withdrawPay(h, `you asked to ${what === 'done' ? 'check your Bookings page' : 'let it go'} before your PC had been told`);
     h.order = what;
     log(`Hold: you tapped ${what === 'done' ? 'I have paid' : 'Let it go'}.`);
     drawHold(h);
     return { toast: what === 'done' ? 'Checking your Bookings page' : 'Letting it go', ok: true };
   }
+  // What stands in the way of an order to pay for the hold `h` now, from the app, in words, or
+  // null. `can.pay` in the app's state is the same check. (The amount is checked on its own.)
+  function payNo(h, t) {
+    if (h.end) return 'That hold is over.';
+    if (PAYING.includes(h.stage) || h.payState === 'paying' || pressedNow(h)) return 'Your PC is paying for it already.';
+    if (h.payState === 'asked' || h.payState === 'told') return 'Your PC has been told to pay for it already.';
+    if (h.payState === 'failed') return 'Your PC tried to pay for it once and could not, so it will not try again. Pay at your PC, or let it go.';
+    if (h.stage !== 'held') return 'It is not in your basket yet.';
+    if (h.order) return h.order === 'release' ? 'Already letting it go.' : 'Already checking.';
+    if (cardAsk && cardAsk.kind === 'forget') return 'Your PC is forgetting its card.';
+    if (cardAsk) return 'Your new card has not reached your PC yet. Try again in a moment.';
+    if (!pcCard) return 'There is no card on your PC. Add one in the app first.';
+    if (h.pay !== 'ready') return h.pay && h.payWhy ? `Your PC cannot pay for this court: ${h.payWhy}.` : 'Your PC has not said that it can pay for this court.';
+    if (!h.price) return 'Your PC could not read the price, so it cannot pay for this court.';
+    if (h.silent || t - h.heard >= HOLD_SILENT_MS) return 'I have not heard from your PC for over a minute, so I am not asking it to pay.';
+    if (h.until && h.until - t < PAY_ROOM_MS) return 'Too little of the hold\'s time is left to pay for it from here. Pay at your PC, or let it go.';
+    return null;
+  }
+  // Pay, from the app: the hold's id, the amount you confirmed there, and the card's security
+  // code sealed for your PC. Taken only as payNo allows, and only for the price your PC read.
+  // The order then waits for the PC's next note (a few seconds), PAY_ORDER_MS at most.
+  function holdPay(id, amount, sealed) {
+    const t = now(), h = hold;
+    if (!h || h.id !== id) return { toast: 'I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up.' };
+    const no = payNo(h, t);
+    if (no) return { toast: no };
+    if (amount !== h.price) return { toast: `The price is ${h.price}, not ${amount}. Look at it again before you pay.` };
+    h.payState = 'asked';
+    h.payAmount = amount;
+    h.paySealed = sealed;
+    h.payAskedAt = t;
+    h.payToldAt = null;
+    h.payQuiet = false;
+    h.payAfter = 0;
+    h.payFailed = '';
+    log(`Hold: you asked in the app to pay ${amount} for ${holdName(h)} with the card your PC keeps.`);
+    drawHold(h);
+    return { ok: true };
+  }
+
+  // ---------- messages about holds that have no card to say it on ----------
+  // Sent at once; if Telegram will not take one, the timer tries again, less and less often,
+  // for about half an hour. A newer word about the same hold takes the place of an older one
+  // that has not got through.
+  const NOTE_TRIES = 40;
+  const outbox = [];                    // { id, chat, scr, tries, nextAt, sending }
+  function postNote(id, chat, scr, t) {
+    for (let i = outbox.length - 1; i >= 0; i--) if (outbox[i].id === id && !outbox[i].sending) outbox.splice(i, 1);
+    outbox.push({ id, chat, scr, tries: 0, nextAt: t, sending: false });
+    return flushNotes(t);
+  }
+  async function flushNotes(t) {
+    for (const item of [...outbox]) {
+      if (item.sending || t < item.nextAt) continue;
+      item.sending = true;
+      try {
+        await say(item.chat, item.scr.caption, { reply_markup: item.scr.keyboard });
+        if (outbox.includes(item)) outbox.splice(outbox.indexOf(item), 1);
+      } catch (err) {
+        item.sending = false;
+        item.tries++;
+        log(`Could not tell you about a hold I am not following: ${err.message}`);
+        if (item.tries >= NOTE_TRIES) {
+          if (outbox.includes(item)) outbox.splice(outbox.indexOf(item), 1);
+          log('Gave up on that message.');
+        } else item.nextAt = now() + (err.retryAfter ? err.retryAfter * 1000 : Math.min(60000, retryMs * 2 ** Math.min(10, item.tries - 1)));
+      }
+    }
+  }
+
+  // A note about a hold this bot is not following: it restarted while the PC held the court
+  // (holds are kept in memory only). Nothing can be done about such a hold from here, and its
+  // card no longer changes. But if the PC says Pay was pressed for it, or may have been, that
+  // is not to be lost: you are told so, in a message and as a note for the app, once while it
+  // is still going and once when it has ended, in the words its card would have had. (A beat
+  // comes every few seconds; neither is ever said twice.) The same once if the PC says it could
+  // not pay: the old card may be standing at "Paying…".
+  const noteText = v => String(v ?? '').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '').slice(0, 300);
+  const BASKETS = ['empty', 'items', 'unclear', 'untouched', 'gone', 'still'];
+  // What a note says of a press: on its way to paying ('paying', 'approve') and with an ending, in its `pressed`.
+  const pressOf = (raw, stage) => (PAYING.includes(stage) || HOLD_ENDS.includes(stage) ? pressedSaid(raw.pressed) : null);
+  const strangers = new Map();          // id -> { going, ended, failed: what has been said; pressed; court: which court, once a note has said }
+  function strangerNote(raw, id, stage) {
+    const t = now();
+    const ending = HOLD_ENDS.includes(stage);
+    const s = strangers.get(id) || { going: false, ended: false, failed: false, pressed: null, court: null };
+    const said = pressOf(raw, stage);
+    s.pressed = said ? stronger(s.pressed || false, said) : s.pressed;   // the PC link's "gone" may say nothing of a press: what an earlier note said stands
+    const couldNot = !ending && stage === 'held' && raw.pay === 'failed' && !s.pressed;
+    if (!s.pressed && !couldNot) return;
+    if (!s.court && Object.prototype.hasOwnProperty.call(G.CENTRES, raw.key) && typeof raw.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.date)
+      && !Number.isNaN(Date.parse(`${raw.date}T12:00:00Z`)) && Number.isInteger(raw.start) && raw.start >= 0 && raw.start <= 23 * 60 && Number.isInteger(raw.court) && raw.court >= 1 && raw.court <= 20) {
+      s.court = { key: raw.key, date: raw.date, start: raw.start, court: raw.court };
+    }
+    strangers.set(id, s);
+    if (strangers.size > 20) strangers.delete(strangers.keys().next().value);
+    if (couldNot ? s.failed || s.ended : ending ? s.ended : s.going || s.ended) return;
+    if (couldNot) s.failed = true; else if (ending) s.ended = true; else s.going = true;
+    const scr = UI.indoorHoldStray(ctx(), { ...(s.court || {}), stage: 'held', pressed: s.pressed || false, end: ending ? stage : null, why: noteText(raw.why), words: noteText(raw.words),
+      basket: BASKETS.includes(raw.basket) ? raw.basket : '', removed: null, checked: raw.checked === true, bank: ['approve', 'code'].includes(raw.bank) ? raw.bank : '',
+      payFailed: couldNot ? noteText(raw.payWhy) || 'no reason was given' : '' });
+    log(couldNot ? 'A hold I am not following: your PC says it could not pay for it. Told you so.'
+      : `A hold I am not following ${ending ? `ended (${stage})` : 'is going on'}, and your PC says Pay ${s.pressed === 'maybe' ? 'may have been' : 'was'} pressed for it: told you so.`);
+    // The same words as a note for the app, which has no hold to show them on either.
+    const [, ...lines] = scr.caption.split('\n').map(A.plain);
+    const where = s.court ? `${G.CENTRES[s.court.key].name} court ${s.court.court}` : 'a court your PC was holding';
+    note('hold', `${ending ? (stage === 'booked' ? 'Booked' : 'Hold ended') : couldNot ? 'Not paid' : 'Paying'} · ${where}`,
+      `${s.court ? `${label(civilOf(s.court.date))} · ${hhmm(s.court.start)}–${hhmm(s.court.start + 60)}. ` : ''}${lines.join(' ')}`);
+    const chat = owner();
+    if (chat !== null) postNote(id, chat, scr, t);
+  }
+
   // A note from the PC's tool about a hold: a step, or how it ended. The answer carries what
-  // you have tapped since. A hold given up on here is told to let go; one this bot does not
-  // know (it restarted meanwhile) is left to run out by itself on the PC.
+  // you have asked for since. A hold given up on here is told to let go; one this bot does not
+  // know (it restarted meanwhile) is left to run out by itself on the PC (see strangerNote).
   function holdFromAgent(raw) {
     const t = now();
     const id = raw && typeof raw === 'object' && typeof raw.id === 'string' ? raw.id : null;
     const stage = raw && typeof raw === 'object' && typeof raw.stage === 'string' ? raw.stage : '';
-    const h = hold;
-    if (!id || !h || id !== h.id) return id && gaveUp.has(id) ? { ok: true, order: 'release' } : { ok: true, unknown: true };
+    // What this very note says of a press. Whatever was decided here before, a hold whose PC
+    // says Pay was pressed, or may have been, is never told to let go.
+    const says = id ? pressOf(raw, stage) : null;
+    if (says) gaveUp.delete(id);
+    const h = hold && id === hold.id ? hold : (id && former.get(id)) || null;
+    if (!h) {
+      if (id && gaveUp.has(id)) return { ok: true, order: 'release' };
+      if (id && /^[0-9a-f]{6,40}$/.test(id)) strangerNote(raw, id, stage);
+      return { ok: true, unknown: true };
+    }
     const ending = HOLD_ENDS.includes(stage);
+    const text = noteText;
     // Over already. What the PC itself says of the ending replaces one this bot only assumed.
-    if (h.end && !(ending && stage !== 'gone' && HOLD_OURS.includes(h.end))) return gaveUp.has(id) && !ending ? { ok: true, order: 'release' } : { ok: true };
+    if (h.end && !(ending && stage !== 'gone' && HOLD_OURS.includes(h.end))) {
+      // ...and a press that is heard of only now (in a late note, or in the PC link's "gone",
+      // which knows of the tool's note of a press) still goes on a card that was ended on a guess.
+      if (says && HOLD_OURS.includes(h.end) && stronger(h.pressed, says) !== h.pressed) {
+        h.pressed = says;
+        h.pressedAt = h.pressedAt ?? t;
+        log(`Hold: ${holdName(h)} was over here, and your PC now says Pay ${says === true ? 'was' : 'may have been'} pressed.`);
+        drawHold(h);
+      }
+      return gaveUp.has(id) && !ending ? { ok: true, order: 'release' } : { ok: true };
+    }
     state.lastSeen = t;                                                  // a note from the PC shows it is awake, as a ping does
     h.heard = t;
-    const text = v => String(v ?? '').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '').slice(0, 300);
     let redraw = h.silent;
     h.silent = false;
     if (ending) {
+      // Whether Pay was pressed. The tool's own word with its ending counts first; failing
+      // that, what it said while the hold was going. "gone" is the PC link's word: the link
+      // knows only whether the tool noted a press, so there the stronger of the two counts.
+      const own = pressedSoFar(h, stage === 'gone');
+      h.pressed = stage === 'gone' ? stronger(own, says || false) : says ?? own;
       h.end = stage;
       h.why = text(raw.why);
       h.words = text(raw.words);
-      h.basket = ['empty', 'items', 'unclear', 'untouched', 'gone', 'still'].includes(raw.basket) ? raw.basket : '';
+      h.basket = BASKETS.includes(raw.basket) ? raw.basket : '';
       h.removed = Number.isInteger(raw.removed) && raw.removed >= 0 ? raw.removed : null;
       h.checked = raw.checked === true;
+      h.bank = raw.bank === 'approve' || raw.bank === 'code' ? raw.bank : '';
+      h.order = null;
+      if (h.payState === 'asked') withdrawPay(h, 'the hold ended before your PC could be told');
       if (raw.kind === 'challenge') {                                    // the site was checking visitors: no holds, and no looks by the PC, for an hour
         holdQuiet = t + HOLD_QUIET_MS;
         if (indoor.turnedAway) indoor.turnedAway('pc', 'the site was checking its visitors when your PC went to hold a court');
       }
-      log(`Hold ${stage}: ${holdName(h)}${h.why ? ` (${h.why})` : ''}.`);
+      log(`Hold ${stage}: ${holdName(h)}${h.why ? ` (${h.why})` : ''}${h.pressed ? `; Pay ${h.pressed === true ? 'was' : h.pressed === 'maybe' ? 'may have been' : 'was ordered and may have been'} pressed` : ''}.`);
       drawHold(h);
       holdEnded(h);
+      return { ok: true };
+    }
+    const left = Number(raw.left);
+    const newUntil = left > 0 && left <= 30 * 60 * 1000 ? t + left : null;
+    if (PAYING.includes(stage)) {
+      if (HOLD_STAGES.indexOf(h.stage) < HOLD_STAGES.indexOf('held')) return { ok: true };       // paying for a court that never reached the basket: not a note that makes sense
+      // Paying: the PC took up the order (it says so before it types a key), pressed Pay (or
+      // may have), or your bank wants you to approve the payment. A press, as first heard,
+      // stands: a "may have" does not turn into a "pressed" on a later note, nor the other way.
+      if (h.payState !== 'paying') {
+        h.payState = 'paying';
+        h.paySealed = null;
+        h.payFailed = '';
+        log(`Hold: your PC is paying${h.payAmount ? ` ${h.payAmount}` : ''} for ${holdName(h)}.`);
+        redraw = true;
+      }
+      if (says && !pressedNow(h)) {
+        h.pressed = says;
+        h.pressedAt = t;
+        h.payDoubt = says === 'maybe' ? text(raw.payWhy).slice(0, 160) : '';
+        log(`Hold: your PC ${says === 'maybe' ? 'may have pressed' : 'pressed'} Pay for ${holdName(h)}${h.payAmount ? ` (${h.payAmount})` : ''}${h.payDoubt ? `: ${h.payDoubt}` : ''}.`);
+        redraw = true;
+      }
+      if (HOLD_STAGES.indexOf(stage) > HOLD_STAGES.indexOf(h.stage)) {    // forwards only: paying, then approve
+        h.stage = stage;
+        if (stage === 'approve') log(`Hold: your bank wants you to approve the payment for ${holdName(h)}.`);
+        redraw = true;
+      }
+      // The hold runs on the PC's clock while it pays: until when it waits for the answer.
+      if (newUntil && (!h.until || Math.abs(newUntil - h.until) > 5000)) {
+        if (!h.until || clock(newUntil) !== clock(h.until)) redraw = true;
+        h.until = newUntil;
+      }
+      const words = text(raw.words);
+      if (words && words !== h.payWords) { h.payWords = words; redraw = true; }
+      if (redraw) drawHold(h);
       return { ok: true };
     }
     if (HOLD_STAGES.indexOf(stage) > HOLD_STAGES.indexOf(h.stage)) {      // forwards only ("asked" comes before them all)
@@ -639,18 +891,66 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       redraw = true;
       if (stage === 'held') {
         h.price = typeof raw.price === 'string' && /^£\d{1,4}(\.\d\d)?$/.test(raw.price) ? raw.price : '';
-        const left = Number(raw.left);
         h.heldAt = t;
-        h.until = t + (left > 0 && left <= 30 * 60 * 1000 ? left : 12 * 60 * 1000);
+        h.until = newUntil || t + 12 * 60 * 1000;
         log(`Hold: ${holdName(h)} is in the basket${h.price ? ` (${h.price})` : ''}.`);
+      }
+    } else if (stage === 'held' && PAYING.includes(h.stage) && !pressedNow(h) && raw.pay === 'failed') {
+      // The PC stopped before it pressed Pay: back in the basket, unpaid, as it was.
+      h.stage = 'held';
+      redraw = true;
+    }
+    if (stage === 'held' && h.stage === 'held') {
+      // What the PC says, with each of its notes in the basket, about paying for this court
+      // from the app: it can ('ready'), it cannot ('off', and why), or it tried and could not.
+      const pay = ['ready', 'off', 'failed'].includes(raw.pay) ? raw.pay : '';
+      const payWhy = pay && pay !== 'ready' ? text(raw.payWhy).slice(0, 200) : '';
+      if (pay !== h.pay || payWhy !== h.payWhy) {
+        if (pay !== h.pay) log(`Hold: your PC ${pay === 'ready' ? 'can pay for' : pay ? `cannot pay for` : 'says nothing about paying for'} ${holdName(h)}${payWhy ? ` (${payWhy})` : ''}.`);
+        h.pay = pay;
+        h.payWhy = payWhy;
+        redraw = true;
+      }
+      if (h.payState === 'told' || h.payState === 'paying') {
+        // Told to pay, the PC is back with a note from the basket: it could not (and says why),
+        // or the order never reached it. Either way it did not press Pay. A PC that took the
+        // order up says so before anything else, so two notes from the basket that say nothing
+        // of it mean it never got there. (One alone may be an older note that was slow on the
+        // way, overtaken by the one that took the order.)
+        if (pay === 'failed') {
+          h.payState = 'failed';
+          h.payFailed = payWhy || 'no reason was given';
+          log(`Hold: your PC could not pay for ${holdName(h)} (${h.payFailed}).`);
+          redraw = true;
+        } else if (h.payState === 'told' && ++h.payAfter >= 2) {
+          withdrawPay(h, 'your PC did not get the order to pay');
+          redraw = true;
+        }
+      }
+      if (h.payState === 'asked' && pay !== 'ready') {
+        // Asked for while the PC could pay, and now it says it cannot: the order is not sent.
+        withdrawPay(h, payWhy ? `your PC cannot pay for this court just now: ${payWhy}` : 'your PC cannot pay for this court just now');
+        redraw = true;
+      }
+      if (h.payState === 'asked' && h.paySealed) {
+        // The order goes with this answer, once, and its sealed code is not kept here a moment longer.
+        const out = { ok: true, order: 'pay', amount: h.payAmount, sealed: h.paySealed };
+        h.paySealed = null;
+        h.payState = 'told';
+        h.payToldAt = t;
+        log(`Hold: the order to pay ${h.payAmount} for ${holdName(h)} went to your PC.`);
+        drawHold(h);
+        return out;
       }
     }
     if (redraw) drawHold(h);
     return h.order ? { ok: true, order: h.order } : { ok: true };
   }
-  // Looked at by the timer: a hold the PC never collected, one it has gone silent on, and one
-  // that has run past any time it could still be going.
+  // Looked at by the timer: a hold the PC never collected, one it has gone silent on, one that
+  // has run past any time it could still be going, and an order to pay that has not gone out.
   async function checkHold(t) {
+    // The last word on the card of a hold that has made way for another, if it did not get there.
+    for (const f of former.values()) if (f !== hold && f.redrawAt && t >= f.redrawAt) await drawHold(f);
     const h = hold;
     if (!h) return;
     if (h.redrawAt && t >= h.redrawAt) await drawHold(h);                // the last redraw did not get through
@@ -674,6 +974,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       await drawHold(h);
       return;
     }
+    // An order to pay that the PC has not come for within half a minute is dropped unsent:
+    // nothing was pressed, and it may be asked for again. One that went out and has not been
+    // answered within half a minute: the card says so.
+    if (h.payState === 'asked' && t - h.payAskedAt > PAY_ORDER_MS) {
+      withdrawPay(h, 'your PC did not come for it within half a minute');
+      await drawHold(h);
+    }
+    if (h.payState === 'told' && !h.payQuiet && t - h.payToldAt > PAY_TOLD_MS) {
+      h.payQuiet = true;
+      log(`Hold: your PC was told to pay for ${holdName(h)} and has not said how it went.`);
+      await drawHold(h);
+    }
     const silent = h.stage !== 'asked' && t - h.heard >= HOLD_SILENT_MS;        // before its first step, "never started" covers it
     if (silent !== h.silent) {
       h.silent = silent;
@@ -681,6 +993,132 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       await drawHold(h);
     }
   }
+
+  // ---------- your card, for paying from the app ----------
+  // The card is typed into the iPhone app and sealed there for your PC's card key: an X25519
+  // key the PC makes once and keeps to itself, protected by Windows. The public half comes with
+  // every ping (`cardKey`), and the app is shown it as pc.cardKey. The bot cannot open what is
+  // sealed: it looks at the size and the shape, hands it to the PC with the PC's next ping, and
+  // drops it. It is never written to the log or to disk, and is kept in memory only until then:
+  // one at a time, a newer one in its place, CARD_ASK_MS at most. The PC opens it, checks it and
+  // keeps it, protected by Windows; its pings say which card it keeps (brand, last four digits,
+  // expiry: `pcCard`), and the one after the card says how it went. Forgetting the card goes the
+  // same way, without a box. None of this is kept across a restart: the PC's next ping says it all again.
+  const CARD_ASK_MS = 2 * 60 * 1000;                  // a card waits this long for the PC to collect it...
+  const CARD_ANSWER_MS = 2 * 60 * 1000;               // ...and a card or a forget, once collected, this long for the PC's answer
+  let cardKey = null;                                 // the PC's card key, as its last ping gave it (base64), or null
+  let pcCard = null;                                  // the card the PC keeps, as its last ping said: { brand, last4, expMonth, expYear }, or null
+  let pcCardSaid = false;                             // whether a ping has said which card it keeps (since this start)
+  let cardAsk = null;                                 // waiting for the PC: { id, kind: 'card' | 'forget', sealed, at, takenAt }
+  let cardWhy = null;                                 // why the last card (or forget) did not go through, in words, for the app
+  const payingNow = () => !!hold && !hold.end && (PAYING.includes(hold.stage) || ['asked', 'told', 'paying'].includes(hold.payState));
+  // What stands in the way of a card (`kind` 'card') or a forget now, in words, or null.
+  function cardNo(kind, t) {
+    if (!linked) return 'Your PC is not linked to me, and it is your PC that keeps the card.';
+    if (payingNow()) return 'Your PC is paying for a court just now. Try again once that is over.';
+    if (kind === 'forget') return null;
+    if (!cardKey) return 'Your PC has not given me its card key yet. It does with every ping while it is awake: wake it, or wait a minute, then try again.';
+    if (pcState(t) !== 'awake') return 'Your PC is not awake, and it is your PC that keeps the card. Wake it and try again.';
+    return null;
+  }
+  // POST /app/card: a card, sealed by the app for your PC's card key, passed on as it came.
+  function cardFromApp(sealed) {
+    const t = now();
+    const no = cardNo('card', t);
+    if (no) return { no };
+    if (cardAsk) log(cardAsk.kind === 'card' ? 'A newer card from the app takes the place of one still waiting for your PC.' : 'A card from the app takes the place of an order to forget the card.');
+    cardAsk = { id: crypto.randomBytes(6).toString('hex'), kind: 'card', sealed, at: t, takenAt: null };
+    cardWhy = null;
+    log('A card from the app, sealed for your PC, is waiting for it.');
+    for (const w of [...waiters].reverse()) w.wake();                    // the newest ping first, as for a look
+    return { ok: true };
+  }
+  // POST /app/card/forget: your PC is to delete the card it keeps. A card that has not reached
+  // the PC yet goes at once, unseen by it.
+  function forgetFromApp() {
+    const t = now();
+    const no = cardNo('forget', t);
+    if (no) return { no };
+    if (cardAsk && cardAsk.kind === 'card' && !cardAsk.takenAt) {
+      cardAsk = null;
+      cardWhy = null;
+      log('A card from the app that had not reached your PC was dropped: forgetting it was asked for.');
+      if (pcCardSaid && !pcCard) return { ok: true };                    // and the PC keeps none: nothing more to do
+    } else if (!cardAsk && pcCardSaid && !pcCard) return { no: 'Your PC keeps no card.' };
+    cardAsk = { id: crypto.randomBytes(6).toString('hex'), kind: 'forget', sealed: null, at: t, takenAt: null };
+    cardWhy = null;
+    log('Asked your PC to forget the card it keeps.');
+    for (const w of [...waiters].reverse()) w.wake();
+    return { ok: true };
+  }
+  // A card or a forget for the PC's ping to collect: { card: { id, sealed } } or
+  // { forgetCard: { id } }, once; or null.
+  function takeCard(t) {
+    if (!cardAsk || cardAsk.takenAt) return null;
+    if (cardAsk.kind === 'card' && t - cardAsk.at > CARD_ASK_MS) { checkCard(t); return null; }          // too old to hand over: dropped
+    cardAsk.takenAt = t;
+    if (cardAsk.kind === 'forget') {
+      log('Your PC collected the order to forget its card.');
+      return { forgetCard: { id: cardAsk.id } };
+    }
+    const sealed = cardAsk.sealed;
+    cardAsk.sealed = null;                                               // handed over: not kept here a moment longer
+    log('Your PC collected the card from the app.');
+    return { card: { id: cardAsk.id, sealed } };
+  }
+  // What a ping says about the card: the PC's key, the card it keeps, and how the last card or
+  // forget went (`done`, for the id it was handed). Each is checked; what does not read is left
+  // as it was. `has` says whether the ping said which card it keeps at all (an older PC does not).
+  function cardFromPc(c) {
+    if (!c || typeof c !== 'object') return;
+    const key = A.cleanKey(c.key);
+    if (key && key !== cardKey) {
+      log(cardKey ? 'Your PC has a new card key.' : 'Your PC gave me its card key.');
+      cardKey = key;
+    }
+    if (c.has) {
+      const kept = A.cleanCard(c.kept);
+      if (kept !== undefined) { pcCard = kept; pcCardSaid = true; }
+    }
+    const done = c.done;
+    if (!done || typeof done !== 'object' || typeof done.ok !== 'boolean' || !cardAsk || !cardAsk.takenAt || done.id !== cardAsk.id) return;      // one this bot is not waiting for (a repeat, or from before a restart)
+    const card = cardAsk.kind === 'card';
+    if (done.ok === true) {
+      log(card ? `Your PC kept the card from the app${pcCard ? ` (${pcCard.brand} ending ${pcCard.last4})` : ''}.` : 'Your PC forgot its card.');
+      cardWhy = null;
+    } else {
+      const why = noteText(A.plain(done.why)).slice(0, 200) || 'no reason was given';
+      cardWhy = card ? `Your PC did not keep that card: ${why}.` : `Your PC could not forget its card: ${why}.`;
+      log(cardWhy);
+    }
+    cardAsk = null;
+  }
+  // Looked at by the timer: a card the PC has not collected, or has not answered for, in time.
+  function checkCard(t) {
+    if (!cardAsk) return;
+    if (!cardAsk.takenAt && cardAsk.kind === 'card' && t - cardAsk.at > CARD_ASK_MS) {
+      cardAsk = null;
+      cardWhy = 'Your PC did not collect the card within two minutes, so I dropped it. Send it again while your PC is awake.';
+      log('A card from the app was not collected by your PC within two minutes, and was dropped.');
+    } else if (cardAsk.takenAt && t - cardAsk.takenAt > CARD_ANSWER_MS) {
+      cardWhy = cardAsk.kind === 'card' ? 'Your PC took the card but did not say whether it kept it. The card shown here is the one your PC says it keeps.'
+        : 'Your PC took the order to forget its card but did not say how that went. The card shown here is the one your PC says it keeps.';
+      log('Your PC did not say how the card from the app went.');
+      cardAsk = null;
+    }
+  }
+  // The card for the app's state: null when your PC keeps none (as far as I know), nothing is
+  // on its way, and there is nothing to say.
+  function cardView() {
+    if (!pcCard && !cardAsk && !cardWhy) return null;
+    return {
+      brand: pcCard ? pcCard.brand : null, last4: pcCard ? pcCard.last4 : null, expMonth: pcCard ? pcCard.expMonth : null, expYear: pcCard ? pcCard.expYear : null,
+      pending: !!cardAsk && cardAsk.kind === 'card', forgetting: !!cardAsk && cardAsk.kind === 'forget', why: cardWhy,
+    };
+  }
+  // How many sealed boxes this bot holds in memory just now (0, 1 or 2): for the tests, which
+  // check that each is dropped once handed over, replaced, or given up on.
+  const sealedHeld = () => (cardAsk && cardAsk.sealed ? 1 : 0) + [hold, ...former.values()].filter(h => h && h.paySealed).length;
 
   // A trial of a wider banner: a text message with the banner as a large link preview (the page
   // at /card/<kind> on this server names the picture). Telegram fetches it from RAILWAY_PUBLIC_DOMAIN.
@@ -690,7 +1128,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     : { is_disabled: true });
 
   // ---------- the tap-through screens ----------
-  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked, pc: pcState(), wake: wakeState(), wokeAt, sleepAsk });
+  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked, pc: pcState(), wake: wakeState(), wokeAt, sleepAsk, card: pcCard });
   const statusInfo = () => ({
     version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused,
     linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null, pc: pcState(),
@@ -996,10 +1434,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // signed in to Windows. That is all the dot on the menu banner goes on.
   // With `wait` (seconds) the answer waits until there is something for the PC to do, so a
   // Sleep tap reaches it within seconds instead of at its next ping.
-  async function pingFromAgent(from = {}, { wait = 0, refused = null } = {}) {
+  // `card` is what the ping says about the card for paying from the app: { key, has, kept, done }
+  // (see cardFromPc), as lib/server.js reads it from the ping.
+  async function pingFromAgent(from = {}, { wait = 0, refused = null, card = null } = {}) {
     state.lastSeen = now();
     noteHome(from);
     save();
+    cardFromPc(card);
     if (refused) {                                    // asked to sleep, it would not: say why
       sleptAt = null;
       log(`Your PC stayed awake: ${refused}`);
@@ -1011,7 +1452,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     if (wait > 0) tryPcOnce(now());
     let order = takeOrder(now());
-    if (!order.sleep && !order.look && !order.hold && wait > 0) {
+    if (!order.sleep && !order.look && !order.hold && !order.card && !order.forgetCard && wait > 0) {
       await waitForOrder(wait * 1000);
       order = takeOrder(now());
     }
@@ -1255,7 +1696,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
           `Code: <code>${code}</code>  (tap to copy)`,
           'Type it into the app within 10 minutes. It works once, and five wrong tries cancel it. A new /app replaces it.',
           ...(publicHost ? [`If the app asks where I am: <code>https://${M.esc(publicHost)}</code>`] : []),
-          'The app can do what you do here, and nothing more.',
+          'The app can do what you do here, and one thing more: pay for a court your PC holds, with the card your PC keeps.',
           state.apps.length >= A.MAX_DEVICES ? `${A.MAX_DEVICES} phones are linked already (${names}), and that is as many as I keep, so the app will be turned away. Unlink one in the app on that phone, or send /app forget to unlink them all.`
             : state.apps.length ? `Linked now: ${names}. /app forget unlinks every phone.` : 'No phone is linked yet.',
           ...(kept() === 'disk' ? [] : ['Note: without a Railway volume mounted at /data, the link to a phone is lost each time I restart.']),
@@ -1365,6 +1806,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       if (pastOnce.length) { state.once = state.once.filter(o => civilOf(o.date) >= today); save(); }
       await refreshNewest(t);
       await checkHold(t);
+      checkCard(t);
+      await flushNotes(t);
       const chat = owner();
       if (chat === null || state.paused || !linked) return;
       await checkAhead(t, chat);
@@ -1398,7 +1841,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // (lib/server.js, under /app/). A phone is linked with a code from /app. After that it proves
   // itself with a token, of which only the SHA-256 is kept here (state.apps). Whatever it asks
   // is done by the function behind the Telegram command or button of the same name, so the
-  // checks and the words are the same, and the app can do nothing you cannot do here.
+  // checks and the words are the same, and the app can do nothing you cannot do here but one
+  // thing: Pay, with the card your PC keeps (the app alone has the card's security code).
   const pairing = A.createPairing();
   const pairLimiter = A.createLimiter();
   const lookLimiter = A.createLimiter(A.LOOKS_PER_MIN, A.LOOKS_WINDOW_MS);      // fresh reads asked for through the app, all phones together
@@ -1428,7 +1872,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     log(`A phone was linked to the app: ${device.name}.`);
     const chat = owner();
     if (chat !== null) {
-      say(chat, `<b>Phone linked</b>\n${M.esc(device.name)} can now do what you do here, and nothing more. /app forget unlinks every phone.`)
+      say(chat, `<b>Phone linked</b>\n${M.esc(device.name)} can now do what you do here, and pay for a court your PC holds with the card your PC keeps. /app forget unlinks every phone.`)
         .catch(e => log(`Could not say that a phone was linked: ${e.message}`));
     }
     return { status: 200, body: { ok: true, token, device: { id: device.id, name: device.name } } };
@@ -1454,7 +1898,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
 
   // The hold being followed, or the last one, as the app sees it: the card's own words, and
-  // which of its buttons Telegram would show now. Null if there has been none since the start.
+  // which of its buttons Telegram would show now; and whether Pay from the app would be taken
+  // now (payNo, the very check an order to pay goes through). Null if there has been none since the start.
   function holdView(x) {
     const h = hold;
     if (!h) return null;
@@ -1466,7 +1911,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       id: h.id, startedBy: h.by, centre: h.key, centreName: centre.name, date: h.date, start: h.start, end: h.start + 60,
       court: h.court, courtName: `Court ${h.court}`, stage: h.stage, live: !h.end, ended: h.end,
       price: h.price || null, until: h.until, heardAt: h.heard, title, lines,
-      can: { release: keys.includes(`gx:${h.id}`), done: keys.includes(`gp:${h.id}`) },
+      can: { release: keys.includes(`gx:${h.id}`), done: keys.includes(`gp:${h.id}`), pay: payNo(h, x.now) === null },
       links: { basket: G.basketUrl, site: G.siteUrl, sheet: G.sheetUrl(centre, h.date) },
     };
   }
@@ -1493,7 +1938,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       pc: {
         state: x.pc, linked, seenAt: state.lastSeen, line: line ? A.plain(line) : null,
         canWake: !noWake, wakeWhy: noWake ? noWake.toast : null, canSleep: !noSleep, sleepWhy: noSleep,
-        sleepAsked: sleepAsk !== null && t - sleepAsk <= SLEEP_ASK_MS ? sleepAsk : null, wokeAt,
+        sleepAsked: sleepAsk !== null && t - sleepAsk <= SLEEP_ASK_MS ? sleepAsk : null, wokeAt, cardKey,
       },
       release: releases.length ? releaseOf(releases[0]) : null,
       later: releases.slice(1).map(releaseOf),
@@ -1510,6 +1955,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         linked, days: UI.INDOOR_DAYS, quietUntil: siteQuietUntil(t) || null, holdNo: noHold ? (noHold.say || noHold.toast) : null,
         centres: Object.values(G.CENTRES).map(ce => ({ key: ce.key, name: ce.name, site: G.sheetUrl(ce, iso(today)) })),
       },
+      card: cardView(),
       hold: holdView(x),
       notes: state.notes.map(n => ({ id: n.id, at: n.at, kind: n.kind, title: n.title, body: n.body })),
       devices: state.apps.map(d => ({ id: d.id, name: d.name, at: d.at, seenAt: d.seenAt, me: d.id === meId })),
@@ -1567,7 +2013,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const done = (extra = {}) => { const s = appState(me); return s ? { status: 200, body: { ok: true, ...extra, ...s } } : no(401, 'unpaired'); };
     if (!APP_ASKS.includes(name)) return null;
     const read = { once: A.readOnce, 'once/remove': A.readOnceRemove, plan: A.readPlan, 'plan/remove': A.readPlanRemove, order: A.readOrder, pause: A.readPause,
-      'indoor/look': A.readLook, hold: A.readHold, 'hold/order': A.readHoldOrder, push: A.readPush }[name];
+      'indoor/look': A.readLook, hold: A.readHold, 'hold/order': A.readHoldOrder, card: A.readCard, 'card/forget': A.readForget, push: A.readPush }[name];
     const v = read ? read(body) : {};
     if (v.why) return no(400, v.why);
     log(`From the app: ${name}`);
@@ -1618,8 +2064,16 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         return r.no ? no(409, r.no.say || r.no.toast) : done();
       }
       case 'hold/order': {
-        const r = holdOrder(v.id, v.what);
+        const r = v.what === 'pay' ? holdPay(v.id, v.amount, v.sealed) : holdOrder(v.id, v.what);
         return r.ok ? done() : no(409, r.toast);
+      }
+      case 'card': {
+        const r = cardFromApp(v.sealed);
+        return r.ok ? done() : no(409, r.no);
+      }
+      case 'card/forget': {
+        const r = forgetFromApp();
+        return r.ok ? done() : no(409, r.no);
       }
       case 'push':
         if (v.token) for (const d of state.apps) if (d !== me && d.push === v.token) d.push = null;      // one phone, one entry: no notification twice
@@ -1632,7 +2086,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
 
   return {
     handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, holdFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures,
-    appHello, appPair, appAuth, appState, appAsk,
+    appHello, appPair, appAuth, appState, appAsk, sealedHeld,
   };
 }
 

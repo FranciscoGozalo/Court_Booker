@@ -69,7 +69,7 @@ async function seeFree(t, phone, centre = 'g', date = FRI) {
   assert.equal(r.status, 200, JSON.stringify(r.body));
   return r.body.look;
 }
-const STATE_KEYS = ['now', 'bot', 'venue', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'once', 'order', 'results', 'run', 'indoor', 'hold', 'notes', 'devices'];
+const STATE_KEYS = ['now', 'bot', 'venue', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'once', 'order', 'results', 'run', 'indoor', 'card', 'hold', 'notes', 'devices'];
 const HOLD_KEYS = ['id', 'startedBy', 'centre', 'centreName', 'date', 'start', 'end', 'court', 'courtName', 'stage', 'live', 'ended', 'price', 'until', 'heardAt', 'title', 'lines', 'can', 'links'];
 // The state as a phone is shown it. Whenever it is looked at here, it is also checked to be
 // whole: the contract's fields and no others, and nothing that JSON would drop on the way.
@@ -213,6 +213,9 @@ test('what each request must look like, with a plain sentence when it does not',
   for (const read of [A.readOnce, A.readOnceRemove, A.readPlan, A.readPlanRemove, A.readOrder, A.readPause, A.readLook, A.readHold, A.readHoldOrder, A.readPush]) {
     for (const bad of [null, undefined, 'x', 7, [1]]) assert.deepEqual(read(bad), { why: 'The request body must be a JSON object.' });
   }
+  for (const read of [A.readCard, A.readForget]) {
+    for (const bad of [null, undefined, 'x', 7, [1]]) assert.deepEqual(read(bad), { why: 'The request body must be a JSON object.' });
+  }
   assert.deepEqual(A.readOnceRemove({ date: '2026-11-25', start: 1140 }), { date: '2026-11-25', start: 1140 });
   assert.deepEqual(A.readOnceRemove({ date: '2026-11-25' }), { why: A.WHY.onceRemove });
   // Every week: as /set.
@@ -240,7 +243,9 @@ test('what each request must look like, with a plain sentence when it does not',
   assert.deepEqual(A.readHold({ centre: 'k', date: FRI, start: 1080, court: 3 }), { why: A.WHY.centre });
   for (const bad of [{ centre: 'g', date: FRI, start: 1080 }, { centre: 'g', date: FRI, start: '18:00', court: 3 }, { centre: 'g', start: 1080, court: 3 }, { date: FRI, start: 1080, court: 3 }]) assert.deepEqual(A.readHold(bad), { why: A.WHY.hold });
   assert.deepEqual(A.readHoldOrder({ id: 'a1b2c3d4e5f6', what: 'done' }), { id: 'a1b2c3d4e5f6', what: 'done' });
-  for (const bad of [{ id: 'a1b2c3d4e5f6', what: 'pay' }, { id: 'A1B2C3D4E5F6', what: 'done' }, { what: 'release' }, { id: 12, what: 'release' }]) assert.deepEqual(A.readHoldOrder(bad), { why: A.WHY.holdOrder });
+  for (const bad of [{ id: 'a1b2c3d4e5f6', what: 'paid' }, { id: 'A1B2C3D4E5F6', what: 'done' }, { what: 'release' }, { id: 12, what: 'release' }]) assert.deepEqual(A.readHoldOrder(bad), { why: A.WHY.holdOrder });
+  // Pay (version 2.9) has its own fields, and its own sentence; the sealed code is judged by its shape only (test/pay.test.js).
+  assert.deepEqual(A.readHoldOrder({ id: 'a1b2c3d4e5f6', what: 'pay' }), { why: A.WHY.pay });
   assert.deepEqual(A.readPush({ token: PUSH_TOKEN }), { token: PUSH_TOKEN });
   assert.deepEqual(A.readPush({ token: 'ExpoPushToken[abc-DEF_123]' }), { token: 'ExpoPushToken[abc-DEF_123]' });
   assert.deepEqual(A.readPush({ token: null }), { token: null });
@@ -319,14 +324,14 @@ test('/app gives a code to link a phone, and /app forget unlinks every phone', a
     `Code: <code>${code}</code>  (tap to copy)`,
     'Type it into the app within 10 minutes. It works once, and five wrong tries cancel it. A new /app replaces it.',
     'If the app asks where I am: <code>https://court-booker.example.app</code>',
-    'The app can do what you do here, and nothing more.',
+    'The app can do what you do here, and one thing more: pay for a court your PC holds, with the card your PC keeps.',
     'No phone is linked yet.',
   ]);
   // The code links a phone, and Telegram says so.
   const paired = t.app.appPair({ code, name: 'Pat\'s <iPhone>' });
   assert.equal(paired.status, 200);
   await settle();
-  assert.equal(t.tg.last().text, '<b>Phone linked</b>\nPat\'s &lt;iPhone&gt; can now do what you do here, and nothing more. /app forget unlinks every phone.');
+  assert.equal(t.tg.last().text, '<b>Phone linked</b>\nPat\'s &lt;iPhone&gt; can now do what you do here, and pay for a court your PC holds with the card your PC keeps. /app forget unlinks every phone.');
   assert.ok(t.logs.includes('A phone was linked to the app: Pat\'s <iPhone>.'));
   // A second /app names the phones linked, and its code replaces the one before.
   const again = await codeFrom(t);
@@ -381,7 +386,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.8', api: 1 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.9', api: 2 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -638,13 +643,13 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.8',
+    bot: '2.9',
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
     paused: false,
     kept: 'disk',
     pc: {
       state: 'awake', linked: true, seenAt: at(`${TUE}T11:59:30Z`), line: 'Your PC is awake.',
-      canWake: false, wakeWhy: 'Your PC is already awake.', canSleep: true, sleepWhy: null, sleepAsked: null, wokeAt: null,
+      canWake: false, wakeWhy: 'Your PC is already awake.', canSleep: true, sleepWhy: null, sleepAsked: null, wokeAt: null, cardKey: null,
     },
     // Tuesdays are booked tonight at 22:00, a week ahead.
     release: { at: at(`${TUE}T22:00:00Z`), night: TUE, jobs: [{ id: '2026-11-24@16:00', date: '2026-11-24', start: 960, end: 1080, from: 'weekly' }] },
@@ -677,6 +682,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
         { key: 's', name: 'Scotstoun', site: `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${TUE}T00:00:00.000Z` },
       ],
     },
+    card: null,
     hold: null,
     notes: [{ id: 'aa11bb22cc', at: at('2026-11-12T22:00:10Z'), kind: 'booked', title: 'Court 3 booked', body: 'Thu 19 Nov · 19:00–20:00 · gate 2433' }],
     devices: [
@@ -753,7 +759,7 @@ test('the PC in the state: asleep, offline, not linked, and the same sentences S
   const phone = await linkPhone(t);
   let pc = stateOf(t, phone).pc;
   assert.deepEqual(pc, { state: 'asleep', linked: true, seenAt: at(`${TUE}T11:50:00Z`), line: 'Your PC is asleep (last in touch today at 11:50). It wakes at 21:55 to book.',
-    canWake: true, wakeWhy: null, canSleep: false, sleepWhy: 'Your PC is not awake.', sleepAsked: null, wokeAt: null });
+    canWake: true, wakeWhy: null, canSleep: false, sleepWhy: 'Your PC is not awake.', sleepAsked: null, wokeAt: null, cardKey: null });
   assert.equal(stateOf(t, phone).indoor.holdNo, 'Your PC is not awake, and it is your PC that signs in to Glasgow Club and holds the court. Wake it and try again.');
   // Wake it from the app: the packet goes where /wake sends it, and for half a minute another is not sent.
   const woken = await ask(t, phone, 'pc/wake');
@@ -777,7 +783,7 @@ test('the PC in the state: asleep, offline, not linked, and the same sentences S
   const coldPhone = await linkPhone(cold);
   pc = stateOf(cold, coldPhone).pc;
   assert.deepEqual(pc, { state: 'offline', linked: true, seenAt: null, line: 'Your PC has not been in touch yet.',
-    canWake: false, wakeWhy: 'Waking is not set up: add WAKE_MAC on Railway.', canSleep: false, sleepWhy: 'Your PC is not awake.', sleepAsked: null, wokeAt: null });
+    canWake: false, wakeWhy: 'Waking is not set up: add WAKE_MAC on Railway.', canSleep: false, sleepWhy: 'Your PC is not awake.', sleepAsked: null, wokeAt: null, cardKey: null });
   assert.deepEqual(await ask(cold, coldPhone, 'pc/wake'), refused(409, 'Waking is not set up: add WAKE_MAC on Railway.'));
   // Waking set up, but the PC has never called: nowhere to send it.
   const homeless = makeBot(NOON, { env: WAKE });
@@ -1193,7 +1199,7 @@ test('a hold from the app, end to end: asked, collected, signed in, in the baske
     stage: 'asked', live: true, ended: null, price: null, until: null, heardAt: at(NOON),
     title: TITLE,
     lines: ['Asking your PC to hold it. It signs in to Glasgow Club, puts the court in your basket and opens the payment page: under a minute.'],
-    can: { release: true, done: false },
+    can: { release: true, done: false, pay: false },
     links: { basket: 'https://glasgowclub.gladstonego.cloud/book/basket', site: 'https://glasgowclub.gladstonego.cloud/', sheet: SHEET_G },
   });
   assert.equal(t.asked.body.state.indoor.holdNo, 'Your PC is already holding a court.');
@@ -1204,7 +1210,7 @@ test('a hold from the app, end to end: asked, collected, signed in, in the baske
   assert.deepEqual([hold().stage, hold().lines], ['asked', ['Your PC has it and is starting Chrome…']]);
   for (const [stage, words] of [['signing-in', 'Your PC is signing in to Glasgow Club…'], ['signed-in', 'Signed in. Finding the court on the sheet…'], ['adding', 'Putting court 3 in your basket…']]) {
     assert.deepEqual(pcSays(t, stage), { ok: true });
-    assert.deepEqual([hold().stage, hold().lines, hold().can, hold().live], [stage, [words], { release: true, done: false }, true]);
+    assert.deepEqual([hold().stage, hold().lines, hold().can, hold().live], [stage, [words], { release: true, done: false, pay: false }, true]);
   }
   t.clock.t += 30000;
   assert.deepEqual(pcSays(t, 'held', { price: '£23.00', left: 12 * 60000 }), { ok: true });
@@ -1212,11 +1218,10 @@ test('a hold from the app, end to end: asked, collected, signed in, in the baske
     ...first, stage: 'held', price: '£23.00', until: at(NOON) + 30000 + 12 * 60000, heardAt: at(NOON) + 30000,
     lines: [
       'In your basket: £23.00 to pay. Your PC signed in as you and put it there at 12:00. The payment page is open in Chrome on your PC.',
-      'To pay on this phone: open your basket below and sign in. If the court is there, pay there, then tap I have paid.',
-      'Nobody has tried that yet. If your basket comes up empty, the court is only in the browser on your PC: pay in the Chrome window there, or let it go.',
+      'Pay in the Chrome window on your PC, then tap I have paid.',
       'Unpaid, your PC lets it go at 12:12.',
     ],
-    can: { release: true, done: true },
+    can: { release: true, done: true, pay: false },
   });
   // While it holds a court the PC is not put to sleep, from the app or from Telegram.
   assert.deepEqual(await ask(t, t.phone, 'pc/sleep'), refused(409, 'Your PC is holding a court for you. Let it go first.'));
@@ -1228,7 +1233,7 @@ test('a hold from the app, end to end: asked, collected, signed in, in the baske
   const let_go = await ask(t, t.phone, 'hold/order', { id: t.id, what: 'release' });
   assert.equal(let_go.status, 200);
   assert.notEqual(let_go.body.etag, etag);
-  assert.deepEqual([let_go.body.state.hold.lines[1], let_go.body.state.hold.can, let_go.body.state.hold.lines.length], ['Letting it go…', { release: false, done: false }, 2]);
+  assert.deepEqual([let_go.body.state.hold.lines[1], let_go.body.state.hold.can, let_go.body.state.hold.lines.length], ['Letting it go…', { release: false, done: false, pay: false }, 2]);
   assert.deepEqual(pcSays(t, 'held', { beat: true }), { ok: true, order: 'release' });
   assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'release' }), refused(409, 'Already letting it go.'));
   assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'done' }), refused(409, 'Already letting it go.'));
@@ -1237,11 +1242,12 @@ test('a hold from the app, end to end: asked, collected, signed in, in the baske
   assert.deepEqual(hold(), {
     ...first, stage: 'held', live: false, ended: 'released', price: '£23.00', until: at(NOON) + 30000 + 12 * 60000, heardAt: at(NOON) + 35000,
     lines: ['Let go: your PC took the court out of your basket, so it was not paid for.'],
-    can: { release: false, done: false },
+    can: { release: false, done: false, pay: false },
   });
   assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'release' }), refused(409, 'That hold is over.'));
   assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: 'ffffffffffff', what: 'release' }), refused(409, 'I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up.'));
-  assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'pay' }), refused(400, A.WHY.holdOrder));
+  assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'pay' }), refused(400, A.WHY.pay));
+  assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'pay!' }), refused(400, A.WHY.holdOrder));
   // How it ended is a note, and a notification to the phone.
   await settle();
   const note = stateOf(t, t.phone).notes[0];
@@ -1262,7 +1268,7 @@ test('I have paid from the app: the PC looks at the Bookings page, and "booked" 
   pcSays(t, 'held', { price: 'free!', left: 12 * 60000 });
   assert.equal(stateOf(t, t.phone).hold.price, null);                                     // a price that does not read as one is left out
   const r = await ask(t, t.phone, 'hold/order', { id: t.id, what: 'done' });
-  assert.deepEqual([r.status, r.body.state.hold.lines[1], r.body.state.hold.can], [200, 'Looking for it on your Bookings page…', { release: false, done: false }]);
+  assert.deepEqual([r.status, r.body.state.hold.lines[1], r.body.state.hold.can], [200, 'Looking for it on your Bookings page…', { release: false, done: false, pay: false }]);
   assert.deepEqual(pcSays(t, 'held', { beat: true }), { ok: true, order: 'done' });
   assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'release' }), refused(409, 'Already checking.'));
   assert.deepEqual(pcSays(t, 'booked', { words: 'Thank you <Francisco>. Reference ########' }), { ok: true });
@@ -1352,7 +1358,7 @@ test('a hold from the app with nobody to carry it out ends as it does in Telegra
   a.clock.t += 1;
   await a.app.tick();
   let h = stateOf(a, phoneA).hold;
-  assert.deepEqual([h.ended, h.live, h.lines, h.can], ['nopickup', false, ['Your PC did not pick it up in time, so nothing was done. It may have gone to sleep.'], { release: false, done: false }]);
+  assert.deepEqual([h.ended, h.live, h.lines, h.can], ['nopickup', false, ['Your PC did not pick it up in time, so nothing was done. It may have gone to sleep.'], { release: false, done: false, pay: false }]);
   assert.deepEqual(await a.app.pingFromAgent(HOME), { ok: true });                         // it is not handed over late
   assert.deepEqual(a.app.holdFromAgent({ id, stage: 'signing-in' }), { ok: true, order: 'release' });         // and a PC that has it after all is told to let go
   assert.equal(stateOf(a, phoneA).notes[0].body, 'Fri 20 Nov · 18:00–19:00. Your PC did not pick it up in time, so nothing was done. It may have gone to sleep.');
@@ -1408,13 +1414,13 @@ test('Telegram\'s buttons work on a hold started from the app: a Hold tap brings
   await settle();
   assert.deepEqual(t.tg.calls.map(c => c.id), [8]);
   assert.equal(t.tg.last().text.split('\n')[0], `<b>${TITLE}</b>`);
-  assert.deepEqual(buttons(t.tg.last()).map(b => [b.text, b.callback_data || b.url]), [['Open my basket', 'https://glasgowclub.gladstonego.cloud/book/basket'], ['I have paid', `gp:${t.id}`], ['Let it go', `gx:${t.id}`]]);
+  assert.deepEqual(buttons(t.tg.last()).map(b => [b.text, b.callback_data || b.url]), [['I have paid', `gp:${t.id}`], ['Let it go', `gx:${t.id}`]]);
   assert.deepEqual(await t.app.pingFromAgent(HOME), { ok: true });                         // no second hold was handed over
   // I have paid, tapped in Telegram: the app sees it, and the PC hears it.
   await tap(t.app, `gp:${t.id}`, 8);
   assert.equal(lastAnswer(t), 'Checking your Bookings page');
   let h = stateOf(t, t.phone).hold;
-  assert.deepEqual([h.startedBy, h.lines[1], h.can], ['app', 'Looking for it on your Bookings page…', { release: false, done: false }]);
+  assert.deepEqual([h.startedBy, h.lines[1], h.can], ['app', 'Looking for it on your Bookings page…', { release: false, done: false, pay: false }]);
   assert.deepEqual(pcSays(t, 'held', { beat: true }), { ok: true, order: 'done' });
   pcSays(t, 'unsure', { words: '', checked: true, basket: 'still' });
   await settle();
@@ -1435,7 +1441,7 @@ test('a hold started in Telegram shows in the app, which can let it go; its card
   const order = await ping;
   await settle();
   let h = stateOf(t, phone).hold;
-  assert.deepEqual([h.id, h.startedBy, h.stage, h.title, h.lines, h.can], [order.hold.id, 'telegram', 'asked', TITLE, ['Your PC has it and is starting Chrome…'], { release: true, done: false }]);
+  assert.deepEqual([h.id, h.startedBy, h.stage, h.title, h.lines, h.can], [order.hold.id, 'telegram', 'asked', TITLE, ['Your PC has it and is starting Chrome…'], { release: true, done: false, pay: false }]);
   assert.deepEqual(t.tg.last().text.split('\n').map(A.plain), [h.title, ...h.lines]);
   t.app.holdFromAgent({ id: h.id, stage: 'signing-in' });
   // Stop, from the app: the card in Telegram says "Stopping…", and the PC hears it on its next step.
@@ -1944,10 +1950,10 @@ test('before the PC has collected a hold, "I have paid" is refused and changes n
   await t.app.pingFromAgent(HOME);
   await seeFree(t, phone);
   const h = (await ask(t, phone, 'hold', HOLD)).body.state.hold;
-  assert.deepEqual([h.stage, h.can], ['asked', { release: true, done: false }]);
+  assert.deepEqual([h.stage, h.can], ['asked', { release: true, done: false, pay: false }]);
   assert.deepEqual(await ask(t, phone, 'hold/order', { id: h.id, what: 'done' }), early);
   let now = stateOf(t, phone);
-  assert.deepEqual([now.hold.ended, now.hold.live, now.hold.can, now.notes], [null, true, { release: true, done: false }, []]);
+  assert.deepEqual([now.hold.ended, now.hold.live, now.hold.can, now.notes], [null, true, { release: true, done: false, pay: false }, []]);
   assert.equal((await t.app.pingFromAgent(HOME)).hold.id, h.id);                           // the PC still collects it
   assert.deepEqual(await ask(t, phone, 'hold/order', { id: h.id, what: 'done' }), early);  // collected, not yet in the basket: the same
   assert.equal(stateOf(t, phone).hold.ended, null);
