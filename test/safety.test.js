@@ -343,7 +343,7 @@ test('trouble before the booking is passed on at once, but never as a flood', as
   clock.t += 20000;
   await app.progressFromAgent({ stage: 'trouble', why: 'ClubSpark did not load' });
   assert.equal(tg.last().text, '<b>Trouble before the booking</b>\nClubSpark did not load.\nYour PC is trying again.');
-  assert.deepEqual(await app.progressFromAgent({ stage: 'dancing' }), { ok: false, why: 'that is not a stage I know (ready or trouble)' });
+  assert.deepEqual(await app.progressFromAgent({ stage: 'dancing' }), { ok: false, why: 'that is not a stage I know (ready, trouble or bank)' });
   assert.equal((await app.progressFromAgent(null)).ok, false);
 });
 

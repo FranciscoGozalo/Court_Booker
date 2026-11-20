@@ -13,6 +13,8 @@ It also finds free **courts at Gorbals and Scotstoun** (Glasgow Club: indoor, an
 
 There is an **iPhone app** too, which does the same things as the Telegram chat, and can also have your PC pay for a court it holds; see [The iPhone app](#the-iphone-app).
 
+From version 2.10 the app can also set weekly bookings and one-off dates at the other parks and at Glasgow Club. Your PC books them on its nightly run, and at Glasgow Club pays for them by itself if you switch automatic payments on; see [Weekly bookings at any venue](#weekly-bookings-at-any-venue-version-210).
+
 ## What a booking night looks like
 
 Kelvingrove opens each day 7 days ahead at 22:00. So a Thursday is booked on the Thursday before.
@@ -31,6 +33,8 @@ If the PC hits a problem before the booking (Chrome will not start, ClubSpark wi
 
 A one-off date that is already open is booked on the PC's next run (21:55 that night), or straight away if you start the booker on the PC by hand.
 
+With bookings at other venues (version 2.10, set in the app), 22:00 goes the same way: Kelvingrove's first, as above, then the other parks' in the same run. A night with a Glasgow Club booking goes on past midnight, when Glasgow Club opens its day; see [Weekly bookings at any venue](#weekly-bookings-at-any-venue-version-210).
+
 ## Indoor courts (Glasgow Club)
 
 **Book a date** on the menu first asks where: Kelvingrove Park, Gorbals (indoor), Scotstoun (indoor) or Scotstoun (outdoor: its own sheet on Glasgow Club's site, hourly from 08:00 to 18:00, from version 2.9.3; your PC reads and holds it once its booker is updated for it, and a booker not yet updated says so). For each of the three the bot shows a day's free start times, read from Glasgow Club's booking site as any visitor sees them, then which courts are free at the time you pick. Under them are a **Hold** button for each free court, and a button that opens that day's sheet on Glasgow Club's own page, where you can book and pay yourself.
@@ -43,7 +47,7 @@ After a press nothing is taken out of the basket, and the ending is "Booked and 
 
 Glasgow Club takes a card payment with each booking, and its own settings have saved cards and pay-by-link switched off (`GladstonePay_AllowMemberWallet` and `PayByLink_Enabled`, as read on 19 Nov 2026). Its site keeps a basket in the browser that filled it: signing in on your phone shows an empty basket (tried on 20 Nov 2026). So pay from the app or in the Chrome window on the PC, or let the court go and book from the sheet on your phone.
 
-One court is held at a time and at most six holds are started in an hour. None is started from 35 minutes before the release time to 15 minutes after, every night, and the PC itself refuses over the same stretch by its own clock, and whenever its nightly booking is running. The PC is not put to sleep while it holds a court. If Glasgow Club's site ever answers the PC with a "checking your browser" page, the hold stops there, and for an hour no hold is started and the PC is not asked to read the sheet either. While a court is held its card has no Menu button, so the card stays where its buttons are; tapping **Hold** on any other card brings it there.
+One court is held at a time and at most six holds are started in an hour. None is started from 35 minutes before the release time to 15 minutes after, every night, nor from 23:25 to 00:30 on a night your PC books at Glasgow Club; the PC itself refuses over the first stretch by its own clock, and whenever its nightly booking is running. The PC is not put to sleep while it holds a court. If Glasgow Club's site ever answers the PC with a "checking your browser" page, the hold stops there, and for an hour no hold is started and the PC is not asked to read the sheet either. While a court is held its card has no Menu button, so the card stays where its buttons are; tapping **Hold** on any other card brings it there.
 
 Each day opens for booking a week ahead, at midnight. A day that has not opened yet is shown with the time it opens and what is free as it stands.
 
@@ -56,12 +60,12 @@ If your PC is asleep, the card says so and offers **Wake my PC** (when waking is
 | Command | What it does |
 | --- | --- |
 | `/menu` | Buttons for everything below: book a date from a calendar, set weekly days, see and remove bookings, court order, pause, status. Each tap changes the same card. |
-| `/set thu 19:00 2h` | Book Thursdays at 19:00 for two hours, every week. `1h` or `2h`. Also understands `7pm` and `19:00-21:00`. |
-| `/off thu` | Stop Thursdays. `/off all` clears every weekly booking. |
+| `/set thu 19:00 2h` | Book Thursdays at 19:00 for two hours at Kelvingrove, every week. `1h` or `2h`. Also understands `7pm` and `19:00-21:00`. Weekly bookings at the other venues are set in the app. |
+| `/off thu` | Stop Thursdays at Kelvingrove. `/off all` clears every weekly booking at Kelvingrove; those at other venues (set in the app) stay. |
 | `/book 25 nov 19:00 2h` | Book one Kelvingrove date. `/book` alone asks where first. Also `25/11`, `wed` (the coming Wednesday), `tomorrow`, `2026-11-25`. The list holds 60 one-off dates at most. |
 | `/cancel 2` | Remove one-off number 2 from `/plan`. `/cancel 25 nov` removes that date's. |
 | `/gorbals`, `/scotstoun` | The free indoor courts at that centre (Scotstoun's outdoor courts are under **Book a date**): pick a day, then a start time, then **Hold** a court (your PC puts it in your basket, and you pay) or open Glasgow Club's page to book and pay yourself. See [Indoor courts](#indoor-courts-glasgow-club). |
-| `/plan` | Your weekly and one-off bookings, how each stands, and the next booking run. |
+| `/plan` | Your weekly and one-off bookings at every venue, how each stands, and the next booking run. |
 | `/order 3 4 5 2 1 6` | Which courts to try first. |
 | `/pause`, `/resume` | Stop and restart booking. |
 | `/status` | Clock check, version, your PC's state and when it was last in touch, whether waking is ready, and whether settings are kept. |
@@ -120,7 +124,7 @@ While the dot is green, the same place on the menu has **Sleep my PC** (and ther
 
 ## The iPhone app
 
-The app (the separate Court_Booker_App repository) is another way in to the same bot. It shows what the Telegram chat shows: your weekly and one-off bookings, the next booking run, what was booked and the gate codes, your PC's dot, the free indoor courts and a court being held. And it asks for the same things: book or remove a date, set a weekday, court order, pause, wake or sleep your PC, hold an indoor court. Each request is carried out by the same code as the Telegram command or button, with the same checks and the same words when the answer is no. **The app adds two powers**. One is paying for a court your PC holds, with the card your PC keeps (see **Pay from the app** above): Telegram cannot, since only the app has the card's security code. The other is Glasgow Life's parks, their free courts and a court booked now (below): a phone you link can have your PC book there at most 4 times an hour, only a court the app was shown free in the last 15 minutes, within the weekly allowance, and never one that costs money. Everything else the app does, you can already do in the chat.
+The app (the separate Court_Booker_App repository) is another way in to the same bot. It shows what the Telegram chat shows: your weekly and one-off bookings, the next booking run, what was booked and the gate codes, your PC's dot, the free indoor courts and a court being held. And it asks for the same things: book or remove a date, set a weekday, court order, pause, wake or sleep your PC, hold an indoor court. Each request is carried out by the same code as the Telegram command or button, with the same checks and the same words when the answer is no. **The app adds two powers**. One is paying for a court your PC holds, with the card your PC keeps (see **Pay from the app** above): Telegram cannot, since only the app has the card's security code. The other is Glasgow Life's parks, their free courts and a court booked now (below): a phone you link can have your PC book there at most 4 times an hour, only a court the app was shown free in the last 15 minutes, within the weekly allowance, and never one that costs money. Since version 2.10 it adds a third: weekly bookings and one-off dates at any venue, with automatic payments at Glasgow Club (below). Everything else the app does, you can already do in the chat.
 
 - **Link a phone:** send `/app`. The bot answers with a six-digit code (and its own address, if the app asks where the bot is). Type the code into the app within 10 minutes. It works once, five wrong tries cancel it, and a new `/app` replaces it. The bot tells you in Telegram when a phone has been linked. Up to five phones can be linked.
 - **Unlink:** `/app forget` unlinks every phone at once; the app can also unlink its own phone. A phone is linked for the chat that owns the bot: if the bot ever comes to answer to another chat (`TELEGRAM_CHAT_ID` set or changed), phones linked for the old one are unlinked when it starts. `/status` says how many phones are linked, when any are.
@@ -138,8 +142,18 @@ In the app, Glasgow Life's seven parks on ClubSpark (Drumchapel, Garrowhill, Kel
 - **Free courts:** your PC opens that park's booking sheet for the day in a Chrome window of its own, kept off the screen, as any visitor would, and sends back the free courts.
 - **Book now:** your PC signs in to ClubSpark as its nightly run does and books exactly the court you picked, or nothing: if it has gone, it says so and takes no other. It presses "Continue booking" only after the bot says go. The outcome is an ordinary result, with the card here, a note and a notification. Bookings are free with the annual pass; your PC never pays.
 - **Your home connection comes first:** a day's look is kept 3 minutes; at most 6 reads in 10 minutes, all phones together; no read from 21:00 and no booking from 21:25, until 22:30, nor while the nightly run is still going; one thing at a time, no booking beside a Glasgow Club hold (or its payment), at most 4 bookings an hour; and if ClubSpark ever turns your PC away (its "Just a moment" check, or a page that never shows, or a 403), nothing at all for 2 hours, said here in Telegram. Nothing tries to get round such a check.
-- **The weekly allowance:** at most 7 sessions and 14 hours a week across the parks (taken to run Monday to Sunday). Book now, `/book`, `/set` and the app refuse what would pass it, and the nightly run is not handed a job that would, which then gets a "Not booked" card saying why. Every court the bot has booked counts, cancelled or not.
-- **Scheduling stays Kelvingrove's:** the weekly times and one-off dates are booked by your PC's nightly run, which books the one venue in its `.env`. The other parks are booked with Book now.
+- **The weekly allowance:** at most 7 sessions and 14 hours a week across the parks (taken to run Monday to Sunday). Book now, `/book`, `/set` and the app refuse what would pass it, and the nightly run is not handed a job that would, which then gets a "Not booked" card saying why. Every court the bot has booked counts, cancelled or not. Glasgow Club's courts are not part of it.
+- **Scheduling** was Kelvingrove's alone until version 2.10. Since then the weekly times and one-off dates can be at any park, and at Glasgow Club (below).
+
+### Weekly bookings at any venue (version 2.10)
+
+In the app a weekly booking, or a one-off date, can be at any venue the bot knows: the seven parks, Gorbals (indoor), Scotstoun (indoor) and Scotstoun (outdoor). A weekday can have several, at different venues or times (one per venue, day and start time, and 30 weekly bookings at most), and each can be switched off and on again without losing it. Your Kelvingrove weekly times carry over as they were. Telegram's `/set`, `/off` and `/book` go on setting Kelvingrove's, and `/plan` lists them all.
+
+- **The parks** open a day 7 days ahead at 22:00, as Kelvingrove does. Your PC's nightly run books Kelvingrove's first, exactly as before (in your court order), then each other park's in the same run: the lowest-numbered court free for the whole slot. Each gets its own card, and the weekly allowance counts them all.
+- **Glasgow Club** opens a day 7 days ahead at midnight. On a night with a booking there, the nightly run stays awake past midnight. At 00:00 it puts the lowest-numbered court free at your time into your basket. With **automatic payments** on (below) it pays for it, then looks at your Bookings page. You get a card: **booked**, with the court and the price paid, or **not booked**, with why and whether anything was paid. If your bank wants you to approve the payment in its app, you are told at once, in Telegram, in the app's notes and as a notification, and the PC waits five minutes for it. With automatic payments off, no court is taken, and the card says so. If no word comes by 00:25, you are told, as at 22:08. These courts are not part of the weekly allowance.
+- **Automatic payments** are switched on in the app. It asks for the card's security code and seals it for your PC, bound to the card your PC keeps and its pay key. The bot passes it on unopened, once, and keeps nothing of it; your PC keeps it beside the card, protected by Windows. The PC then pays only for the booking it was given. The price on the slot must be the payment page's own, and at most £30 (`GLASGOW_AUTO_PAY_MAX` on the PC); the PC's daily limit still applies; every check of the payment page must pass (Pay's own); Pay is pressed once; and each booking is paid for once at most. Switching them off, a new card or **Forget** deletes the code on your PC. The app shows whether they are on.
+- **Your PC is left to it** around such a midnight: no Sleep from 23:00, no holds from 23:25 to 00:30, and no reads of Glasgow Club's sheets from 23:50 to 00:10. A night without a Glasgow Club booking is as before.
+- **Updating:** update your PC's booker first, then the bot. Then run `schedule.ps1` on the PC once more: the nightly task may now run three hours, to see midnight out. A booker older than 2.10 is given Kelvingrove's bookings alone, and every other one gets a "Not booked" card saying to update it.
 
 ## The pictures
 
@@ -167,7 +181,7 @@ If Telegram ever refuses a picture, the message goes out as plain text instead.
 | `AGENT_PUBLIC_KEY` | Yes, to link your PC | The public key the PC prints with `node book.js --make-key`. (Or `AGENT_TOKEN`: a long random line, the same here and in the PC's `.env`.) |
 | `TELEGRAM_CHAT_ID` | Recommended | Your chat ID. Locks the bot to you. |
 | `COURT_SETTINGS` | If no volume | The line from `/backup`. |
-| `COURT_PLAN` | No | Weekly bookings to start from, for example `thu 19:00 2h, fri 19:00 2h`. |
+| `COURT_PLAN` | No | Weekly Kelvingrove bookings to start from, for example `thu 19:00 2h, fri 19:00 2h`. |
 | `COURT_ORDER` | No | A court order to start from, for example `3 4 5 2 1 6`. |
 | `RELEASE_TIME` | No | When the venue releases a new day. Default `22:00`. |
 | `DAYS_AHEAD` | No | How many days ahead it releases. Default `7`. |
@@ -184,8 +198,9 @@ Plain Node 20 or later, no packages. `npm test` runs the checks.
 index.js          start-up, the Telegram message loop and the timer
 app.js            commands, what the PC is told, and the cards
 lib/time.js       UK-time date maths
-lib/plan.js       reading what you type: days, dates, times, court order
-lib/schedule.js   which days open when, and what the PC should book now
+lib/plan.js       reading what you type: days, dates, times, court order; the weekly bookings at any venue
+lib/schedule.js   which days open when (the parks at 22:00, Glasgow Club at midnight), and what the
+                  PC should book now
 lib/messages.js   the words
 lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /agent/ping, which may wait
                   for an instruction such as sleep, a look at Glasgow Club or a court to hold there,

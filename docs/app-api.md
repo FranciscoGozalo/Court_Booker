@@ -19,8 +19,14 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.9.3 (`api: 2`; 2.9.1 added `card.tag`, see `card`; 2.9.3 added
-Scotstoun's outdoor courts, the centre `"o"`, with `venues[].centres` and `.sites` and `indoor.centres[].label` and `.type`). `api: 2` adds the card and Pay
+This file describes the API as built in version 2.10.0 (`api: 3`). `api: 3` adds weekly bookings and one-off dates at every
+venue (`state.weekly`, `POST /app/weekly` and its change, on and remove, a `venue` and `type` on `POST /app/once`), Glasgow
+Club's courts booked and paid by your PC at midnight (`venues[].release`, `.paid` and `.allowance`; `price` and `paid` on
+results), and the switch for automatic payments (`card.auto`, `POST /app/card/auto` and `/off`): see "Weekly bookings at
+any venue" below. Everything of `api: 2` is as it was, but for three additions to what was there: `venue` and `type` on
+`once`, on `release.jobs` and on results; `schedule` true for every venue; and Kelvingrove's `plan` now derived from the
+weekly entries (see `plan`). (2.9.1 added `card.tag`, see `card`; 2.9.3 added Scotstoun's outdoor courts, the centre `"o"`,
+with `venues[].centres` and `.sites` and `indoor.centres[].label` and `.type`.) `api: 2` adds the card and Pay
 (`pc.cardKey`, `card`, `hold.can.pay`, the hold stages `"paying"` and `"approve"`, `POST /app/card`,
 `POST /app/card/forget` and `what: "pay"` in `POST /app/hold/order`), and Glasgow Life's seven parks
 on ClubSpark (`POST /app/clubspark/look` and `/book`, `state.clubspark`), with every venue and its
@@ -90,7 +96,7 @@ week's 7 sessions and 14 hours, one card on its way to the PC at a time, and one
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.9.3", api: 2 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.10.0", api: 3 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -130,12 +136,13 @@ current etag the answer waits up to `wait` seconds for a change and then, if the
 
 ```
 state = {
-  now, bot: "2.9.3",
+  now, bot: "2.10.0",
   venue: { name: "Kelvingrove Park", short: "KP", first: 540, last: 1260, lengths: [1, 2],
            courts: [1,2,3,4,5,6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
   venues: [ { key, name, club: "clubspark" | "glasgow", types: ["outdoor"] | ["indoor"] | ["indoor", "outdoor"],
               centre, schedule, notYet: [ … ], note, site,
-              centres: { indoor?: "g" | "s", outdoor?: "o" }, sites: { indoor?, outdoor? } } ],   // every venue, in a fixed order
+              centres: { indoor?: "g" | "s", outdoor?: "o" }, sites: { indoor?, outdoor? },
+              release: { daysAhead: 7, at }, paid, allowance } ],                // every venue, in a fixed order
   clubspark: { linked, days: { first, last }, quietUntil, lookNo, bookNo,  // the parks on ClubSpark
                reads: { used, max: 6, nextAt }, book: null | book },
   allowance: [ { week, sessions, hours, plannedSessions, plannedHours, maxSessions: 7, maxHours: 14 } ],   // this week, then next
@@ -144,19 +151,20 @@ state = {
   pc: { state: "awake" | "asleep" | "offline", linked, seenAt, line,      // line: the menu's own line about the PC, plain text
         canWake, wakeWhy, canSleep, sleepWhy, sleepAsked, wokeAt,
         cardKey },                                                      // the PC's key for sealing a card (base64), or null
-  release: null | { at, night, jobs: [ { id, date, start, end, from: "weekly" | "once" } ] },   // the next release that books something
+  release: null | { at, night, jobs: [ { id, venue, type, date, start, end, from: "weekly" | "once" } ] },   // the next release that books something
   later:   [ the same, for the releases after it (up to 3) ],
   open:    [ { id, date, start, end } ],             // one-off dates already open, which the PC books at its next run
-  plan:    [ { day: "mon".."sun", start, hours } ],  // every week; a day not listed is off
-  once:    [ { id, date, start, hours, end, opensAt, open } ],            // one-off dates still ahead
+  plan:    [ { day: "mon".."sun", start, hours } ],  // Kelvingrove's weekly bookings, one a day (api 2's view of weekly)
+  weekly:  [ { id, venue, type, day, start, hours, end, on, next } ],     // weekly bookings at every venue (api 3)
+  once:    [ { id, venue, type, date, start, hours, end, opensAt, open } ],   // one-off dates still ahead, at every venue
   order:   [3, 6, 1, 2, 4, 5],
-  results: [ { id, venue, status: "booked" | "none" | "failed", date, start, end, court, gate, why, at, past } ],   // soonest upcoming first, then past ones newest first
+  results: [ { id, venue, status: "booked" | "none" | "failed", date, start, end, court, gate, why, at, past, type, price, paid } ],   // soonest upcoming first, then past ones newest first
   run:     null | { stage: "started" | "ready" | "trouble", at, why },    // tonight's run, as the PC reports it
   indoor:  { linked, days: 9, quietUntil, holdNo,                         // holdNo: why no hold can start now (plain text), or null
              centres: [ { key: "g", name: "Gorbals", site, label: "Gorbals", type: "indoor" },
                         { key: "s", name: "Scotstoun", site, label: "Scotstoun", type: "indoor" },
                         { key: "o", name: "Scotstoun", site, label: "Scotstoun outdoor", type: "outdoor" } ] },
-  card:    null | { brand, last4, expMonth, expYear, tag, pending, forgetting, why },   // the card your PC keeps, for Pay
+  card:    null | { brand, last4, expMonth, expYear, tag, pending, forgetting, why, auto, autoAsked, autoWhy },   // the card your PC keeps, for Pay and automatic payments
   hold:    null | hold,
   notes:   [ { id, at, kind: "booked" | "missed" | "warn" | "hold" | "info", title, body } ],   // newest first, the last 30
   devices: [ { id, name, at, seenAt, me } ],
@@ -180,22 +188,22 @@ book = { id, venue, venueName, date, start, end, hours, court, courtName,       
 **`venue`**: Kelvingrove's fixed facts. `first` and `last` are the earliest start and the latest end
 that Telegram's buttons offer (09:00 and 21:00); `lengths` the hours a booking can last; `releaseMin`
 when a day opens (22:00 unless `RELEASE_TIME` says otherwise) and `daysAhead` how many days before
-(7 unless `DAYS_AHEAD` does); `maxAheadDays` how far ahead a one-off may be (90). These are the
-facts of the schedule, which is Kelvingrove's only (see `venues`).
+(7 unless `DAYS_AHEAD` does); `maxAheadDays` how far ahead a one-off may be (90). These are
+Kelvingrove's; when each venue opens its days is `venues[].release` (api 3).
 
 **`venues`**: every venue the bot knows, always in this order, with the same fields for each:
 
 | `key` | `name` | `club` | `types` | `centre` | `schedule` |
 | --- | --- | --- | --- | --- | --- |
-| `drumchapel` | Drumchapel Park | `clubspark` | `["outdoor"]` | null | false |
-| `garrowhill` | Garrowhill Park | `clubspark` | `["outdoor"]` | null | false |
+| `drumchapel` | Drumchapel Park | `clubspark` | `["outdoor"]` | null | true |
+| `garrowhill` | Garrowhill Park | `clubspark` | `["outdoor"]` | null | true |
 | `kelvingrove` | Kelvingrove Park | `clubspark` | `["outdoor"]` | null | true |
-| `knightswood` | Knightswood Park | `clubspark` | `["outdoor"]` | null | false |
-| `maryhill` | Maryhill Park | `clubspark` | `["outdoor"]` | null | false |
-| `queenspark` | Queens Park | `clubspark` | `["outdoor"]` | null | false |
-| `victoriapark` | Victoria Park | `clubspark` | `["outdoor"]` | null | false |
-| `gorbals` | Gorbals | `glasgow` | `["indoor"]` | `"g"` | false |
-| `scotstoun` | Scotstoun | `glasgow` | `["indoor", "outdoor"]` | `"s"` | false |
+| `knightswood` | Knightswood Park | `clubspark` | `["outdoor"]` | null | true |
+| `maryhill` | Maryhill Park | `clubspark` | `["outdoor"]` | null | true |
+| `queenspark` | Queens Park | `clubspark` | `["outdoor"]` | null | true |
+| `victoriapark` | Victoria Park | `clubspark` | `["outdoor"]` | null | true |
+| `gorbals` | Gorbals | `glasgow` | `["indoor"]` | `"g"` | true |
+| `scotstoun` | Scotstoun | `glasgow` | `["indoor", "outdoor"]` | `"s"` | true |
 
 - `club`: `clubspark` is Glasgow Life's parks, read and booked with `POST /app/clubspark/look` and
   `/book` (`key` is the `venue` they take); `glasgow` is Glasgow Club, read and held with
@@ -215,10 +223,13 @@ facts of the schedule, which is Kelvingrove's only (see `venues`).
 - A centre is read and held by your PC: one whose booker is not yet updated for Scotstoun's outdoor
   courts answers a look at `"o"` with "no such centre or day", and the look ends with that (see
   `POST /app/indoor/look`). Update the PC before the bot.
-- `schedule`: whether the weekly times and one-off dates (`plan`, `once`) are for this venue. Only
-  Kelvingrove's are: your PC's nightly run books the one venue in its `.env`, with one court order,
-  and changing that run is not part of 2.9. The other parks are booked with Book now, once their
-  day is open.
+- `schedule`: whether weekly bookings and one-off dates (`weekly`, `once`) can be at this venue: every
+  venue since 2.10 (`api: 3`; before it, Kelvingrove alone). Book now (the parks) is for a day already open.
+- `release` (api 3): when a day opens there: `daysAhead` days ahead, at `at` minutes after midnight (UK):
+  the parks `{ daysAhead: 7, at: 1320 }` (`releaseMin`), Glasgow Club `{ daysAhead: 7, at: 0 }`.
+- `paid` (api 3): whether a booking there is paid: false at the parks (the pass), true at Glasgow Club
+  (your PC pays automatically, when `card.auto`). `allowance` (api 3): whether it counts toward the
+  weekly allowance: true at the parks, false at Glasgow Club.
 - `site`: the page to book on by hand: the park's ClubSpark booking sheet for today, or the
   centre's Glasgow Club sheet for today.
 
@@ -312,8 +323,12 @@ as the owner gave them do not say. `week`: that Monday, YYYY-MM-DD.
 
 **`release`**: the next release that books something, or null (nothing asked for, or paused).
 `at`: the moment it opens. `night`: the date of that night. `jobs`: what it books, by start time;
-`id` is `YYYY-MM-DD@HH:MM` (the date and start played), the same id a result carries; `from` says
-whether it comes from the weekly plan or a one-off (`"weekly"` when both ask for the same slot).
+`id` is `YYYY-MM-DD@HH:MM` (the date and start played) for Kelvingrove, and the venue in front of it
+for any other (`queenspark/2026-11-25@19:00`, `gorbals/2026-11-25@18:00`), the same id a result
+carries; `venue` and `type` (api 3) say where; `from` says whether it comes from a weekly entry or a
+one-off (`"weekly"` when both ask for the same venue and slot). The parks' release is at
+`releaseMin`, `daysAhead` days ahead; Glasgow Club's is its own entry, at 00:00, 7 days ahead (the
+release of the night before: `night` is that evening's date, `at` the midnight after it).
 A release stays here until ten minutes after `at`, as the bot's own "Next booking" does.
 
 **`later`**: up to three releases after that one, in the same shape.
@@ -322,11 +337,24 @@ A release stays here until ten minutes after `at`, as the bot's own "Next bookin
 at its next run. A one-off that repeats a weekly slot whose release was missed is one of these.
 (In the ten minutes after a release, a one-off it opened is both here and still in `release.jobs`.)
 
-**`plan`**: the weekly bookings, Monday first. **`order`**: the courts in the order they are tried.
+**`plan`**: Kelvingrove's weekly bookings that are on, Monday first, one a day (the earliest when
+there are several): what `api: 2` called the weekly plan, and what `/set`, `/off` and the weekly
+buttons in Telegram show and change. `weekly` has them all. **`order`**: the courts in the order
+they are tried, at Kelvingrove.
+
+**`weekly`** (api 3): every weekly booking, at every venue, Monday first, then by start, then by venue.
+`id`: 8 hex characters, for as long as the entry lasts (Kelvingrove's plan of old became entries with
+ids made from its day and start, the same each time). `venue`: a `venues` key. `type`: `"indoor"` or
+`"outdoor"` (Scotstoun has both). `day`: `"mon"` to `"sun"`. `hours`: 1 or 2 (always 1 at Glasgow
+Club). `end`: `start` plus the hours. `on`: an entry switched off is kept, and never booked.
+`next`: `{ date, opensAt }`, the date it is booked for next and when that day opens (ms), or null
+when it is off. One venue, day and start once; several entries on a day are fine. The parks' count
+toward the weekly allowance; Glasgow Club's do not.
 
 **`once`**: the one-off dates whose start is still ahead (one that has started is left out, though
-the bot keeps it until midnight). `id` as above; `end` is `start` plus the hours; `opensAt` is when
-that day opens for booking; `open` is whether it has.
+the bot keeps it until midnight), at every venue (api 3), by date, start and venue. `id` as above;
+`venue` and `type` as in `weekly` (`"kelvingrove"`, `"outdoor"` for Kelvingrove's); `end` is `start`
+plus the hours; `opensAt` is when that day opens for booking at that venue; `open` is whether it has.
 
 **`results`**: what the PC reported, kept for 60 days. First those dated today or later, soonest
 first; then the past ones, newest first. `past`: the date is before today (UK).
@@ -336,6 +364,11 @@ booked with Book now is not booked again by the nightly run. A booking at anothe
 park in front of its id: `queenspark/2026-11-20@18:00`. Its card in Telegram, and its note, name
 the park.
 `court`: the court as the PC gave it, a short string such as `"3"` (null unless booked).
+`type` (api 3): `"indoor"` or `"outdoor"`. `price` and `paid` (api 3), for Glasgow Club's only (null
+for the parks'): `price` the price asked for the court (`"£23.00"`, or null when none was read);
+`paid` true (paid with the card your PC keeps), false (nothing was paid) or `"maybe"` (Pay was
+pressed, and whether the payment went through is not known: look in the banking app and under
+Bookings on Glasgow Club's site). The `why` of one not booked ends with what was paid, in words.
 `gate`: the gate code, a string (null if not booked, or if none was shown). `why`: null when
 booked; "No court was free for the whole slot." for `none`; "It did not work: <the PC's reason>."
 for `failed`. `at`: when the result came in.
@@ -376,6 +409,13 @@ Null when the PC keeps no card as far as the bot knows, none is on its way and t
   (`WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=`) it is `"60bf07c4"`. Null when the PC keeps
   no card, or its booker is older than 2.9.1 (or the card was kept before it), or what the PC
   said is not 8 such characters. It says nothing of the card or the key that could be used.
+- `auto` (api 3): whether your PC keeps the card's security code for automatic payments, as its last
+  ping said (see "Weekly bookings at any venue"). `autoAsked`: `"on"` or `"off"` while a
+  `POST /app/card/auto` or `/off` waits for the PC (its next ping, within seconds while it is awake;
+  an "on" two minutes at most), else null. `autoWhy`: why the last one did not go through, in words
+  ("Your PC did not turn automatic payments on: <the PC's reason>.", or that the PC did not collect
+  it, or did not answer), else null. A new card, or the card forgotten, deletes the code on the PC:
+  `auto` is then false.
 - `pending`: true from `POST /app/card` until the PC has said how that card went (it collects it
   with its next ping, within seconds while it is awake, and answers on the ping after), or two
   minutes have gone. The card shown meanwhile is the one kept before.
@@ -489,8 +529,12 @@ is fine, and things as they stand refuse it (the same request may work later).
 | --- | --- | --- |
 | `POST /app/once` | `/book` | `{ date, start, hours }`; `already: true` in the answer if it was there |
 | `POST /app/once/remove` | `/cancel` | `{ date, start }` |
-| `POST /app/plan` | `/set` | `{ day, start, hours }` |
-| `POST /app/plan/remove` | `/off` | `{ day }` |
+| `POST /app/plan` | `/set` | `{ day, start, hours }` (Kelvingrove's) |
+| `POST /app/plan/remove` | `/off` | `{ day }` (Kelvingrove's) |
+| `POST /app/weekly` | (app only, api 3) | `{ venue, type, day, start, hours, on }`: a weekly booking at any venue |
+| `POST /app/weekly/change` | (app only, api 3) | `{ id, venue?, type?, day?, start?, hours? }` |
+| `POST /app/weekly/on` | (app only, api 3) | `{ id, on }` |
+| `POST /app/weekly/remove` | (app only, api 3) | `{ id }` |
 | `POST /app/order` | `/order` | `{ order: [six courts, each once] }` |
 | `POST /app/pause` | `/pause`, `/resume` | `{ paused }` |
 | `POST /app/pc/sleep` | Sleep my PC | `{}` |
@@ -500,6 +544,8 @@ is fine, and things as they stand refuse it (the same request may work later).
 | `POST /app/hold/order` | Let it go / I have paid; Pay (app only) | `{ id, what: "release" | "done" }`, or `{ id, what: "pay", amount, sealed }` |
 | `POST /app/card` | (app only) | `{ sealed }`: a card, sealed for `pc.cardKey` |
 | `POST /app/card/forget` | (app only) | `{}` |
+| `POST /app/card/auto` | (app only, api 3) | `{ sealed }`: the card's security code for automatic payments |
+| `POST /app/card/auto/off` | (app only, api 3) | `{}` |
 | `POST /app/push` | | `{ token }`: this phone's Expo push token, or null to stop |
 | `POST /app/clubspark/look` | (app only) | `{ venue, date, fresh }` → `{ ok: true, look }` (no state): a park's free courts |
 | `POST /app/clubspark/book` | (app only) | `{ venue, date, start, hours, court }`: Book now at a park |
@@ -642,18 +688,24 @@ without "It did not work: "):
 
 ### Each request, and every `why` it can give
 
-**`POST /app/once`** `{ date, start, hours }`. `hours` is 1 or 2. As `/book`, any start on the hour
+**`POST /app/once`** `{ venue, type, date, start, hours }`. `hours` is 1 or 2. As `/book`, any start on the hour
 or half hour that ends by midnight is taken; `venue.first` and `venue.last` are the hours to offer.
 If that date and start are on the list already, nothing changes (not the hours either) and the
 answer has `already: true`. The list holds 60 one-off dates at most, however they were asked for
 (`/book` in Telegram is refused in the same words).
 
-A one-off is always at Kelvingrove. The body may say so (`venue: "kelvingrove"`); any other
-`venue` is refused, never ignored. One that would pass the week's allowance (see `allowance`) is
-refused too, in the words `/book` and the Add button use.
+`venue` (api 3) is any `venues` key, Kelvingrove when it is left out; `type` is the venue's only one
+when left out (Scotstoun, which has two, must say which). One venue, date and start once. Glasgow
+Club's are an hour long, on the hour (Scotstoun's outdoor courts from 08:00 to 18:00). One that
+would pass the week's allowance (see `allowance`; the parks only) is refused too, in the words
+`/book` and the Add button use.
 
 - 400 "A one-off booking needs a date (YYYY-MM-DD), a start in minutes after midnight, and hours (1 or 2)."
-- 400 "Only Kelvingrove Park can be scheduled. Book the other parks with Book now, once their day is open."
+- 400 "There is no such venue: send one of the keys in state.venues."
+- 400 "Gorbals has indoor courts only." (or "<Park> has outdoor courts only.")
+- 400 "Scotstoun has indoor and outdoor courts: send type, indoor or outdoor."
+- 400 "Glasgow Club courts are booked an hour at a time."
+- 400 "Scotstoun's outdoor courts are open from 08:00 to 18:00."
 - 400 "Slots start on the hour. Try a time like 19:00."
 - 400 "That slot runs past midnight. Try an earlier time."
 - 400 "Tue 10 Nov at 19:00 has already passed." (that day and time)
@@ -661,24 +713,53 @@ refused too, in the words `/book` and the Add button use.
 - 409 "Your list already has 60 one-off dates, which is as many as I keep. Remove one first."
 - 409 "That would be 8 sessions in the week of Mon 23 Nov; the limit is 7." or "That would be 15 hours in the week of Mon 23 Nov; the limit is 14."
 
-**`POST /app/once/remove`** `{ date, start }`. One that is not on the list is no error: the answer
-is the state as it is.
+**`POST /app/once/remove`** `{ venue, date, start }` (`venue` Kelvingrove when left out). One that is
+not on the list is no error: the answer is the state as it is.
 
 - 400 "To remove a one-off booking, send its date (YYYY-MM-DD) and its start in minutes after midnight."
 
 **`POST /app/plan`** `{ day, start, hours }`. Sets or changes that weekday, at Kelvingrove (a
-`venue` other than `"kelvingrove"` is refused). A change that would pass the week's allowance in a
+`venue` other than `"kelvingrove"` is refused): Kelvingrove's weekly entries on that day give way to
+this one, as `/set` does. `POST /app/weekly` takes any venue, and several a day. A change that would pass the week's allowance in a
 week it adds to is refused, as `/set` and the weekly buttons refuse it; a weekly time adds nothing
 to a week whose release for that day has gone by.
 
 - 400 "A weekly booking needs a day (mon to sun), a start in minutes after midnight, and hours (1 or 2)."
-- 400 "Only Kelvingrove Park can be scheduled. Book the other parks with Book now, once their day is open."
+- 400 "This sets Kelvingrove's weekly time, as /set does. Add a weekly booking at another venue to the weekly list."
 - 400 "Slots start on the hour. Try a time like 19:00."
 - 400 "That slot runs past midnight. Try an earlier time."
 - 409 "That would be 8 sessions in the week of Mon 23 Nov; the limit is 7." (or the same for 14 hours)
 
-**`POST /app/plan/remove`** `{ day }`. `day` may be `"all"`, as `/off all`. A day that was not set is
-no error.
+**`POST /app/plan/remove`** `{ day }`. `day` may be `"all"`, as `/off all`. Kelvingrove's entries that
+day (or every day) go; the other venues' stay. A day that was not set is no error.
+
+**`POST /app/weekly`** `{ venue, type, day, start, hours, on }` (api 3): a weekly booking at any venue.
+`type` as for `POST /app/once`; `on` true when left out. The answer's `state.weekly` has it, with its id.
+
+- 400 "A weekly booking needs a venue, a day (mon to sun), a start in minutes after midnight, and hours (1 or 2)."
+- 400 the venue, type and slot sentences of `POST /app/once`
+- 409 "There is already a weekly booking at Gorbals on Wednesdays at 18:00." (that venue, day and time)
+- 409 "Your list already has 30 weekly bookings, which is as many as I keep. Remove one first."
+- 409 "That would be 8 sessions in the week of Mon 23 Nov; the limit is 7." (or 14 hours; the parks only)
+
+**`POST /app/weekly/change`** `{ id, venue?, type?, day?, start?, hours? }`: the entry as it will be is
+read whole, as a new one is (a venue changed without a type takes that venue's own, or must say
+which), and checked against the others and the allowance; it keeps its id and whether it is on.
+
+- 400 "To change or remove a weekly booking, send its id."
+- 400 any sentence of `POST /app/weekly` about the entry itself
+- 409 "That weekly booking is no longer on your list."
+- 409 the duplicate and allowance sentences of `POST /app/weekly`
+
+**`POST /app/weekly/on`** `{ id, on }`: switched on (checked against the allowance) or off.
+
+- 400 "To switch a weekly booking on or off, send its id and on (true or false)."
+- 409 "That weekly booking is no longer on your list." / the allowance's sentence
+
+**`POST /app/weekly/remove`** `{ id }`.
+
+- 400 "To change or remove a weekly booking, send its id."
+- 409 "That weekly booking is no longer on your list."
 
 - 400 "To stop a weekly booking, send its day (mon to sun, or all)."
 
@@ -937,6 +1018,77 @@ Club's site, with or without a box to type in), and could read a real one wrongl
 wrongly for a code page, the payment is left unfinished; wrongly for an approval page, the PC waits
 five minutes and then looks at the Bookings page.
 
+## Weekly bookings at any venue (api 3)
+
+**The parks.** Every park opens a day `daysAhead` (7) days ahead at `releaseMin` (22:00). Your PC's
+nightly run (21:55) books Kelvingrove's jobs first, exactly as before (its own path, with `order`),
+then each other park's in the same run, on ClubSpark, the lowest-numbered court that is free for the
+whole slot. Results carry the venue in their id. The weekly allowance (7 sessions, 14 hours a week,
+across the parks) applies as before.
+
+**Glasgow Club.** Gorbals (`g`), Scotstoun indoor (`s`) and Scotstoun outdoor (`o`) open a day 7 days
+ahead at 00:00. On a night with one of their jobs, the nightly run stays awake past midnight (its
+Windows task may run three hours: re-run `schedule.ps1` on the PC once). At 00:00 it puts the
+lowest-numbered court free at the job's start into your basket and, when automatic payments are on,
+pays for it with the card your PC keeps and the security code kept beside it: only if the price on
+the slot ("Book for £23.00") is the payment page's own and at most `GLASGOW_AUTO_PAY_MAX` (£30
+unless the PC's `.env` says), and every check of the payment page passes (the page come to from the
+basket, one thing in its basket, one amount, empty card boxes, no bank's check showing, the press
+once). If your bank asks you to approve the payment, the bot says so at once: a note of kind
+`"warn"`, "Approve the payment in your bank's app" ("Your PC is paying £23.00 for Gorbals · Wed 25 Nov
+· 18:00–19:00, court 1. Your bank wants you to approve it in its app; your PC waits five minutes for
+that."), which is also a notification. Then your Bookings page says whether it was booked, and the
+result says so: booked, with `court`, `price` and `paid: true`; or not, with `why` and `paid`. With
+automatic payments off nothing is taken: the result is "failed", "automatic payments are off on your
+PC, so it did not take a court", `paid: false`. A court taken and then not paid for (a check that did
+not pass, a price over the cap) is taken out of the basket again; after a press nothing is taken out.
+Each booking is paid for once at most, whatever happens (a run that starts again pays nothing twice).
+None of it counts toward the allowance.
+
+Around a night's Glasgow Club job your PC is left to it: Sleep is refused from 23:00 ("Your PC books
+Glasgow Club at 00:00, so it stays awake until then."), holds from 23:25 to 00:30 ("Your PC books
+Glasgow Club at 00:00, so it holds nothing else from 23:25 to 00:30. The sheet below still opens."),
+and looks at Glasgow Club's sheets from 23:50 to 00:10 ("Your PC books Glasgow Club at 00:00, so I am
+asking nothing else of it until 00:10."). A PC whose booker is older than 2.10 is handed
+Kelvingrove's jobs alone (it would book any other at Kelvingrove); every other job then has the
+result "your PC's booker does not book <place> yet: update it on your PC. Your PC did not try it".
+Update the PC first.
+
+### Automatic payments
+
+**`POST /app/card/auto`** `{ sealed }`: turns them on. The box is sealed exactly as the card and Pay's
+code are (see "The sealed box"); what is sealed is
+
+```
+{ "use": "auto", "cvc": "123", "payKey": "<the card's pay key: standard base64 of its 32 bytes>", "last4": "4242", "at": 1763661600000 }
+```
+
+- `use`: exactly `"auto"`. A Pay code (which has `id` and `amount`) never works as this, nor this as one.
+- `cvc`: 3 or 4 digits, as a string. `payKey`: the pay key sent with the card your PC keeps.
+  `last4`: that card's last four digits: the code is bound to that card.
+- `at`: when it was sealed (ms since 1970). Your PC takes it only within 10 minutes of `at`, and
+  only if `at` is later than the last time automatic payments were turned off or the card changed:
+  a box kept by anybody on the way, replayed later, turns nothing back on.
+
+The PC keeps the code beside the card, protected by Windows the same way (`vault\auto.json`), until
+it is turned off, or the card is replaced or forgotten. The bot passes the box on as it came, once,
+with the PC's next ping (two minutes at most), and keeps nothing of it: not in its log, not on disk.
+The answer is the state, with `card.autoAsked: "on"` until the PC has said how it went (`card.auto`,
+or `card.autoWhy`). The PC's reasons: "the security code did not come from the app the card was given
+in", "the security code was sealed for another card", "the security code is too old: turn automatic
+payments on again", "the security code does not read as one", "no card is kept on this PC".
+
+- 400 "To turn automatic payments on, send the card's security code sealed for your PC's card key: { sealed }."
+- 400 "That is not a sealed box I can pass on: it must be standard base64, at most 1024 characters, of a key, a nonce and the box."
+- 409 "There is no card on your PC. Add one in the app first."
+- 409 "Your PC has not given me its card key yet. It does with every ping while it is awake: wake it, or wait a minute, then try again."
+- 409 "Your PC is not awake, and it is your PC that keeps the code. Wake it and try again."
+- 409 "Your new card has not reached your PC yet. Try again in a moment."
+- 409 "Your PC is paying for a court just now. Try again once that is over."
+
+**`POST /app/card/auto/off`** `{}`: turns them off: the PC deletes the code with its next ping. Off
+already, nothing is asked of the PC; an "on" that has not reached it yet is dropped, unseen.
+
 ## Notes and notifications
 
 Whatever the bot tells the owner unprompted in Telegram (a court booked or not, trouble before a
@@ -1013,10 +1165,12 @@ phone's push token: the phone stays linked, and gets notifications again once th
 - A phone linked while the bot answered to one chat is unlinked when it starts answering to
   another, even if that was a mistake in `TELEGRAM_CHAT_ID` put right later: link it again with
   `/app`. (Kept, it would go on getting the new chat's notifications.)
-- Scheduling (`plan`, `once`, `release`, `open`, the court `order`) is Kelvingrove's only. Carrying a
-  park on each weekly time and one-off would mean changing your PC's nightly run (it books the one
-  venue in its `.env`, with one court order and one sign-in) and the ids its results carry; that is
-  not done in 2.9. The other six parks are booked with Book now, on a day that is open.
+- Scheduling is at every venue since 2.10 (`api: 3`). The court `order` stays Kelvingrove's: at the
+  other parks, and at Glasgow Club, the lowest-numbered court free is taken. That Glasgow Club opens
+  each day 7 days ahead at 00:00 is as its site says now; the bot does not read it each night.
+- Automatic payments keep the card's security code on your PC (protected by Windows, as the card is),
+  which Pay from the app never does: anything running as your Windows user could ask Windows for both.
+  Off, a new card or Forget deletes it. A card with a low limit keeps what could go wrong small.
 - The weekly allowance takes a week to run Monday to Sunday (UK), by the day played: an
   assumption. It counts the bookings this bot made (kept 60 days), not any made by hand on ClubSpark,
   which it never sees.

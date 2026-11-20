@@ -419,7 +419,7 @@ test('Book now, end to end: asked, collected, each step, the go-ahead, booked; a
   const card = t.tg.calls.find(c => c.method === 'photo');
   assert.equal(card.text, '<b>Booked · Court 1</b>\nQueens Park · Fri 20 Nov · 18:00–19:00\nGate code: <code>4821</code>  (tap to copy)');
   const s = stateOf(t, phone);
-  assert.deepEqual(s.results[0], { id: 'queenspark/2026-11-20@18:00', venue: 'queenspark', status: 'booked', date: FRI, start: 1080, end: 1140, court: '1', gate: '4821', why: null, at: t.clock.t, past: false });
+  assert.deepEqual(s.results[0], { id: 'queenspark/2026-11-20@18:00', venue: 'queenspark', status: 'booked', date: FRI, start: 1080, end: 1140, court: '1', gate: '4821', type: 'outdoor', price: null, paid: null, why: null, at: t.clock.t, past: false });
   assert.deepEqual([s.notes[0].kind, s.notes[0].title, s.notes[0].body], ['booked', 'Court 1 booked', 'Queens Park · Fri 20 Nov · 18:00–19:00 · gate 4821']);
   assert.deepEqual(t.pushes.map(p => p.title), ['Court 1 booked']);
   assert.deepEqual([s.clubspark.book.live, s.clubspark.book.ended, s.clubspark.book.gate, s.clubspark.book.line], [false, 'booked', '4821', 'Booked: court 1. Gate code 4821.']);
@@ -714,19 +714,20 @@ test('the venues: seven parks on ClubSpark, Gorbals and Scotstoun at Glasgow Clu
   const phone = await linkPhone(t);
   const venues = stateOf(t, phone).venues;
   assert.deepEqual(venues.map(v => [v.key, v.club, v.types.join('+'), v.centre, v.schedule]), [
-    ['drumchapel', 'clubspark', 'outdoor', null, false], ['garrowhill', 'clubspark', 'outdoor', null, false], ['kelvingrove', 'clubspark', 'outdoor', null, true],
-    ['knightswood', 'clubspark', 'outdoor', null, false], ['maryhill', 'clubspark', 'outdoor', null, false], ['queenspark', 'clubspark', 'outdoor', null, false],
-    ['victoriapark', 'clubspark', 'outdoor', null, false], ['gorbals', 'glasgow', 'indoor', 'g', false], ['scotstoun', 'glasgow', 'indoor+outdoor', 's', false],
+    ['drumchapel', 'clubspark', 'outdoor', null, true], ['garrowhill', 'clubspark', 'outdoor', null, true], ['kelvingrove', 'clubspark', 'outdoor', null, true],
+    ['knightswood', 'clubspark', 'outdoor', null, true], ['maryhill', 'clubspark', 'outdoor', null, true], ['queenspark', 'clubspark', 'outdoor', null, true],
+    ['victoriapark', 'clubspark', 'outdoor', null, true], ['gorbals', 'glasgow', 'indoor', 'g', true], ['scotstoun', 'glasgow', 'indoor+outdoor', 's', true],
   ]);
   const sheet = (activity, date = TUE) => `https://glasgowclub.gladstonego.cloud/book/calendar/${activity}?activityDate=${date}T00:00:00.000Z`;
   // Scotstoun: a centre key and a sheet for each court type; `centre` and `site` stay the first (indoor) one's.
   assert.deepEqual(venues[8], {
-    key: 'scotstoun', name: 'Scotstoun', club: 'glasgow', types: ['indoor', 'outdoor'], centre: 's', schedule: false, notYet: [], note: null,
+    key: 'scotstoun', name: 'Scotstoun', club: 'glasgow', types: ['indoor', 'outdoor'], centre: 's', schedule: true, notYet: [], note: null,
     site: sheet('SA011'), centres: { indoor: 's', outdoor: 'o' }, sites: { indoor: sheet('SA011'), outdoor: sheet('SA008') },
+    release: { daysAhead: 7, at: 0 }, paid: true, allowance: false,
   });
   assert.deepEqual([venues[7].centres, venues[7].sites], [{ indoor: 'g' }, { indoor: sheet('S0815') }]);
   assert.equal(venues[5].site, `https://clubspark.lta.org.uk/QueensParkTennisCourtsGlasgow/Booking/BookByDate#?date=${TUE}`);
-  assert.deepEqual([venues[5].centres, venues[5].sites], [{}, { outdoor: venues[5].site }]);
+  assert.deepEqual([venues[5].centres, venues[5].sites, venues[5].release, venues[5].paid, venues[5].allowance], [{}, { outdoor: venues[5].site }, { daysAhead: 7, at: 1320 }, false, true]);
   assert.ok(venues.every(v => v.notYet.length === 0 && v.note === null));
   // The outdoor sheet, as its own page asks for it: SA008 in the group AG153, at Scotstoun's site.
   assert.equal(G.SCOTSTOUN_OUTDOOR_ACTIVITY, 'SA008');
@@ -739,15 +740,26 @@ test('the venues: seven parks on ClubSpark, Gorbals and Scotstoun at Glasgow Clu
   assert.deepEqual([s.types, s.notYet, s.note, s.centre, s.centres], [['indoor'], ['outdoor'], 'Scotstoun\'s outdoor courts are not available yet.', 's', { indoor: 's' }]);
 });
 
-test('scheduling stays Kelvingrove\'s: the app is told so if it names another park', async () => {
+test('scheduling at any park (2.10): a one-off may name another park; the weekly time of old (/app/plan) is still Kelvingrove\'s, and the weekly list takes any venue', async () => {
   const t = makeBot();
   const phone = await linkPhone(t);
-  const why = 'Only Kelvingrove Park can be scheduled. Book the other parks with Book now, once their day is open.';
-  assert.deepEqual(await ask(t, phone, 'once', { venue: 'queenspark', date: '2026-11-27', start: 1140, hours: 1 }), refused(400, why));
+  const why = 'This sets Kelvingrove\'s weekly time, as /set does. Add a weekly booking at another venue to the weekly list.';
+  // /app/plan is /set: Kelvingrove's.
   assert.deepEqual(await ask(t, phone, 'plan', { venue: 'maryhill', day: 'thu', start: 1140, hours: 1 }), refused(400, why));
-  assert.equal((await ask(t, phone, 'once', { venue: 'kelvingrove', date: '2026-11-27', start: 1140, hours: 1 })).status, 200);
   assert.equal((await ask(t, phone, 'plan', { day: 'thu', start: 1140, hours: 1 })).status, 200);
+  // A one-off at another park goes on its own list, beside Kelvingrove's.
+  const r = await ask(t, phone, 'once', { venue: 'queenspark', date: '2026-11-27', start: 1140, hours: 1 });
+  assert.equal(r.status, 200);
+  assert.equal((await ask(t, phone, 'once', { venue: 'kelvingrove', date: '2026-11-27', start: 1140, hours: 1 })).status, 200);
   assert.deepEqual(t.app.state.once, [{ date: '2026-11-27', start: 1140, hours: 1 }]);
+  assert.deepEqual(t.app.state.onceAway, [{ date: '2026-11-27', start: 1140, hours: 1, venue: 'queenspark', type: 'outdoor' }]);
+  assert.deepEqual(r.body.state.once.map(o => [o.id, o.venue]), [['queenspark/2026-11-27@19:00', 'queenspark']]);
+  // The same park, date and start again: already there.
+  assert.equal((await ask(t, phone, 'once', { venue: 'queenspark', date: '2026-11-27', start: 1140, hours: 2 })).body.already, true);
+  assert.deepEqual(await ask(t, phone, 'once', { venue: 'hampden', date: '2026-11-27', start: 1140, hours: 1 }), refused(400, 'There is no such venue: send one of the keys in state.venues.'));
+  // Removed by its venue; Kelvingrove's by none.
+  await ask(t, phone, 'once/remove', { venue: 'queenspark', date: '2026-11-27', start: 1140 });
+  assert.deepEqual([t.app.state.once.length, t.app.state.onceAway.length], [1, 0]);
 });
 
 test('a result from another park keeps its park; a made-up park, or Kelvingrove written out, is not a result', async () => {

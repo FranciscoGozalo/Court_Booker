@@ -14,9 +14,10 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { iso, label, hhmm, todayCivil, addDays, londonInstant, londonWall, civil, DAY_KEYS, DAY_LONG } = require('./lib/time');
-const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, slotText, slotEnd } = require('./lib/plan');
-const { jobsFor, jobId, missingFor, msToNextCheck, opensAt, civilOf, upcoming, releaseAround, MISSING_MS, SEEN_FRESH_MS } = require('./lib/schedule');
+const { iso, label, hhmm, todayCivil, addDays, londonInstant, londonWall, civil, dayKey, DAY_KEYS, DAY_LONG } = require('./lib/time');
+const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, cleanOnceAway, cleanWeekly, weeklyFromPlan, planOf, newWeeklyId, slotText, slotEnd,
+  MAX_WEEKLY } = require('./lib/plan');
+const { jobsFor, jobId, missingFor, msToNextCheck, opensAt, opensAtFor, civilOf, upcoming, releaseAround, isClub, MISSING_MS, SEEN_FRESH_MS } = require('./lib/schedule');
 const M = require('./lib/messages');
 const UI = require('./lib/ui');
 const { readMac, publicIPv4, sendWake } = require('./lib/wake');
@@ -27,7 +28,7 @@ const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 
-const VERSION = '2.9.3';
+const VERSION = '2.10.0';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -41,6 +42,7 @@ const PREFLIGHT_MS = 20 * 60 * 1000;       // this long before a release, make s
 const PREFLIGHT_WAIT_MS = 3 * 60 * 1000;   // how long the PC gets to answer that wake-up before you are told
 const NO_WORD_MS = 8 * 60 * 1000;          // a run that started should have reported by this long after the release
 const NO_WORD_FOR_MS = 60 * 60 * 1000;     // ...and after this the bot stops watching for it
+const NO_WORD_CLUB_MS = 25 * 60 * 1000;    // a Glasgow Club booking (paid, perhaps with your bank's approval) by this long after its midnight
 const GONE = ['test', 'free', 'signin', 'style', 'lead', 'warn', 'go', 'code'];   // link-alert commands from version 1
 // Said to a button, and to the app, that asks for an indoor day or time which is not on offer.
 const DAY_GONE = 'That day is no longer on offer. Pick again.';
@@ -48,7 +50,8 @@ const TIME_GONE = 'That time is no longer on offer. Pick again.';
 // Said to the app when it asks to hold a court that no look showed it free in the last 15 minutes.
 const LIST_OLD = 'That list is old. Read the day again, then hold a court.';
 // What the iPhone app can ask for (POST /app/<name>, docs/app-api.md).
-const APP_ASKS = ['unpair', 'once', 'once/remove', 'plan', 'plan/remove', 'order', 'pause', 'pc/sleep', 'pc/wake', 'indoor/look', 'hold', 'hold/order', 'card', 'card/forget', 'push'];
+const APP_ASKS = ['unpair', 'once', 'once/remove', 'plan', 'plan/remove', 'weekly', 'weekly/change', 'weekly/on', 'weekly/remove', 'order', 'pause', 'pc/sleep', 'pc/wake',
+  'indoor/look', 'hold', 'hold/order', 'card', 'card/forget', 'card/auto', 'card/auto/off', 'push'];
 
 // The banner pictures (made by art/make-banners.cjs): the menu card in three versions, one for
 // each state of your PC (the coloured dot), and one each for a court booked and not booked.
@@ -75,17 +78,24 @@ function intIn(v, lo, hi) {
 }
 
 // A result from the PC, made safe to keep and show. Null if it does not make sense.
-// The id is the date and start played; a park other than Kelvingrove (Book now) is put in front
-// of it, and kept as `venue` (lib/venues.js, resultId).
+// The id is the date and start played; any venue but Kelvingrove is put in front of it, and kept
+// as `venue` (lib/venues.js, resultId). Glasgow Club's (2.10) also carry `type`, the `price`
+// paid or asked ("£23.00") and whether it was `paid`: true, false or 'maybe' (Pay was pressed and
+// whether the payment went through is not known).
 function cleanResult(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const id = String(raw.id || '');
   const m = /^(?:([a-z]{3,20})\/)?(\d{4}-\d{2}-\d{2})@(\d{2}):(\d{2})$/.exec(id);
   if (!m || !['booked', 'none', 'failed'].includes(raw.status)) return null;
-  if (m[1] && (m[1] === V.SCHEDULED || !V.parkOf(m[1]))) return null;
+  if (m[1] && (m[1] === V.SCHEDULED || !V.isVenue(m[1]))) return null;
   const start = Number(m[3]) * 60 + Number(m[4]);
   const end = intIn(raw.end, start + 30, 1440) ?? slotEnd(start, 1);
   const r = { id, status: raw.status, date: m[2], start, end, ...(m[1] ? { venue: m[1] } : {}) };
+  if (V.clubOf(m[1])) {
+    r.type = V.typesOf(m[1]).includes(raw.type) ? raw.type : V.typesOf(m[1])[0];
+    r.price = typeof raw.price === 'string' && /^£\d{1,4}(\.\d\d)?$/.test(raw.price) ? raw.price : null;
+    r.paid = raw.paid === true ? true : raw.paid === 'maybe' ? 'maybe' : false;
+  }
   if (raw.status === 'booked') {
     r.court = String(raw.court ?? '').replace(/[^\w ]/g, '').slice(0, 20);
     if (!r.court) return null;
@@ -100,14 +110,19 @@ function cleanResult(raw) {
 // Settings saved by version 1 (the link alerts) keep the owner, weekly plan, court order and pictures.
 function loadState(raw, env = {}) {
   const state = {
-    v: STATE_VERSION, owner: null, plan: {}, once: [], order: [1, 2, 3, 4, 5, 6], paused: false,
+    v: STATE_VERSION, owner: null, plan: {}, weekly: [], once: [], onceAway: [], order: [1, 2, 3, 4, 5, 6], paused: false,
     results: {}, sent: {}, pics: {}, lastSeen: null, lastRun: null, home: null,
     apps: [], notes: [],
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
-    state.plan = cleanPlan(raw.plan);
+    // The weekly bookings at any venue (2.10); kept before 2.10, only Kelvingrove's plan, one a
+    // day, which becomes the same bookings as entries. `plan` is then Kelvingrove's part of them,
+    // kept beside them for a bot rolled back to an older version.
+    state.weekly = Array.isArray(raw.weekly) ? cleanWeekly(raw.weekly) : weeklyFromPlan(raw.plan);
+    state.plan = planOf(state.weekly);
     state.once = cleanOnce(raw.once);
+    state.onceAway = cleanOnceAway(raw.onceAway);
     state.order = cleanOrder(raw.order);
     state.paused = raw.paused === true;
     if (raw.v === STATE_VERSION) {
@@ -132,7 +147,8 @@ function loadState(raw, env = {}) {
     }
     state.apps = A.cleanApps(raw.apps);                           // the phones linked to the app: a hash of each one's token, never the token
   } else {
-    state.plan = parsePlan(env.COURT_PLAN);
+    state.weekly = weeklyFromPlan(parsePlan(env.COURT_PLAN));
+    state.plan = planOf(state.weekly);
     state.order = parseOrder(env.COURT_ORDER) || state.order;
   }
   return state;
@@ -141,7 +157,8 @@ function loadState(raw, env = {}) {
 // The settings as one line, for the COURT_SETTINGS variable, and back again. The phones linked
 // to the app are left out on purpose: a line that is copied about should open no door.
 function backupLine(state) {
-  return JSON.stringify({ v: STATE_VERSION, owner: state.owner, plan: cleanPlan(state.plan), once: cleanOnce(state.once), order: state.order });
+  return JSON.stringify({ v: STATE_VERSION, owner: state.owner, plan: cleanPlan(state.plan), weekly: cleanWeekly(state.weekly), once: cleanOnce(state.once),
+    onceAway: cleanOnceAway(state.onceAway), order: state.order });
 }
 function readBackup(text) {
   try {
@@ -187,7 +204,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
   const releaseMin = parseTime(env.RELEASE_TIME) ?? 22 * 60;
   const daysAhead = intIn(env.DAYS_AHEAD, 1, 30) ?? 7;
-  const cfg = () => ({ plan: state.plan, once: state.once, order: state.order, releaseMin, daysAhead });
+  // The schedule as lib/schedule.js reads it: every venue's weekly entries (`weekly`) and one-offs
+  // (Kelvingrove's `once`, the other venues' `away`), and Kelvingrove's part of the weekly ones as
+  // the plan of old (`plan`, one a day: for the words and screens that show one a day).
+  const cfg = () => ({ plan: state.plan, weekly: state.weekly, once: state.once, away: state.onceAway, order: state.order, releaseMin, daysAhead });
+  // The weekly entries, changed: kept, with Kelvingrove's part of them as the plan of old beside them.
+  const setWeeklyList = list => { state.weekly = cleanWeekly(list); state.plan = planOf(state.weekly); };
   function kept() {
     if (store.isPersistent ? store.isPersistent() : true) return 'disk';
     return variableLine !== null && variableLine === backupLine(state) ? 'variable' : 'no';
@@ -326,8 +348,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const SLEEP_ASK_MS = 2 * 60 * 1000;
   const SLEEP_GUARD_MS = 30 * 60 * 1000;              // no sleeping in the half hour before a booking
   const waiters = new Set();                          // pings waiting for something to do
+  const CLUB_SLEEP_GUARD_MS = 60 * 60 * 1000;         // ...an hour before Glasgow Club's midnight...
+  const CLUB_SLEEP_AFTER_MS = 30 * 60 * 1000;         // ...and half an hour after it (its payments take minutes)
   function sleepBlocker(t) {
     if (state.paused || owner() === null) return null;
+    const club = releaseAround(t, cfg(), CLUB_SLEEP_GUARD_MS, CLUB_SLEEP_AFTER_MS, true);
+    if (club) return club;
     const [rel] = upcoming(t, cfg(), 1);
     return rel && t >= rel.releaseAt - SLEEP_GUARD_MS ? rel : null;
   }
@@ -336,7 +362,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   function sleepNo(t) {
     if (!linked) return 'Your PC is not linked to me.';
     if (pcState(t) !== 'awake') return 'Your PC is not awake.';
-    if (sleepBlocker(t)) return `Your PC books at ${hhmm(releaseMin)}, so it stays awake until then.`;
+    const booking = sleepBlocker(t);
+    if (booking) return booking.club ? 'Your PC books Glasgow Club at 00:00, so it stays awake until then.' : `Your PC books at ${hhmm(releaseMin)}, so it stays awake until then.`;
     if (holdLive(t)) return 'Your PC is holding a court for you. Let it go first.';
     if (cs.live(t)) return 'Your PC is booking a court for you. Wait for it to finish.';
     return null;
@@ -371,6 +398,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     const card = takeCard(t);
     if (card) return card;
+    const auto = takeAuto(t);
+    if (auto) return auto;
     if (sleepAsk === null) return {};
     const fresh = t - sleepAsk <= SLEEP_ASK_MS && !sleepBlocker(t);
     sleepAsk = null;
@@ -439,12 +468,19 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // every night, whether or not a day opens then (the run starts five minutes before).
   const LOOK_GUARD_MS = 10 * 60 * 1000;
   const nearRun = t => [-1, 0, 1].some(d => Math.abs(t - londonInstant(addDays(todayCivil(t), d), releaseMin)) <= LOOK_GUARD_MS);
+  // Glasgow Club's midnight, on a night your PC books there: nothing else is asked of it then.
+  const nearClubRun = t => !state.paused && owner() !== null && !!releaseAround(t, cfg(), LOOK_GUARD_MS, LOOK_GUARD_MS, true);
   async function readIndoor(key, dateIso, fresh) {
     const t = now();
     if (linked && pcState(t) === 'awake') {
       if (!indoor.peek(key, dateIso, { fresh }) && nearRun(t)) {
         const busy = G.problem('odd', 'the PC is at its booking run');
         busy.say = `Your PC's nightly booking run is at ${hhmm(releaseMin)}, so I am asking nothing else of it until ${hhmm((releaseMin + LOOK_GUARD_MS / 60000) % 1440)}.`;
+        throw busy;
+      }
+      if (!indoor.peek(key, dateIso, { fresh }) && nearClubRun(t)) {
+        const busy = G.problem('odd', 'the PC is at its Glasgow Club booking');
+        busy.say = `Your PC books Glasgow Club at 00:00, so I am asking nothing else of it until ${hhmm(LOOK_GUARD_MS / 60000)}.`;
         throw busy;
       }
       try { return await indoor.day(key, dateIso, { fresh, via: askPc }); } catch (err) {
@@ -511,6 +547,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const rel = londonInstant(addDays(todayCivil(t), d), releaseMin);
     return t >= rel - HOLD_BEFORE_MS && t <= rel + HOLD_AFTER_MS;
   });
+  const CLUB_HOLD_AFTER_MS = 30 * 60 * 1000;          // Glasgow Club's midnight: none from 23:25 to 00:30, on a night your PC books there
+  const nearClubHold = t => !state.paused && owner() !== null && !!releaseAround(t, cfg(), HOLD_BEFORE_MS, CLUB_HOLD_AFTER_MS + 1, true);
   // What is known here of a press of Pay for a hold, strongest first: true (the PC said it
   // pressed), 'maybe' (the PC said it may have: it got no answer to the press; or its link
   // says a press was noted before the tool went), 'unheard' (an order to pay went out to the PC,
@@ -573,6 +611,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (nearHoldGuard(t)) {
       const from = (releaseMin - HOLD_BEFORE_MS / 60000 + 1440) % 1440, to = (releaseMin + HOLD_AFTER_MS / 60000) % 1440;
       return { toast: 'Not around the nightly booking run.', say: `Your PC's nightly booking run is at ${hhmm(releaseMin)}, so it holds nothing else from ${hhmm(from)} to ${hhmm(to)}. The sheet below still opens.` };
+    }
+    if (nearClubHold(t)) {
+      const from = 1440 - HOLD_BEFORE_MS / 60000, to = CLUB_HOLD_AFTER_MS / 60000;
+      return { toast: 'Not around the midnight booking.', say: `Your PC books Glasgow Club at 00:00, so it holds nothing else from ${hhmm(from)} to ${hhmm(to)}. The sheet below still opens.` };
     }
     const quietUntil = siteQuietUntil(t);
     if (quietUntil) return { toast: 'Glasgow Club is checking visitors.', say: `Glasgow Club's site was checking visitors from your home connection, so your PC is leaving it alone until ${clock(quietUntil)}.` };
@@ -1129,16 +1171,98 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // The card for the app's state: null when your PC keeps none (as far as I know), nothing is
   // on its way, and there is nothing to say.
   function cardView() {
-    if (!pcCard && !cardAsk && !cardWhy) return null;
+    if (!pcCard && !cardAsk && !cardWhy && !pcAuto && !autoAsk && !autoWhy) return null;
     return {
       brand: pcCard ? pcCard.brand : null, last4: pcCard ? pcCard.last4 : null, expMonth: pcCard ? pcCard.expMonth : null, expYear: pcCard ? pcCard.expYear : null,
       tag: pcCard ? pcCard.tag : null,
       pending: !!cardAsk && cardAsk.kind === 'card', forgetting: !!cardAsk && cardAsk.kind === 'forget', why: cardWhy,
+      auto: pcAuto, autoAsked: autoAsk ? autoAsk.kind : null, autoWhy,           // automatic payments (2.10)
     };
   }
   // How many sealed boxes this bot holds in memory just now (0, 1 or 2): for the tests, which
   // check that each is dropped once handed over, replaced, or given up on.
-  const sealedHeld = () => (cardAsk && cardAsk.sealed ? 1 : 0) + [hold, ...former.values()].filter(h => h && h.paySealed).length;
+  const sealedHeld = () => (cardAsk && cardAsk.sealed ? 1 : 0) + (autoAsk && autoAsk.sealed ? 1 : 0) + [hold, ...former.values()].filter(h => h && h.paySealed).length;
+
+  // ---------- automatic payments (2.10) ----------
+  // The card's security code, sealed by the app for your PC's card key and bound there to the card
+  // your PC keeps (docs/app-api.md), is kept on your PC beside the card, protected by Windows, so
+  // that the nightly run can pay for Glasgow Club's courts by itself. It passes through here as the
+  // card does: handed over once, unopened, and never written to the log or to disk. Off: your PC
+  // deletes it (so does a new card, or the card forgotten).
+  let autoAsk = null;                                 // waiting for the PC: { id, kind: 'on' | 'off', sealed, at, takenAt }
+  let pcAuto = false;                                 // whether the PC keeps a code for automatic payments, as its last ping said
+  let autoWhy = null;                                 // why the last "on" (or "off") did not go through, in words, for the app
+  function autoFromApp(sealed) {
+    const t = now();
+    if (!linked) return { no: 'Your PC is not linked to me, and it is your PC that keeps the code.' };
+    if (payingNow()) return { no: 'Your PC is paying for a court just now. Try again once that is over.' };
+    if (!cardKey) return { no: 'Your PC has not given me its card key yet. It does with every ping while it is awake: wake it, or wait a minute, then try again.' };
+    if (cardAsk && cardAsk.kind === 'card') return { no: 'Your new card has not reached your PC yet. Try again in a moment.' };
+    if ((pcCardSaid && !pcCard) || (cardAsk && cardAsk.kind === 'forget')) return { no: 'There is no card on your PC. Add one in the app first.' };
+    if (pcState(t) !== 'awake') return { no: 'Your PC is not awake, and it is your PC that keeps the code. Wake it and try again.' };
+    if (autoAsk && !autoAsk.takenAt) log('A newer request for automatic payments takes the place of one still waiting for your PC.');
+    autoAsk = { id: crypto.randomBytes(6).toString('hex'), kind: 'on', sealed, at: t, takenAt: null };
+    autoWhy = null;
+    log('Automatic payments asked for from the app: the sealed code is waiting for your PC.');
+    for (const w of [...waiters].reverse()) w.wake();                    // the newest ping first, as for a look
+    return { ok: true };
+  }
+  function autoOffFromApp() {
+    const t = now();
+    if (!linked) return { no: 'Your PC is not linked to me, and it is your PC that keeps the code.' };
+    if (autoAsk && autoAsk.kind === 'on' && !autoAsk.takenAt) {
+      autoAsk = null;                                 // not collected yet: dropped, unseen by the PC
+      log('A request for automatic payments that had not reached your PC was dropped: off was asked for.');
+      if (!pcAuto) return { ok: true };
+    } else if (!pcAuto && !(autoAsk && autoAsk.kind === 'on')) return { ok: true };        // off already: nothing to do
+    autoAsk = { id: crypto.randomBytes(6).toString('hex'), kind: 'off', sealed: null, at: t, takenAt: null };
+    autoWhy = null;
+    log('Asked your PC to turn automatic payments off.');
+    for (const w of [...waiters].reverse()) w.wake();
+    return { ok: true };
+  }
+  // For the PC's ping to collect: { autoOn: { id, sealed } } or { autoOff: { id } }, once; or null.
+  function takeAuto(t) {
+    if (!autoAsk || autoAsk.takenAt) return null;
+    if (autoAsk.kind === 'on' && t - autoAsk.at > CARD_ASK_MS) { checkAuto(t); return null; }
+    autoAsk.takenAt = t;
+    if (autoAsk.kind === 'off') { log('Your PC collected the order to turn automatic payments off.'); return { autoOff: { id: autoAsk.id } }; }
+    const sealed = autoAsk.sealed;
+    autoAsk.sealed = null;                                               // handed over: not kept here a moment longer
+    log('Your PC collected the code for automatic payments.');
+    return { autoOn: { id: autoAsk.id, sealed } };
+  }
+  // What a ping says of automatic payments: whether the PC keeps a code (`auto`), and how the last
+  // on or off went (`autoDone`, for the id it was handed).
+  function autoFromPc(c) {
+    if (!c || typeof c !== 'object') return;
+    if (typeof c.auto === 'boolean') pcAuto = c.auto;
+    const done = c.autoDone;
+    if (!done || typeof done !== 'object' || typeof done.ok !== 'boolean' || !autoAsk || !autoAsk.takenAt || done.id !== autoAsk.id) return;
+    const on = autoAsk.kind === 'on';
+    if (done.ok) {
+      autoWhy = null;
+      log(on ? 'Your PC keeps the code: automatic payments are on.' : 'Your PC deleted the code: automatic payments are off.');
+    } else {
+      const why = noteText(A.plain(done.why)).slice(0, 200) || 'no reason was given';
+      autoWhy = on ? `Your PC did not turn automatic payments on: ${why}.` : `Your PC could not turn automatic payments off: ${why}.`;
+      log(autoWhy);
+    }
+    autoAsk = null;
+  }
+  function checkAuto(t) {
+    if (!autoAsk) return;
+    if (!autoAsk.takenAt && autoAsk.kind === 'on' && t - autoAsk.at > CARD_ASK_MS) {
+      autoAsk = null;
+      autoWhy = 'Your PC did not collect the code within two minutes, so I dropped it. Turn automatic payments on again while your PC is awake.';
+      log('A request for automatic payments was not collected by your PC within two minutes, and was dropped.');
+    } else if (autoAsk.takenAt && t - autoAsk.takenAt > CARD_ANSWER_MS) {
+      autoWhy = autoAsk.kind === 'on' ? 'Your PC took the code but did not say whether it turned automatic payments on (a booker older than 2.10 cannot). They are shown here as your PC says they are.'
+        : 'Your PC took the order to turn automatic payments off but did not say how that went. They are shown here as your PC says they are.';
+      log('Your PC did not say how the request for automatic payments went.');
+      autoAsk = null;
+    }
+  }
 
   // A trial of a wider banner: a text message with the banner as a large link preview (the page
   // at /card/<kind> on this server names the picture). Telegram fetches it from RAILWAY_PUBLIC_DOMAIN.
@@ -1248,40 +1372,116 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // ---------- what you ask for ----------
   // The changes behind the commands, the buttons and the app, so that all three do the same
   // thing with the same checks. What is said about each is the caller's business.
-  // A one-off Kelvingrove date: { no } with the sentence that refuses it (`full`: because the
-  // list holds as many as it may; `allowance`: because of the weekly allowance, lib/allowance.js),
-  // { already: true } when that date and time are on the list, or { added: true }.
-  function addOnce(dateIso, start, hours, t) {
+  // A one-off date: { no } with the sentence that refuses it (`full`: because the list holds as
+  // many as it may; `allowance`: because of the weekly allowance, lib/allowance.js), { already:
+  // true } when that venue, date and time are on the list, or { added: true }. Kelvingrove's go on
+  // its own list, as they always have (`once`); every other venue's on theirs (`onceAway`, 2.10).
+  function addOnce(dateIso, start, hours, t, venue = V.SCHEDULED, type = 'outdoor') {
     const date = civilOf(dateIso), today = todayCivil(t);
     if (date < today || londonInstant(date, start) <= t) return { no: `${label(date)} at ${hhmm(start)} has already passed.` };
     if (date > addDays(today, MAX_AHEAD_DAYS)) return { no: `That is more than ${MAX_AHEAD_DAYS} days away. Try a nearer date.` };
-    if (state.once.some(o => o.date === dateIso && o.start === start)) return { already: true };
-    if (state.once.length >= MAX_ONCE) return { no: `Your list already has ${MAX_ONCE} one-off dates, which is as many as I keep. Remove one first.`, full: true };
-    const once = cleanOnce([...state.once, { date: dateIso, start, hours }]);
-    const over = W.overIfPlanned(cfg(), { ...cfg(), once }, state.results, t);
+    const home = venue === V.SCHEDULED;
+    if ((home ? state.once : state.onceAway.filter(o => o.venue === venue)).some(o => o.date === dateIso && o.start === start)) return { already: true };
+    if (state.once.length + state.onceAway.length >= MAX_ONCE) return { no: `Your list already has ${MAX_ONCE} one-off dates, which is as many as I keep. Remove one first.`, full: true };
+    const once = home ? cleanOnce([...state.once, { date: dateIso, start, hours }]) : state.once;
+    const away = home ? state.onceAway : cleanOnceAway([...state.onceAway, { date: dateIso, start, hours, venue, type }]);
+    const over = W.overIfPlanned(cfg(), { ...cfg(), once, away }, state.results, t);
     if (over) return { no: over, allowance: true };
-    state.once = once; save();
+    state.once = once; state.onceAway = away; save();
     return { added: true };
   }
   // Takes a one-off off the list. Returns it, or null if it was not there.
-  function removeOnce(dateIso, start) {
+  function removeOnce(dateIso, start, venue = V.SCHEDULED) {
+    if (venue !== V.SCHEDULED) {
+      const away = state.onceAway.find(o => o.venue === venue && o.date === dateIso && o.start === start);
+      state.onceAway = state.onceAway.filter(o => o !== away); save();
+      return away || null;
+    }
     const gone = state.once.find(o => o.date === dateIso && o.start === start);
     state.once = state.once.filter(o => o !== gone); save();
     return gone || null;
   }
-  // A weekly time, set or changed. Returns the sentence that refuses it (the weekly allowance), or null.
+  // Kelvingrove's weekly time on a day, set or changed (/set, the weekly buttons, /app/plan): it
+  // takes the place of whatever Kelvingrove entries that day had. Returns the sentence that
+  // refuses it (the weekly allowance), or null.
   function setWeekly(day, start, hours) {
-    const over = W.overIfPlanned(cfg(), { ...cfg(), plan: { ...state.plan, [day]: { start, hours } } }, state.results, now());
+    const same = state.weekly.find(w => w.venue === V.SCHEDULED && w.day === day && w.start === start);
+    const others = state.weekly.filter(w => !(w.venue === V.SCHEDULED && w.day === day));
+    const entry = { id: same ? same.id : newWeeklyId(state.weekly), venue: V.SCHEDULED, type: 'outdoor', day, start, hours, on: true };
+    const list = cleanWeekly([...others, entry]);
+    if (!list.some(w => w.id === entry.id)) return `Your list already has ${MAX_WEEKLY} weekly bookings, which is as many as I keep. Remove one first.`;
+    const over = W.overIfPlanned(cfg(), { ...cfg(), weekly: list, plan: planOf(list) }, state.results, now());
     if (over) return over;
-    state.plan[day] = { start, hours }; save();
+    setWeeklyList(list); save();
     return null;
   }
-  // Stops a weekday ('all': every one). Says whether there was anything to stop.
+  // Stops Kelvingrove's weekly bookings on a weekday ('all': on every one). Says whether there was
+  // anything to stop. The other venues' entries stay (they are the app's to change).
   function stopWeekly(day) {
-    const had = day === 'all' ? Object.keys(state.plan).length > 0 : !!state.plan[day];
-    if (day === 'all') state.plan = {}; else delete state.plan[day];
+    const gone = state.weekly.filter(w => w.venue === V.SCHEDULED && (day === 'all' || w.day === day));
+    setWeeklyList(state.weekly.filter(w => !gone.includes(w)));
     save();
-    return had;
+    return gone.length > 0;
+  }
+  // ---------- weekly bookings at any venue (the app, 2.10) ----------
+  // Each takes the entry as lib/appapi.js read it, and answers { ok: true, entry } or { no, status }.
+  const WEEKLY_GONE = 'That weekly booking is no longer on your list.';
+  const dayName = day => DAY_LONG[DAY_KEYS.indexOf(day)];
+  // An entry as it will be, checked against the others: one venue, day and start once; the
+  // list's size; and the weekly allowance at the parks.
+  function weeklyCheck(entry, without = null) {
+    const others = state.weekly.filter(w => w !== without);
+    if (others.some(w => w.venue === entry.venue && w.day === entry.day && w.start === entry.start)) {
+      return { status: 409, no: `There is already a weekly booking at ${V.placeName(entry.venue, entry.type)} on ${dayName(entry.day)}s at ${hhmm(entry.start)}.` };
+    }
+    if (!without && others.length >= MAX_WEEKLY) return { status: 409, no: `Your list already has ${MAX_WEEKLY} weekly bookings, which is as many as I keep. Remove one first.` };
+    const list = cleanWeekly([...others, entry]);
+    if (entry.on !== false) {
+      const over = W.overIfPlanned(cfg(), { ...cfg(), weekly: list, plan: planOf(list) }, state.results, now());
+      if (over) return { status: 409, no: over };
+    }
+    return { list };
+  }
+  function addWeekly(v) {
+    const entry = { id: newWeeklyId(state.weekly), venue: v.venue, type: v.type, day: v.day, start: v.start, hours: v.hours, on: v.on !== false };
+    const r = weeklyCheck(entry);
+    if (r.no) return r;
+    setWeeklyList(r.list); save();
+    log(`Weekly booking added from the app: ${V.placeName(entry.venue, entry.type)} ${dayName(entry.day)}s ${hhmm(entry.start)}.`);
+    return { ok: true, entry };
+  }
+  function changeWeekly(id, fields) {
+    const was = state.weekly.find(w => w.id === id);
+    if (!was) return { status: 409, no: WEEKLY_GONE };
+    // The entry as it will be, read whole as a new one would be (a venue changed without a type
+    // takes that venue's own type, or must say which).
+    const merged = { venue: was.venue, day: was.day, start: was.start, hours: was.hours, ...fields };
+    if (fields.venue !== undefined && fields.type === undefined) delete merged.type; else merged.type = fields.type !== undefined ? fields.type : was.type;
+    const v = A.readWeekly({ ...merged, on: was.on });
+    if (v.why) return { status: 400, no: v.why };
+    const entry = { id, venue: v.venue, type: v.type, day: v.day, start: v.start, hours: v.hours, on: was.on };
+    const r = weeklyCheck(entry, was);
+    if (r.no) return r;
+    setWeeklyList(r.list); save();
+    log(`Weekly booking changed from the app: ${V.placeName(entry.venue, entry.type)} ${dayName(entry.day)}s ${hhmm(entry.start)}.`);
+    return { ok: true, entry };
+  }
+  function switchWeekly(id, on) {
+    const was = state.weekly.find(w => w.id === id);
+    if (!was) return { status: 409, no: WEEKLY_GONE };
+    if (was.on === on) return { ok: true, entry: was };
+    const r = weeklyCheck({ ...was, on }, was);
+    if (r.no) return r;
+    setWeeklyList(r.list); save();
+    log(`Weekly booking switched ${on ? 'on' : 'off'} from the app: ${V.placeName(was.venue, was.type)} ${dayName(was.day)}s ${hhmm(was.start)}.`);
+    return { ok: true };
+  }
+  function removeWeekly(id) {
+    const was = state.weekly.find(w => w.id === id);
+    if (!was) return { status: 409, no: WEEKLY_GONE };
+    setWeeklyList(state.weekly.filter(w => w !== was)); save();
+    log(`Weekly booking removed from the app: ${V.placeName(was.venue, was.type)} ${dayName(was.day)}s ${hhmm(was.start)}.`);
+    return { ok: true };
   }
   function setOrder(order) { state.order = order; save(); }
   function setPaused(paused) { state.paused = paused; save(); }
@@ -1451,7 +1651,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   let runNote = null;
   // What has been said is remembered for a few days, so nothing is said twice; then forgotten.
   const forgetOld = t => { for (const k of Object.keys(state.sent)) if (t - state.sent[k] > SENT_KEEP_MS) delete state.sent[k]; };
-  function jobsForAgent(from = {}, { run } = {}) {
+  // `venues`: the PC's booker books every venue (2.10: it asks with ?venues=1). One that does not
+  // is handed Kelvingrove's jobs alone, as it always was: it would book any other at Kelvingrove.
+  // Each of those others then has a result that says why, once.
+  function jobsForAgent(from = {}, { run, venues = false } = {}) {
     const t = now();
     const starting = run !== false;
     state.lastSeen = t;
@@ -1459,9 +1662,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (starting) runNote = { stage: 'started', at: t, why: null };
     noteHome(from);
     const c = cfg();
+    const all = state.paused || owner() === null ? [] : jobsFor(t, c, state.results);
+    if (starting && !venues) for (const j of all.filter(x => x.venue)) skipJob(j, `Your PC's booker does not book ${V.placeName(j.venue, j.type)} yet: update it on your PC`);
     // The weekly allowance (lib/allowance.js): a job that would pass it is not handed to the PC,
-    // and a run that starts has a result for it that says why.
-    const fit = W.fitJobs(state.paused || owner() === null ? [] : jobsFor(t, c, state.results), state.results);
+    // and a run that starts has a result for it that says why. Glasgow Club's do not count.
+    const fit = W.fitJobs(venues ? all : all.filter(j => !j.venue), state.results);
     const jobs = fit.keep;
     if (starting) for (const s of fit.skip) skipJob(s.job, s.why);
     const coming = jobs.filter(j => j.releaseAt > t && j.releaseAt - t <= HEADS_UP_MS);
@@ -1484,9 +1689,16 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     save();
     return {
-      jobs: jobs.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end, hours: j.hours, releaseAt: j.releaseAt })),
+      jobs: jobs.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end, hours: j.hours, releaseAt: j.releaseAt, ...placeOfJob(j) })),
       order: c.order, releaseMin, daysAhead,
     };
+  }
+  // Where a job is, for the PC: nothing for Kelvingrove's (as always); another park's venue, type
+  // and ClubSpark address; Glasgow Club's venue, type and sheet (g, s or o).
+  function placeOfJob(j) {
+    if (!j.venue) return {};
+    const park = V.parkOf(j.venue);
+    return park ? { venue: j.venue, type: j.type, address: park.address } : { venue: j.venue, type: j.type, centre: G.centreFor(j.venue, j.type) };
   }
 
   // A job the weekly allowance keeps from the nightly run: said once, in its result.
@@ -1509,6 +1721,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     noteHome(from);
     save();
     cardFromPc(card);
+    autoFromPc(card);
     if (refused) {                                    // asked to sleep, it would not: say why
       sleptAt = null;
       log(`Your PC stayed awake: ${refused}`);
@@ -1534,9 +1747,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   async function progressFromAgent(raw) {
     const stage = raw && raw.stage;
     const chat = owner();
-    if (stage !== 'ready' && stage !== 'trouble') return { ok: false, why: 'that is not a stage I know (ready or trouble)' };
+    if (stage === 'bank') return bankNote(raw);
+    if (stage !== 'ready' && stage !== 'trouble') return { ok: false, why: 'that is not a stage I know (ready, trouble or bank)' };
     state.lastSeen = state.lastRun = now();           // the run is going: the wait for its result starts again
     save();
+    if (stage === 'ready' && raw.club === true) { log('Your PC has signed in to Glasgow Club and is waiting for midnight.'); return { ok: true }; }
     let trouble = null;
     if (stage === 'trouble') {
       const why = String(raw.why || 'no reason given').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '').slice(0, 300);
@@ -1570,6 +1785,29 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return { ok: true };
   }
 
+  // Your PC is paying for one of the nightly run's Glasgow Club bookings, and your bank wants you
+  // to approve the payment in its app: said at once, in Telegram and as a note (so a notification
+  // on your phone). `raw`: { stage: 'bank', id, price, court, type }. Said once for each booking.
+  const bankSaid = new Set();
+  async function bankNote(raw) {
+    const r = cleanResult({ id: raw && raw.id, status: 'failed', type: raw && raw.type });
+    if (!r || !V.clubOf(r.venue)) return { ok: false, why: 'that is not one of the run\'s Glasgow Club bookings' };
+    state.lastSeen = state.lastRun = now();
+    save();
+    if (bankSaid.has(r.id)) return { ok: true };
+    bankSaid.add(r.id);
+    if (bankSaid.size > 20) bankSaid.delete(bankSaid.values().next().value);
+    const price = typeof raw.price === 'string' && /^£\d{1,4}(\.\d\d)?$/.test(raw.price) ? raw.price : null;
+    const court = intIn(raw.court, 1, 20);
+    const title = 'Approve the payment in your bank\'s app';
+    const body = `Your PC is paying ${price ? `${price} ` : ''}for ${M.slotOf({ ...r, end: r.start + 60 })}${court ? `, court ${court}` : ''}. Your bank wants you to approve it in its app; your PC waits five minutes for that.`;
+    log(`Your bank wants the payment for ${r.id} approved: told you so.`);
+    note('warn', title, body);
+    const chat = owner();
+    if (chat !== null) await say(chat, `<b>${M.esc(title)}</b>\n${M.esc(body)}`).catch(e => log(`Could not say so in Telegram: ${e.message}`));
+    return { ok: true };
+  }
+
   // The PC says what happened. The message goes out first: if Telegram fails, the PC is told
   // so and tries again, and nothing is recorded twice.
   async function resultFromAgent(raw) {
@@ -1588,7 +1826,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     save();
     log(`Result from the PC: ${r.id} ${r.status}${r.court ? ` (Court ${r.court})` : ''}`);
     if (!same && chat !== null) {                     // what the card said, as a note for the app
-      if (r.status === 'booked') note('booked', `Court ${r.court} booked`, `${M.slotOf(r)} · ${r.gate ? `gate ${r.gate}` : 'gate code not shown'}`);
+      const after = V.clubOf(r.venue) ? (r.paid === true ? `paid ${r.price || ''}`.trim() : r.paid === 'maybe' ? 'Pay was pressed' : 'not paid')
+        : r.gate ? `gate ${r.gate}` : 'gate code not shown';
+      if (r.status === 'booked') note('booked', `Court ${r.court} booked`, `${M.slotOf(r)} · ${after}`);
       else note('missed', 'Not booked', `${M.slotOf(r)}. ${A.plain(M.failedWhy(r))}`);
     }
     return { ok: true };
@@ -1676,7 +1916,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       }
 
       case 'off': {
-        if ((args[0] || '').toLowerCase() === 'all') { stopWeekly('all'); await say(chat, `Every weekly booking removed. One-off dates stay; see /plan.\n\n${next()}`); break; }
+        if ((args[0] || '').toLowerCase() === 'all') {
+          stopWeekly('all');
+          const elsewhere = state.weekly.length > 0;
+          await say(chat, `${elsewhere ? 'Every weekly booking at Kelvingrove removed. Those at other venues stay, and so do one-off dates' : 'Every weekly booking removed. One-off dates stay'}; see /plan.\n\n${next()}`);
+          break;
+        }
         const day = parseDay(args[0]);
         if (!day) { await say(chat, 'Use it like this:  /off thu   (or /off all)'); break; }
         const had = stopWeekly(day);
@@ -1859,10 +2104,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     // The eight minutes run from the release, or from the last sign of life after it: the run
     // starting (or starting over), or the result for another of tonight's bookings.
     const results = rel.requests.map(r => (state.results[r.id] && state.results[r.id].at) || 0);
-    if (t < Math.max(rel.releaseAt, state.lastRun, ...results) + NO_WORD_MS) return;
+    if (t < Math.max(rel.releaseAt, state.lastRun, ...results) + (rel.club ? NO_WORD_CLUB_MS : NO_WORD_MS)) return;
     const silent = rel.requests.filter(r => !reported(rel, r));
     if (!silent.length) return;
-    await warnOnce(`noword:${rel.releaseAt}`, t, () => M.noWordText(silent), text => sendCard(chat, 'missed', text, UI.afterFailed()),
+    await warnOnce(`noword:${rel.releaseAt}`, t, () => M.noWordText(silent, !!rel.club), text => sendCard(chat, 'missed', text, UI.afterFailed()),
       `Said there is no word from the PC about ${silent.map(r => r.id).join(', ')}`);
   }
 
@@ -1873,10 +2118,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const t = now(), today = todayCivil(t);
       const pastOnce = state.once.filter(o => civilOf(o.date) < today);
       if (pastOnce.length) { state.once = state.once.filter(o => civilOf(o.date) >= today); save(); }
+      const pastAway = state.onceAway.filter(o => civilOf(o.date) < today);
+      if (pastAway.length) { state.onceAway = state.onceAway.filter(o => civilOf(o.date) >= today); save(); }
       cs.tick(t);                                     // a booking at a park the PC never collected, or went silent on
       await refreshNewest(t);
       await checkHold(t);
       checkCard(t);
+      checkAuto(t);
       await flushNotes(t);
       const chat = owner();
       if (chat === null || state.paused || !linked) return;
@@ -1988,24 +2236,39 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     };
   }
 
+  // A weekly entry's next booking: the date it is next booked for, and when that day opens.
+  // Today's is next until it has started; a day whose release has gone by is the run's already.
+  function nextOf(w, t) {
+    const today = todayCivil(t);
+    for (let i = 0; i < 15; i++) {
+      const date = addDays(today, i);
+      if (dayKey(date) !== w.day) continue;
+      const opens = opensAtFor(w.venue, date, cfg());
+      if (londonInstant(date, w.start) <= t || t >= opens + (V.clubOf(w.venue) ? 30 : 10) * 60000) continue;
+      return { date: iso(date), opensAt: opens };
+    }
+    return null;
+  }
+
   // Everything the app shows, as it stands now. `meId` is the phone that asks.
   function buildState(meId) {
     const t = now(), c = cfg(), x = ctx(), today = todayCivil(t);
     const booking = !state.paused && owner() !== null;                   // while paused nothing is booked, so nothing is coming
     const releases = booking ? upcoming(t, c, 4) : [];
-    const releaseOf = r => ({ at: r.releaseAt, night: iso(r.night), jobs: r.requests.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end, from: j.kind })) });
-    const onceIds = new Set(state.once.map(o => jobId(o.date, o.start)));
+    const releaseOf = r => ({ at: r.releaseAt, night: iso(r.night), jobs: r.requests.map(j => ({ id: j.id, venue: j.venue || V.SCHEDULED, type: j.type || 'outdoor', date: j.date, start: j.start, end: j.end, from: j.kind })) });
+    const onceIds = new Set([...state.once.map(o => jobId(o.date, o.start)), ...state.onceAway.map(o => V.resultId(o.venue, o.date, o.start))]);
     const open = booking ? jobsFor(t, c, state.results).filter(j => j.releaseAt <= t && onceIds.has(j.id)) : [];
     const byDay = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.start - b.start);
     const results = Object.values(state.results).map(r => ({
       id: r.id, venue: r.venue || V.SCHEDULED, status: r.status, date: r.date, start: r.start, end: r.end, court: r.court ?? null, gate: r.gate ?? null,
       why: r.status === 'booked' ? null : A.plain(M.failedWhy(r)), at: r.at, past: civilOf(r.date) < today,
+      type: r.type || 'outdoor', price: r.price ?? null, paid: V.clubOf(r.venue) ? (r.paid ?? false) : null,
     })).sort((a, b) => (a.past !== b.past ? (a.past ? 1 : -1) : a.past ? byDay(b, a) : byDay(a, b)));
     const noWake = wakeBlocker(t), noSleep = sleepNo(t), noHold = holdBlocker(t), line = UI.pcLine(x);
     return {
       now: t, bot: VERSION,
       venue: { name: 'Kelvingrove Park', short: 'KP', first: UI.FIRST_START, last: UI.LAST_END, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin, daysAhead, maxAheadDays: MAX_AHEAD_DAYS },
-      venues: V.venueList(G.SHEETS, iso(today), G.sheetUrl),          // every venue and its court types (lib/venues.js)
+      venues: V.venueList(G.SHEETS, iso(today), G.sheetUrl, { daysAhead, releaseMin }),          // every venue and its court types (lib/venues.js)
       clubspark: cs.view(t),                                           // the parks: looks and Book now (lib/clubspark.js)
       allowance: W.weeks(c, state.results, t),                         // this week and next (lib/allowance.js)
       paused: state.paused,
@@ -2019,10 +2282,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       later: releases.slice(1).map(releaseOf),
       open: open.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end })),
       plan: [1, 2, 3, 4, 5, 6, 0].map(i => DAY_KEYS[i]).filter(k => state.plan[k]).map(k => ({ day: k, start: state.plan[k].start, hours: state.plan[k].hours })),
-      once: state.once.filter(o => londonInstant(civilOf(o.date), o.start) > t).map(o => {
-        const opens = opensAt(civilOf(o.date), c);
-        return { id: jobId(o.date, o.start), date: o.date, start: o.start, hours: o.hours, end: slotEnd(o.start, o.hours), opensAt: opens, open: opens <= t };
-      }),
+      weekly: state.weekly.map(w => ({ id: w.id, venue: w.venue, type: w.type, day: w.day, start: w.start, hours: w.hours, end: slotEnd(w.start, w.hours), on: w.on, next: w.on ? nextOf(w, t) : null })),
+      once: [...state.once.map(o => ({ ...o, venue: V.SCHEDULED, type: 'outdoor' })), ...state.onceAway]
+        .filter(o => londonInstant(civilOf(o.date), o.start) > t)
+        .sort((a, b) => (a.date === b.date ? a.start - b.start || V.VENUE_KEYS.indexOf(a.venue) - V.VENUE_KEYS.indexOf(b.venue) : a.date < b.date ? -1 : 1))
+        .map(o => {
+          const opens = opensAtFor(o.venue, civilOf(o.date), c);
+          return { id: V.resultId(o.venue, o.date, o.start), venue: o.venue, type: o.type, date: o.date, start: o.start, hours: o.hours, end: slotEnd(o.start, o.hours), opensAt: opens, open: opens <= t };
+        }),
       order: state.order.slice(),
       results,
       run: runNow(t),
@@ -2089,7 +2356,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (/^clubspark\/(look|book)$/.test(name)) { log(`From the app: ${name}`); return cs.appAsk(name.slice('clubspark/'.length), body, done); }
     if (!APP_ASKS.includes(name)) return null;
     const read = { once: A.readOnce, 'once/remove': A.readOnceRemove, plan: A.readPlan, 'plan/remove': A.readPlanRemove, order: A.readOrder, pause: A.readPause,
-      'indoor/look': A.readLook, hold: A.readHold, 'hold/order': A.readHoldOrder, card: A.readCard, 'card/forget': A.readForget, push: A.readPush }[name];
+      weekly: A.readWeekly, 'weekly/change': A.readWeeklyChange, 'weekly/on': A.readWeeklyOn, 'weekly/remove': A.readWeeklyRemove,
+      'indoor/look': A.readLook, hold: A.readHold, 'hold/order': A.readHoldOrder, card: A.readCard, 'card/forget': A.readForget,
+      'card/auto': A.readAuto, 'card/auto/off': A.readAutoOff, push: A.readPush }[name];
     const v = read ? read(body) : {};
     if (v.why) return no(400, v.why);
     log(`From the app: ${name}`);
@@ -2099,14 +2368,30 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         log(`A phone unlinked itself from the app: ${me.name}.`);
         return { status: 200, body: { ok: true } };
       case 'once': {
-        const r = addOnce(v.date, v.start, v.hours, t);
+        const r = addOnce(v.date, v.start, v.hours, t, v.venue, v.type);
         if (r.no) return no(r.full || r.allowance ? 409 : 400, r.no);
-        if (r.added) log(`Added ${v.date} ${hhmm(v.start)} from the app`);
+        if (r.added) log(`Added ${v.venue ? `${V.placeName(v.venue, v.type)} ` : ''}${v.date} ${hhmm(v.start)} from the app`);
         return done(r.already ? { already: true } : {});
       }
       case 'once/remove':
-        removeOnce(v.date, v.start);
+        removeOnce(v.date, v.start, v.venue);
         return done();
+      case 'weekly': {
+        const r = addWeekly(v);
+        return r.ok ? done() : no(r.status, r.no);
+      }
+      case 'weekly/change': {
+        const r = changeWeekly(v.id, v.fields);
+        return r.ok ? done() : no(r.status, r.no);
+      }
+      case 'weekly/on': {
+        const r = switchWeekly(v.id, v.on);
+        return r.ok ? done() : no(r.status, r.no);
+      }
+      case 'weekly/remove': {
+        const r = removeWeekly(v.id);
+        return r.ok ? done() : no(r.status, r.no);
+      }
       case 'plan': {
         const over = setWeekly(v.day, v.start, v.hours);
         return over ? no(409, over) : done();
@@ -2150,6 +2435,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       }
       case 'card/forget': {
         const r = forgetFromApp();
+        return r.ok ? done() : no(409, r.no);
+      }
+      case 'card/auto': {
+        const r = autoFromApp(v.sealed);
+        return r.ok ? done() : no(409, r.no);
+      }
+      case 'card/auto/off': {
+        const r = autoOffFromApp();
         return r.ok ? done() : no(409, r.no);
       }
       case 'push':

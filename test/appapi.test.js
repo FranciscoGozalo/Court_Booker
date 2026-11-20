@@ -69,7 +69,7 @@ async function seeFree(t, phone, centre = 'g', date = FRI) {
   assert.equal(r.status, 200, JSON.stringify(r.body));
   return r.body.look;
 }
-const STATE_KEYS = ['now', 'bot', 'venue', 'venues', 'clubspark', 'allowance', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'once', 'order', 'results', 'run', 'indoor', 'card', 'hold', 'notes', 'devices'];
+const STATE_KEYS = ['now', 'bot', 'venue', 'venues', 'clubspark', 'allowance', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'weekly', 'once', 'order', 'results', 'run', 'indoor', 'card', 'hold', 'notes', 'devices'];
 const HOLD_KEYS = ['id', 'startedBy', 'centre', 'centreName', 'date', 'start', 'end', 'court', 'courtName', 'stage', 'live', 'ended', 'price', 'until', 'heardAt', 'title', 'lines', 'can', 'links'];
 // The state as a phone is shown it. Whenever it is looked at here, it is also checked to be
 // whole: the contract's fields and no others, and nothing that JSON would drop on the way.
@@ -86,11 +86,12 @@ const refused = (status, why) => ({ status, body: { ok: false, why } });
 const PARK_ADDRESSES = [['drumchapel', 'Drumchapel Park', 'DrumchapelParkTennisCourts'], ['garrowhill', 'Garrowhill Park', 'GarrowhillPark'], ['kelvingrove', 'Kelvingrove Park', 'KelvingroveParkTennisCourts'],
   ['knightswood', 'Knightswood Park', 'KnightswoodParkTennisCourts'], ['maryhill', 'Maryhill Park', 'MaryhillParkTennisCourts'], ['queenspark', 'Queens Park', 'QueensParkTennisCourtsGlasgow'], ['victoriapark', 'Victoria Park', 'VictoriaParkTennis']];
 const venuesOn = date => [
-  ...PARK_ADDRESSES.map(([key, name, address]) => ({ key, name, club: 'clubspark', types: ['outdoor'], centre: null, schedule: key === 'kelvingrove', notYet: [], note: null,
-    site: `https://clubspark.lta.org.uk/${address}/Booking/BookByDate#?date=${date}`, centres: {}, sites: { outdoor: `https://clubspark.lta.org.uk/${address}/Booking/BookByDate#?date=${date}` } })),
-  { key: 'gorbals', name: 'Gorbals', club: 'glasgow', types: ['indoor'], centre: 'g', schedule: false, notYet: [], note: null, site: `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${date}T00:00:00.000Z`,
-    centres: { indoor: 'g' }, sites: { indoor: `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${date}T00:00:00.000Z` } },
-  { key: 'scotstoun', name: 'Scotstoun', club: 'glasgow', types: ['indoor', 'outdoor'], centre: 's', schedule: false, notYet: [], note: null,
+  ...PARK_ADDRESSES.map(([key, name, address]) => ({ key, name, club: 'clubspark', types: ['outdoor'], centre: null, schedule: true, notYet: [], note: null,
+    site: `https://clubspark.lta.org.uk/${address}/Booking/BookByDate#?date=${date}`, centres: {}, sites: { outdoor: `https://clubspark.lta.org.uk/${address}/Booking/BookByDate#?date=${date}` },
+    release: { daysAhead: 7, at: 1320 }, paid: false, allowance: true })),
+  { key: 'gorbals', name: 'Gorbals', club: 'glasgow', types: ['indoor'], centre: 'g', schedule: true, notYet: [], note: null, site: `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${date}T00:00:00.000Z`,
+    centres: { indoor: 'g' }, sites: { indoor: `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${date}T00:00:00.000Z` }, release: { daysAhead: 7, at: 0 }, paid: true, allowance: false },
+  { key: 'scotstoun', name: 'Scotstoun', club: 'glasgow', types: ['indoor', 'outdoor'], centre: 's', schedule: true, notYet: [], note: null, release: { daysAhead: 7, at: 0 }, paid: true, allowance: false,
     site: `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${date}T00:00:00.000Z`, centres: { indoor: 's', outdoor: 'o' },
     sites: { indoor: `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${date}T00:00:00.000Z`, outdoor: `https://glasgowclub.gladstonego.cloud/book/calendar/SA008?activityDate=${date}T00:00:00.000Z` } },
 ];
@@ -273,7 +274,8 @@ test('settings saved before the app existed load as they were, and the state ver
     sent: { 'ready:1': 3 }, pics: { booked: { hash: 'h', id: 'i' } }, lastSeen: 7, lastRun: 6, home: { ip: '81.2.69.142', at: 2 },
   };
   const s = loadState(JSON.parse(JSON.stringify(old)));
-  assert.deepEqual(s, { ...old, apps: [], notes: [] });
+  // 2.10: Kelvingrove's plan, one a day, is now weekly entries at any venue; the plan stays beside them.
+  assert.deepEqual(s, { ...old, apps: [], notes: [], onceAway: [], weekly: [{ id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 2, on: true }] });
   assert.equal(s.v, 4);
   assert.equal(loadState(null).v, 4);
   assert.deepEqual([loadState(null).apps, loadState(null).notes], [[], []]);
@@ -282,7 +284,7 @@ test('settings saved before the app existed load as they were, and the state ver
   const linked = loadState({ ...old, apps: [{ id: 'a1b2c3d4', name: 'iPhone', hash, at: 1, seenAt: 2, push: PUSH_TOKEN, owner: OWNER }], notes: [{ id: 'aa11bb22cc', at: 9, kind: 'booked', title: 'Court 3 booked', body: 'x' }] });
   assert.deepEqual(linked.apps, [{ id: 'a1b2c3d4', name: 'iPhone', hash, at: 1, seenAt: 2, push: PUSH_TOKEN, owner: OWNER }]);
   assert.deepEqual(linked.notes, [{ id: 'aa11bb22cc', at: 9, kind: 'booked', title: 'Court 3 booked', body: 'x' }]);
-  assert.deepEqual(Object.keys(JSON.parse(backupLine(linked))).sort(), ['once', 'order', 'owner', 'plan', 'v']);
+  assert.deepEqual(Object.keys(JSON.parse(backupLine(linked))).sort(), ['once', 'onceAway', 'order', 'owner', 'plan', 'v', 'weekly']);
   assert.equal(JSON.parse(backupLine(linked)).v, 4);
   assert.ok(!backupLine(linked).includes(hash));
   // Settings from another version keep the phones (they are checked just as hard) but not the notes.
@@ -398,7 +400,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.9.3', api: 2 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.10.0', api: 3 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -655,7 +657,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.9.3',
+    bot: '2.10.0',
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
     venues: venuesOn(TUE),
     // Nothing stands in the way of a look or Book now at a park: the PC is awake, and it is midday.
@@ -672,27 +674,32 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
       canWake: false, wakeWhy: 'Your PC is already awake.', canSleep: true, sleepWhy: null, sleepAsked: null, wokeAt: null, cardKey: null,
     },
     // Tuesdays are booked tonight at 22:00, a week ahead.
-    release: { at: at(`${TUE}T22:00:00Z`), night: TUE, jobs: [{ id: '2026-11-24@16:00', date: '2026-11-24', start: 960, end: 1080, from: 'weekly' }] },
+    release: { at: at(`${TUE}T22:00:00Z`), night: TUE, jobs: [{ id: '2026-11-24@16:00', date: '2026-11-24', start: 960, end: 1080, from: 'weekly', venue: 'kelvingrove', type: 'outdoor' }] },
     later: [
-      { at: at('2026-11-19T22:00:00Z'), night: '2026-11-19', jobs: [{ id: '2026-11-26@19:00', date: '2026-11-26', start: 1140, end: 1200, from: 'weekly' }] },
-      { at: at('2026-11-20T22:00:00Z'), night: FRI, jobs: [{ id: '2026-11-27@10:00', date: '2026-11-27', start: 600, end: 660, from: 'once' }] },
-      { at: at('2026-11-24T22:00:00Z'), night: '2026-11-24', jobs: [{ id: '2026-12-01@16:00', date: '2026-12-01', start: 960, end: 1080, from: 'weekly' }] },
+      { at: at('2026-11-19T22:00:00Z'), night: '2026-11-19', jobs: [{ id: '2026-11-26@19:00', date: '2026-11-26', start: 1140, end: 1200, from: 'weekly', venue: 'kelvingrove', type: 'outdoor' }] },
+      { at: at('2026-11-20T22:00:00Z'), night: FRI, jobs: [{ id: '2026-11-27@10:00', date: '2026-11-27', start: 600, end: 660, from: 'once', venue: 'kelvingrove', type: 'outdoor' }] },
+      { at: at('2026-11-24T22:00:00Z'), night: '2026-11-24', jobs: [{ id: '2026-12-01@16:00', date: '2026-12-01', start: 960, end: 1080, from: 'weekly', venue: 'kelvingrove', type: 'outdoor' }] },
     ],
     // Friday the 20th opened last Friday: the PC books it at its next run.
     open: [{ id: '2026-11-20@19:00', date: FRI, start: 1140, end: 1260 }],
     plan: [{ day: 'tue', start: 960, hours: 2 }, { day: 'thu', start: 1140, hours: 1 }],
+    // 2.10: the same, as weekly entries (Kelvingrove's), each with the day it is next booked for and when that opens.
+    weekly: [
+      { id: 'f7de6e62', venue: 'kelvingrove', type: 'outdoor', day: 'tue', start: 960, hours: 2, end: 1080, on: true, next: { date: '2026-11-24', opensAt: at('2026-11-17T22:00:00Z') } },
+      { id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 1, end: 1200, on: true, next: { date: '2026-11-26', opensAt: at('2026-11-19T22:00:00Z') } },
+    ],
     once: [
-      { id: '2026-11-20@19:00', date: FRI, start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-13T22:00:00Z'), open: true },
-      { id: '2026-11-27@10:00', date: '2026-11-27', start: 600, hours: 1, end: 660, opensAt: at('2026-11-20T22:00:00Z'), open: false },
+      { id: '2026-11-20@19:00', date: FRI, start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-13T22:00:00Z'), open: true, venue: 'kelvingrove', type: 'outdoor' },
+      { id: '2026-11-27@10:00', date: '2026-11-27', start: 600, hours: 1, end: 660, opensAt: at('2026-11-20T22:00:00Z'), open: false, venue: 'kelvingrove', type: 'outdoor' },
     ],
     order: [3, 4, 5, 2, 1, 6],
     // Today and later first, soonest first; then what is past, newest first.
     results: [
-      { id: '2026-11-17@09:00', venue: 'kelvingrove', status: 'failed', date: TUE, start: 540, end: 600, court: null, gate: null, why: 'It did not work: the booking sheet did not load <twice>.', at: at('2026-11-10T22:01:00Z'), past: false },
-      { id: '2026-11-18@18:00', venue: 'kelvingrove', status: 'none', date: '2026-11-18', start: 1080, end: 1200, court: null, gate: null, why: 'No court was free for the whole slot.', at: at('2026-11-11T22:05:00Z'), past: false },
-      { id: '2026-11-19@19:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-19', start: 1140, end: 1200, court: '3', gate: '2433', why: null, at: at('2026-11-12T22:00:10Z'), past: false },
-      { id: '2026-11-12@19:00', venue: 'kelvingrove', status: 'failed', date: '2026-11-12', start: 1140, end: 1200, court: null, gate: null, why: 'It did not work: no reason given.', at: at('2026-11-05T22:03:00Z'), past: true },
-      { id: '2026-11-10@16:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-10', start: 960, end: 1080, court: '4', gate: null, why: null, at: at('2026-11-03T22:00:09Z'), past: true },
+      { id: '2026-11-17@09:00', venue: 'kelvingrove', status: 'failed', date: TUE, start: 540, end: 600, court: null, gate: null, why: 'It did not work: the booking sheet did not load <twice>.', at: at('2026-11-10T22:01:00Z'), past: false, type: 'outdoor', price: null, paid: null },
+      { id: '2026-11-18@18:00', venue: 'kelvingrove', status: 'none', date: '2026-11-18', start: 1080, end: 1200, court: null, gate: null, why: 'No court was free for the whole slot.', at: at('2026-11-11T22:05:00Z'), past: false, type: 'outdoor', price: null, paid: null },
+      { id: '2026-11-19@19:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-19', start: 1140, end: 1200, court: '3', gate: '2433', why: null, at: at('2026-11-12T22:00:10Z'), past: false, type: 'outdoor', price: null, paid: null },
+      { id: '2026-11-12@19:00', venue: 'kelvingrove', status: 'failed', date: '2026-11-12', start: 1140, end: 1200, court: null, gate: null, why: 'It did not work: no reason given.', at: at('2026-11-05T22:03:00Z'), past: true, type: 'outdoor', price: null, paid: null },
+      { id: '2026-11-10@16:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-10', start: 960, end: 1080, court: '4', gate: null, why: null, at: at('2026-11-03T22:00:09Z'), past: true, type: 'outdoor', price: null, paid: null },
     ],
     run: null,
     indoor: {
@@ -761,7 +768,7 @@ test('the state follows the clock: what has opened, what has started, what is pa
   assert.deepEqual(s.open, []);
   assert.deepEqual(s.results.filter(r => !r.past).map(r => r.id), ['2026-11-27@10:00']);
   assert.deepEqual(s.results.filter(r => r.past).map(r => r.id), ['2026-11-19@19:00', '2026-11-18@18:00', '2026-11-17@09:00', '2026-11-12@19:00', '2026-11-10@16:00']);
-  assert.deepEqual(s.results[0], { id: '2026-11-27@10:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-27', start: 600, end: 660, court: '5', gate: '9911', why: null, at: t.clock.t, past: false });
+  assert.deepEqual(s.results[0], { id: '2026-11-27@10:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-27', start: 600, end: 660, court: '5', gate: '9911', why: null, at: t.clock.t, past: false, type: 'outdoor', price: null, paid: null });
 });
 
 test('a one-off that repeats a weekly day, added after its release was missed, is one of the open ones', async () => {
@@ -909,7 +916,7 @@ test('a one-off date from the app is the same as /book: added, already there, or
   let r = await ask(t, phone, 'once', { date: '2026-11-25', start: 1140, hours: 2 });
   assert.equal(r.status, 200);
   assert.deepEqual(Object.keys(r.body), ['ok', 'etag', 'state']);
-  assert.deepEqual(r.body.state.once, [{ id: '2026-11-25@19:00', date: '2026-11-25', start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-18T22:00:00Z'), open: false }]);
+  assert.deepEqual(r.body.state.once, [{ id: '2026-11-25@19:00', venue: 'kelvingrove', type: 'outdoor', date: '2026-11-25', start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-18T22:00:00Z'), open: false }]);
   assert.equal(r.body.etag, t.app.appState(phone.device).etag);
   assert.deepEqual(t.store.load().once, [{ date: '2026-11-25', start: 1140, hours: 2 }]);
   assert.deepEqual(t.app.state.once, (await inTelegram(NOON, {}, '/book 25 nov 19:00 2h')).state.once);
@@ -2237,8 +2244,9 @@ test('what 2.8 saves is what 2.7 saved, with the phones and the notes beside it:
   await t.app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 });
   await t.app.handleUpdate(say(OWNER, '/menu'));
   const saved = t.store.load();
-  // The keys 2.7 knows, in its order, then the two it has never heard of. Still version 4.
-  assert.deepEqual(Object.keys(saved), [...KNOWN_TO_27, 'apps', 'notes']);
+  // The keys 2.7 knows, in its order, then those it has never heard of (2.10's weekly entries and the
+  // other venues' one-offs among them). Still version 4.
+  assert.deepEqual(Object.keys(saved), ['v', 'owner', 'plan', 'weekly', 'once', 'onceAway', ...KNOWN_TO_27.slice(4), 'apps', 'notes']);
   assert.equal(saved.v, 4);
   assert.ok(saved.apps.length === 1 && saved.notes.length === 2);
   // Each of 2.7's fields is in the shape 2.7 wrote and reads.
@@ -2253,6 +2261,9 @@ test('what 2.8 saves is what 2.7 saved, with the phones and the notes beside it:
   const whole = loadState(saved);
   const stripped = loadState(Object.fromEntries(KNOWN_TO_27.map(k => [k, saved[k]])));
   for (const k of KNOWN_TO_27) assert.deepEqual(whole[k], stripped[k], k);
+  // 2.10: the weekly entries are Kelvingrove's plan, kept beside it, so a bot rolled back to 2.9 books the same.
+  assert.deepEqual(saved.weekly.map(w => [w.venue, w.day, w.start, w.hours, w.on]), [['kelvingrove', 'tue', 960, 2, true], ['kelvingrove', 'thu', 1140, 1, true]]);
+  assert.deepEqual(saved.onceAway, []);
   for (const k of KNOWN_TO_27) assert.deepEqual(whole[k], saved[k], k);                      // and cleaning them changes nothing
   assert.deepEqual([stripped.apps, stripped.notes], [[], []]);
   // The same evening without the app at all leaves the same in those fields.
