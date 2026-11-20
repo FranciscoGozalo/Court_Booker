@@ -287,16 +287,41 @@ const fits = scr => {
   for (const b of flat(scr)) {
     assert.ok(b.text.length > 0);
     assert.equal(!!b.url, !b.callback_data);                                               // a link or a button, never both
-    if (b.url) assert.match(b.url, /^https:\/\/glasgowclub\.gladstonego\.cloud\/book\/calendar\/(S0815|SA011)\?activityDate=\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/);
+    if (b.url) assert.match(b.url, /^https:\/\/glasgowclub\.gladstonego\.cloud\/book\/calendar\/(S0815|SA011|SA008)\?activityDate=\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/);
     else assert.ok(Buffer.byteLength(b.callback_data) <= 64, b.callback_data);
   }
 };
 
-test('where to book: Kelvingrove, Gorbals or Scotstoun', () => {
+test('where to book: Kelvingrove, Gorbals, or Scotstoun indoor or outdoor', () => {
   const s = UI.venues();
-  assert.deepEqual(flat(s).map(b => [b.text, b.callback_data]), [['Kelvingrove Park', 'bk'], ['Gorbals · indoor', 'g:g'], ['Scotstoun · indoor', 'g:s'], ['Menu', 'h']]);
+  assert.deepEqual(flat(s).map(b => [b.text, b.callback_data]), [['Kelvingrove Park', 'bk'], ['Gorbals · indoor', 'g:g'], ['Scotstoun · indoor', 'g:s'], ['Scotstoun · outdoor', 'g:o'], ['Menu', 'h']]);
   assert.match(s.caption, /^<b>Book a court<\/b>\nWhere\?/);
+  assert.match(s.caption, /outdoor at Scotstoun too/);
   fits(s);
+});
+
+test('Scotstoun\'s outdoor courts: their own days, day, time and hold screens, by their own name, with their own sheet', () => {
+  const ctx = ctxAt(`${TUE}T12:00:00Z`);
+  const days = UI.indoorDays(ctx, 'o');
+  assert.match(days.caption, /^<b>Scotstoun · outdoor tennis<\/b>\nPick a day\./);
+  assert.deepEqual(flat(days).filter(b => b.callback_data.startsWith('gd:')).map(b => b.callback_data).slice(0, 2), ['gd:o:20261117', 'gd:o:20261118']);
+  fits(days);
+  const got = { at: at(`${TUE}T12:00:05Z`), ...read('2026-11-20', { 'Outdoor Tennis Court 1': [slot('2026-11-20', 8), slot('2026-11-20', 17)], 'Outdoor Tennis Court 2': [slot('2026-11-20', 17)] }, ctx.now) };
+  const day = UI.indoorDay(ctx, 'o', '2026-11-20', got);
+  assert.equal(day.caption, '<b>Scotstoun outdoor · Fri 20 Nov</b>\nFree start times, as Glasgow Club showed it at 12:00. Each is one hour. Pick one.');
+  assert.deepEqual(flat(day).map(b => [b.text, b.callback_data || b.url]), [
+    ['08:00', 'gt:o:20261120:0800'], ['17:00', 'gt:o:20261120:1700'],
+    ['Refresh', 'gr:o:20261120'], ['Open the sheet', 'https://glasgowclub.gladstonego.cloud/book/calendar/SA008?activityDate=2026-11-20T00:00:00.000Z'],
+    ['Back', 'g:o'], ['Menu', 'h'],
+  ]);
+  fits(day);
+  const time = UI.indoorSlot(ctx, 'o', '2026-11-20', 1020, got);
+  assert.match(time.caption, /^<b>Scotstoun outdoor · Fri 20 Nov · 17:00–18:00<\/b>\nFree: courts 1 and 2,/);
+  assert.deepEqual(flat(time).filter(b => (b.callback_data || '').startsWith('gh:')).map(b => [b.text, b.callback_data]), [['Hold court 1', 'gh:o:20261120:1700:1'], ['Hold court 2', 'gh:o:20261120:1700:2']]);
+  assert.ok(flat(time).some(b => b.text === 'Open the Scotstoun outdoor sheet' && /\/SA008\?/.test(b.url)));
+  fits(time);
+  const held = UI.indoorHold(ctx, { id: 'a1b2c3d4e5f6', key: 'o', date: '2026-11-20', start: 1020, court: 2, stage: 'asked', end: null, order: null, by: 'telegram', price: null, until: null, heard: ctx.now });
+  assert.match(held.caption, /^<b>Scotstoun outdoor · Fri 20 Nov · 17:00–18:00 · Court 2<\/b>/);
 });
 
 test('an indoor centre: today and the eight days after', () => {
@@ -612,7 +637,7 @@ test('Kelvingrove is one tap further on, and everything about it is as before', 
   await t.app.handleUpdate(say(OWNER, '/help'));
   assert.match(t.tg.last().text, /\/gorbals {2}and {2}\/scotstoun/);
   await t.app.handleUpdate(say(OWNER, '/status'));
-  assert.match(t.tg.last().text, /\(version 2\.9\.2\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
+  assert.match(t.tg.last().text, /\(version 2\.9\.3\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
 });
 
 test('the look at Glasgow Club on start-up is said in the log, whichever way it goes, and /status has it', async () => {

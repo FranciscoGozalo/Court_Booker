@@ -19,7 +19,8 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.9.2 (`api: 2`; 2.9.1 added `card.tag`, see `card`). `api: 2` adds the card and Pay
+This file describes the API as built in version 2.9.3 (`api: 2`; 2.9.1 added `card.tag`, see `card`; 2.9.3 added
+Scotstoun's outdoor courts, the centre `"o"`, with `venues[].centres` and `.sites` and `indoor.centres[].label` and `.type`). `api: 2` adds the card and Pay
 (`pc.cardKey`, `card`, `hold.can.pay`, the hold stages `"paying"` and `"approve"`, `POST /app/card`,
 `POST /app/card/forget` and `what: "pay"` in `POST /app/hold/order`), and Glasgow Life's seven parks
 on ClubSpark (`POST /app/clubspark/look` and `/book`, `state.clubspark`), with every venue and its
@@ -89,7 +90,7 @@ week's 7 sessions and 14 hours, one card on its way to the PC at a time, and one
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.9.2", api: 2 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.9.3", api: 2 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -129,11 +130,12 @@ current etag the answer waits up to `wait` seconds for a change and then, if the
 
 ```
 state = {
-  now, bot: "2.9.2",
+  now, bot: "2.9.3",
   venue: { name: "Kelvingrove Park", short: "KP", first: 540, last: 1260, lengths: [1, 2],
            courts: [1,2,3,4,5,6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
-  venues: [ { key, name, club: "clubspark" | "glasgow", types: ["outdoor"] | ["indoor"] | …,
-              centre, schedule, notYet: [ … ], note, site } ],           // every venue, in a fixed order
+  venues: [ { key, name, club: "clubspark" | "glasgow", types: ["outdoor"] | ["indoor"] | ["indoor", "outdoor"],
+              centre, schedule, notYet: [ … ], note, site,
+              centres: { indoor?: "g" | "s", outdoor?: "o" }, sites: { indoor?, outdoor? } } ],   // every venue, in a fixed order
   clubspark: { linked, days: { first, last }, quietUntil, lookNo, bookNo,  // the parks on ClubSpark
                reads: { used, max: 6, nextAt }, book: null | book },
   allowance: [ { week, sessions, hours, plannedSessions, plannedHours, maxSessions: 7, maxHours: 14 } ],   // this week, then next
@@ -151,7 +153,9 @@ state = {
   results: [ { id, venue, status: "booked" | "none" | "failed", date, start, end, court, gate, why, at, past } ],   // soonest upcoming first, then past ones newest first
   run:     null | { stage: "started" | "ready" | "trouble", at, why },    // tonight's run, as the PC reports it
   indoor:  { linked, days: 9, quietUntil, holdNo,                         // holdNo: why no hold can start now (plain text), or null
-             centres: [ { key: "g", name: "Gorbals", site }, { key: "s", name: "Scotstoun", site } ] },
+             centres: [ { key: "g", name: "Gorbals", site, label: "Gorbals", type: "indoor" },
+                        { key: "s", name: "Scotstoun", site, label: "Scotstoun", type: "indoor" },
+                        { key: "o", name: "Scotstoun", site, label: "Scotstoun outdoor", type: "outdoor" } ] },
   card:    null | { brand, last4, expMonth, expYear, tag, pending, forgetting, why },   // the card your PC keeps, for Pay
   hold:    null | hold,
   notes:   [ { id, at, kind: "booked" | "missed" | "warn" | "hold" | "info", title, body } ],   // newest first, the last 30
@@ -191,18 +195,26 @@ facts of the schedule, which is Kelvingrove's only (see `venues`).
 | `queenspark` | Queens Park | `clubspark` | `["outdoor"]` | null | false |
 | `victoriapark` | Victoria Park | `clubspark` | `["outdoor"]` | null | false |
 | `gorbals` | Gorbals | `glasgow` | `["indoor"]` | `"g"` | false |
-| `scotstoun` | Scotstoun | `glasgow` | `["indoor"]` | `"s"` | false |
+| `scotstoun` | Scotstoun | `glasgow` | `["indoor", "outdoor"]` | `"s"` | false |
 
 - `club`: `clubspark` is Glasgow Life's parks, read and booked with `POST /app/clubspark/look` and
   `/book` (`key` is the `venue` they take); `glasgow` is Glasgow Club, read and held with
   `POST /app/indoor/look` and `/app/hold` (`centre` is the `centre` they take).
 - `types`: the court types that can be read and booked (or held) now. `notYet`: court types the
-  venue has that cannot be used yet, and `note` says so, else null. Scotstoun has outdoor courts
-  too, booked on Glasgow Club's site as a sheet of their own, whose id is not known yet: until it is
-  set in `lib/glasgowclub.js` (`SCOTSTOUN_OUTDOOR_ACTIVITY`), Scotstoun has `notYet: ["outdoor"]` and
-  `note: "Scotstoun's outdoor courts are not available yet."`. Once it is set, `types` becomes
-  `["indoor", "outdoor"]` and `notYet` empties; reading and holding those courts will also need the
-  PC and the app's centre checks to let their key through.
+  venue has that cannot be used yet, and `note` says so, else null (since 2.9.3 every venue has
+  `notYet: []` and `note: null`). Scotstoun has outdoor courts too, booked on Glasgow Club's site as
+  a sheet of their own (activity SA008 in the group AG153; courts "Outdoor Tennis Court 1", …,
+  hourly from 08:00 to 18:00, a week ahead like the indoor ones): `types: ["indoor", "outdoor"]`.
+- `centres` (2.9.3): the `centre` for each type, for `POST /app/indoor/look` and `/app/hold`:
+  Gorbals `{ indoor: "g" }`, Scotstoun `{ indoor: "s", outdoor: "o" }`, a park `{}`. `centre`
+  stays the first of them (`"s"` at Scotstoun), as before.
+- `sites` (2.9.3): `site` for each type: the park's ClubSpark sheet (`{ outdoor }`), or each of
+  the centre's Glasgow Club sheets for today. Scotstoun, on 20 Nov 2026:
+  `{ indoor: "https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=2026-11-20T00:00:00.000Z",
+  outdoor: "https://glasgowclub.gladstonego.cloud/book/calendar/SA008?activityDate=2026-11-20T00:00:00.000Z" }`.
+- A centre is read and held by your PC: one whose booker is not yet updated for Scotstoun's outdoor
+  courts answers a look at `"o"` with "no such centre or day", and the look ends with that (see
+  `POST /app/indoor/look`). Update the PC before the bot.
 - `schedule`: whether the weekly times and one-off dates (`plan`, `once`) are for this venue. Only
   Kelvingrove's are: your PC's nightly run books the one venue in its `.env`, with one court order,
   and changing that run is not part of 2.9. The other parks are booked with Book now, once their
@@ -345,6 +357,9 @@ Telegram's message, such as "ClubSpark did not load. Your PC is trying again (at
   start. The sentences are listed under that request.
 - `centres[].site`: a web address: that centre's booking sheet on Glasgow Club's own site, for
   today. (For another day use `look.sheet`, or change the date in `activityDate=`.)
+- `centres[].name`: the centre ("Scotstoun" for both of Scotstoun's sheets); `centres[].label`
+  (2.9.3): what the sheet is called to a person, so that Scotstoun's two can be told apart
+  ("Gorbals", "Scotstoun", "Scotstoun outdoor"); `centres[].type` (2.9.3): `"indoor"` or `"outdoor"`.
 
 **`card`**: the card your PC keeps for paying from the app, as the PC's pings say (the bot keeps
 none of it across a restart: the PC's next ping, within a minute while it is awake, says it again).
@@ -389,7 +404,7 @@ time, whoever started it.
 
 - `id`: 12 hex characters. `startedBy`: `"app"` or `"telegram"`. A hold started from the app has no
   card in Telegram unless a Hold button is tapped there while it is going; then that card follows it.
-- `centre`: `"g"` or `"s"`; `centreName`: "Gorbals" or "Scotstoun". `date`, `start`, `end`: the
+- `centre`: `"g"`, `"s"` or `"o"`; `centreName`: the centre's `label` ("Gorbals", "Scotstoun" or "Scotstoun outdoor"). `date`, `start`, `end`: the
   hour held (`end` is `start` + 60). `court`: its number; `courtName`: "Court 3".
 - `stage`: how far it has got: `"asked"` → `"signing-in"` → `"signed-in"` → `"adding"` → `"held"`
   (in the basket) → `"paying"` (your PC took up Pay from the app: it is typing in the card and
@@ -480,7 +495,7 @@ is fine, and things as they stand refuse it (the same request may work later).
 | `POST /app/pause` | `/pause`, `/resume` | `{ paused }` |
 | `POST /app/pc/sleep` | Sleep my PC | `{}` |
 | `POST /app/pc/wake` | Wake my PC | `{}` |
-| `POST /app/indoor/look` | free indoor courts for a day | `{ centre: "g" | "s", date, fresh }` → `{ ok: true, look }` |
+| `POST /app/indoor/look` | free courts at Glasgow Club for a day | `{ centre: "g" | "s" | "o", date, fresh }` → `{ ok: true, look }` |
 | `POST /app/hold` | Hold | `{ centre, date, start, court }` |
 | `POST /app/hold/order` | Let it go / I have paid; Pay (app only) | `{ id, what: "release" | "done" }`, or `{ id, what: "pay", amount, sealed }` |
 | `POST /app/card` | (app only) | `{ sealed }`: a card, sealed for `pc.cardKey` |
@@ -703,7 +718,7 @@ for a court in a look's `slots` (see `POST /app/hold`).
 
 - `at`: when the sheet was read. `by`: `"pc"` (your PC read it) or `"bot"` (the bot could itself).
 - `slots`: the courts that can be booked now, by start time; `n` is the court's number, `name`
-  Glasgow Club's name for it ("Tennis Hall Court 3"), and `price` is always null: the sheet
+  Glasgow Club's name for it ("Tennis Hall Court 3"; "Outdoor Tennis Court 1" at Scotstoun outdoor), and `price` is always null: the sheet
   carries no price (it is known once a court is held: `hold.price`).
 - `note`: what Telegram's card says about that day, one sentence or more per line: "Free start
   times, as Glasgow Club showed it at 12:00. Each is one hour. Pick one." / "No court is free that
@@ -713,8 +728,8 @@ for a court in a look's `slots` (see `POST /app/hold`).
   not open for booking yet are in the note only, never in `slots`.
 - `sheet`: that centre's sheet for that day on Glasgow Club's site, to book and pay there by hand.
 
-- 400 "A look needs a centre (g or s) and a date (YYYY-MM-DD)."
-- 400 "There is no such centre: send g for Gorbals or s for Scotstoun."
+- 400 "A look needs a centre (g, s or o) and a date (YYYY-MM-DD)."
+- 400 "There is no such centre: send g for Gorbals, s for Scotstoun (indoor) or o for Scotstoun outdoor."
 - 400 "That day is no longer on offer. Pick again."
 - 409 "That is 12 looks at Glasgow Club's sheet within a minute, which is as many as I ask for. Wait a minute, then look again."
 - 409 "Your PC's nightly booking run is at 22:00, so I am asking nothing else of it until 22:10."
@@ -725,6 +740,9 @@ for a court in a look's `slots` (see `POST /app/hold`).
 - 409 "Glasgow Club's site did not answer in time."
 - 409 "Your PC could not reach Glasgow Club's site." or "I could not reach Glasgow Club's site."
 - 409 "Glasgow Club's site did not give me the free courts (<what went wrong>)." (among them "another look took its place")
+- 409 "Your PC did not read the <label> sheet. It says: “no such centre or day”." (2.9.3: your PC does
+  not read that sheet; for `"o"` it goes on " A PC not yet updated for Scotstoun's outdoor courts
+  answers so: update the booker on your PC.")
 
 **`POST /app/hold`** `{ centre, date, start, court }`. Your PC signs in to Glasgow Club, puts that
 court in the basket and stops at the payment page; paying is the owner's. The answer's `state.hold`
@@ -737,8 +755,8 @@ after a restart of the bot the app must look again. `indoor.holdNo` does not cov
 know which court will be asked for). The checks come in this order: the shape of the request, then
 whether that time is on offer at all, then this, then the guards.
 
-- 400 "A hold needs a centre (g or s), a date (YYYY-MM-DD), a start in minutes after midnight, and a court number."
-- 400 "There is no such centre: send g for Gorbals or s for Scotstoun."
+- 400 "A hold needs a centre (g, s or o), a date (YYYY-MM-DD), a start in minutes after midnight, and a court number."
+- 400 "There is no such centre: send g for Gorbals, s for Scotstoun (indoor) or o for Scotstoun outdoor."
 - 400 "That time is no longer on offer. Pick again." (a time that has passed, a day not among the nine, a court not from 1 to 20, a start that is not a five-minute step)
 - 409 "That list is old. Read the day again, then hold a court." (no look in the last 15 minutes showed the app that court free then)
 - 409, one of the `indoor.holdNo` sentences:
@@ -814,7 +832,7 @@ box to its log or to disk, and drops it once it is handed to the PC (or dropped 
 - The security code, for one payment: `{ cvc, id, amount, payKey, centre, date, start, court }`.
   `cvc`: 3 or 4 digits, as a string. `id`: the hold's `id`. `amount`: the amount the owner
   confirmed, exactly as in the order (`"£23.00"`). `payKey`: the pay key sent with the card the PC
-  keeps. `centre`, `date`, `start`, `court`: the hold's own, as in `state.hold` (`"g"`,
+  keeps. `centre`, `date`, `start`, `court`: the hold's own, as in `state.hold` (`"g"`, `"s"` or `"o"`; say `"g"`,
   `"2026-11-20"`, `1080`, `3`).
 
 Why the pay key and the binding: the PC's key is public (the bot relays it), so anybody, the bot

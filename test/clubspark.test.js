@@ -709,29 +709,34 @@ test('still at it twelve minutes after it took the booking: said as that, not as
 
 // ---------- the venues ----------
 
-test('the venues: seven parks on ClubSpark, Gorbals and Scotstoun at Glasgow Club, Scotstoun\'s outdoor courts not yet', async () => {
+test('the venues: seven parks on ClubSpark, Gorbals and Scotstoun at Glasgow Club, Scotstoun indoor and outdoor (2.9.3)', async () => {
   const t = makeBot();
   const phone = await linkPhone(t);
   const venues = stateOf(t, phone).venues;
   assert.deepEqual(venues.map(v => [v.key, v.club, v.types.join('+'), v.centre, v.schedule]), [
     ['drumchapel', 'clubspark', 'outdoor', null, false], ['garrowhill', 'clubspark', 'outdoor', null, false], ['kelvingrove', 'clubspark', 'outdoor', null, true],
     ['knightswood', 'clubspark', 'outdoor', null, false], ['maryhill', 'clubspark', 'outdoor', null, false], ['queenspark', 'clubspark', 'outdoor', null, false],
-    ['victoriapark', 'clubspark', 'outdoor', null, false], ['gorbals', 'glasgow', 'indoor', 'g', false], ['scotstoun', 'glasgow', 'indoor', 's', false],
+    ['victoriapark', 'clubspark', 'outdoor', null, false], ['gorbals', 'glasgow', 'indoor', 'g', false], ['scotstoun', 'glasgow', 'indoor+outdoor', 's', false],
   ]);
+  const sheet = (activity, date = TUE) => `https://glasgowclub.gladstonego.cloud/book/calendar/${activity}?activityDate=${date}T00:00:00.000Z`;
+  // Scotstoun: a centre key and a sheet for each court type; `centre` and `site` stay the first (indoor) one's.
   assert.deepEqual(venues[8], {
-    key: 'scotstoun', name: 'Scotstoun', club: 'glasgow', types: ['indoor'], centre: 's', schedule: false, notYet: ['outdoor'], note: 'Scotstoun\'s outdoor courts are not available yet.',
-    site: `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${TUE}T00:00:00.000Z`,
+    key: 'scotstoun', name: 'Scotstoun', club: 'glasgow', types: ['indoor', 'outdoor'], centre: 's', schedule: false, notYet: [], note: null,
+    site: sheet('SA011'), centres: { indoor: 's', outdoor: 'o' }, sites: { indoor: sheet('SA011'), outdoor: sheet('SA008') },
   });
+  assert.deepEqual([venues[7].centres, venues[7].sites], [{ indoor: 'g' }, { indoor: sheet('S0815') }]);
   assert.equal(venues[5].site, `https://clubspark.lta.org.uk/QueensParkTennisCourtsGlasgow/Booking/BookByDate#?date=${TUE}`);
-  // The outdoor sheet's id is one constant, not known yet: nothing reads it, or holds from it.
-  assert.equal(G.SCOTSTOUN_OUTDOOR_ACTIVITY, null);
-  assert.deepEqual([G.SHEETS.o.venue, G.SHEETS.o.type, G.SHEETS.o.activity], ['scotstoun', 'outdoor', null]);
-  assert.deepEqual(Object.keys(G.CENTRES), ['g', 's']);
-  assert.deepEqual(Object.values(G.CENTRES).map(c => c.type), ['indoor', 'indoor']);
-  // Once it is known, Scotstoun lists both.
-  const known = { ...G.SHEETS, o: { ...G.SHEETS.o, activity: 'SA999' } };
-  const s = V.venueList(known, TUE, G.sheetUrl).find(v => v.key === 'scotstoun');
-  assert.deepEqual([s.types, s.notYet, s.note, s.centre], [['indoor', 'outdoor'], [], null, 's']);
+  assert.deepEqual([venues[5].centres, venues[5].sites], [{}, { outdoor: venues[5].site }]);
+  assert.ok(venues.every(v => v.notYet.length === 0 && v.note === null));
+  // The outdoor sheet, as its own page asks for it: SA008 in the group AG153, at Scotstoun's site.
+  assert.equal(G.SCOTSTOUN_OUTDOOR_ACTIVITY, 'SA008');
+  assert.deepEqual(G.SHEETS.o, { key: 'o', venue: 'scotstoun', name: 'Scotstoun', label: 'Scotstoun outdoor', type: 'outdoor', activity: 'SA008', site: 'SRSLC', group: 'AG153' });
+  assert.deepEqual(Object.keys(G.CENTRES), ['g', 's', 'o']);
+  assert.deepEqual(Object.values(G.CENTRES).map(c => [c.label, c.type, c.group]), [['Gorbals', 'indoor', 'SA004'], ['Scotstoun', 'indoor', 'SA004'], ['Scotstoun outdoor', 'outdoor', 'AG153']]);
+  // A sheet whose id were not known would still be listed as not yet, and not read.
+  const unknown = { ...G.SHEETS, o: { ...G.SHEETS.o, activity: null } };
+  const s = V.venueList(unknown, TUE, G.sheetUrl).find(v => v.key === 'scotstoun');
+  assert.deepEqual([s.types, s.notYet, s.note, s.centre, s.centres], [['indoor'], ['outdoor'], 'Scotstoun\'s outdoor courts are not available yet.', 's', { indoor: 's' }]);
 });
 
 test('scheduling stays Kelvingrove\'s: the app is told so if it names another park', async () => {

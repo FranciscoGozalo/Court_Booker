@@ -82,15 +82,17 @@ const stateOf = (t, phone) => {
   return state;
 };
 const refused = (status, why) => ({ status, body: { ok: false, why } });
-// Every venue as the state lists it on a day: the seven parks on ClubSpark, then Glasgow Club's two.
+// Every venue as the state lists it on a day: the seven parks on ClubSpark, then Glasgow Club's two (Scotstoun indoor and outdoor).
 const PARK_ADDRESSES = [['drumchapel', 'Drumchapel Park', 'DrumchapelParkTennisCourts'], ['garrowhill', 'Garrowhill Park', 'GarrowhillPark'], ['kelvingrove', 'Kelvingrove Park', 'KelvingroveParkTennisCourts'],
   ['knightswood', 'Knightswood Park', 'KnightswoodParkTennisCourts'], ['maryhill', 'Maryhill Park', 'MaryhillParkTennisCourts'], ['queenspark', 'Queens Park', 'QueensParkTennisCourtsGlasgow'], ['victoriapark', 'Victoria Park', 'VictoriaParkTennis']];
 const venuesOn = date => [
   ...PARK_ADDRESSES.map(([key, name, address]) => ({ key, name, club: 'clubspark', types: ['outdoor'], centre: null, schedule: key === 'kelvingrove', notYet: [], note: null,
-    site: `https://clubspark.lta.org.uk/${address}/Booking/BookByDate#?date=${date}` })),
-  { key: 'gorbals', name: 'Gorbals', club: 'glasgow', types: ['indoor'], centre: 'g', schedule: false, notYet: [], note: null, site: `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${date}T00:00:00.000Z` },
-  { key: 'scotstoun', name: 'Scotstoun', club: 'glasgow', types: ['indoor'], centre: 's', schedule: false, notYet: ['outdoor'], note: "Scotstoun's outdoor courts are not available yet.",
-    site: `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${date}T00:00:00.000Z` },
+    site: `https://clubspark.lta.org.uk/${address}/Booking/BookByDate#?date=${date}`, centres: {}, sites: { outdoor: `https://clubspark.lta.org.uk/${address}/Booking/BookByDate#?date=${date}` } })),
+  { key: 'gorbals', name: 'Gorbals', club: 'glasgow', types: ['indoor'], centre: 'g', schedule: false, notYet: [], note: null, site: `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${date}T00:00:00.000Z`,
+    centres: { indoor: 'g' }, sites: { indoor: `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${date}T00:00:00.000Z` } },
+  { key: 'scotstoun', name: 'Scotstoun', club: 'glasgow', types: ['indoor', 'outdoor'], centre: 's', schedule: false, notYet: [], note: null,
+    site: `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${date}T00:00:00.000Z`, centres: { indoor: 's', outdoor: 'o' },
+    sites: { indoor: `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${date}T00:00:00.000Z`, outdoor: `https://glasgowclub.gladstonego.cloud/book/calendar/SA008?activityDate=${date}T00:00:00.000Z` } },
 ];
 let tapId = 1;
 const tap = (app, data, messageId, { chat = OWNER } = {}) => app.handleUpdate({
@@ -396,7 +398,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.9.2', api: 2 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.9.3', api: 2 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -653,7 +655,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.9.2',
+    bot: '2.9.3',
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
     venues: venuesOn(TUE),
     // Nothing stands in the way of a look or Book now at a park: the PC is awake, and it is midday.
@@ -696,8 +698,9 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
     indoor: {
       linked: true, days: 9, quietUntil: null, holdNo: null,
       centres: [
-        { key: 'g', name: 'Gorbals', site: `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${TUE}T00:00:00.000Z` },
-        { key: 's', name: 'Scotstoun', site: `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${TUE}T00:00:00.000Z` },
+        { key: 'g', name: 'Gorbals', site: `https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=${TUE}T00:00:00.000Z`, label: 'Gorbals', type: 'indoor' },
+        { key: 's', name: 'Scotstoun', site: `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${TUE}T00:00:00.000Z`, label: 'Scotstoun', type: 'indoor' },
+        { key: 'o', name: 'Scotstoun', site: `https://glasgowclub.gladstonego.cloud/book/calendar/SA008?activityDate=${TUE}T00:00:00.000Z`, label: 'Scotstoun outdoor', type: 'outdoor' },
       ],
     },
     card: null,
@@ -1114,6 +1117,75 @@ test('a look by the PC: asked on its ping like a tap in Telegram, and answered w
     assert.deepEqual([got.json.look.by, got.json.look.slots, got.json.look.note], ['pc', [], 'No court is free that day, as Glasgow Club showed it at 12:01.']);
     assert.match(got.json.look.sheet, /\/SA011\?activityDate=2026-11-20T/);
   });
+});
+
+test('Scotstoun\'s outdoor courts (o), end to end against the stand-in PC: a look on its ping, then a hold of what it showed free, followed to its end', async () => {
+  const t = makeBot(NOON, { glasgow: turnedAway });
+  const phone = await linkPhone(t);
+  await ask(t, phone, 'push', { token: PUSH_TOKEN });
+  await t.app.pingFromAgent(HOME);
+  // The look: asked of the PC with the key o, answered with the outdoor sheet ("Outdoor Tennis Court 1", hourly from 08:00).
+  const ping = t.app.pingFromAgent(HOME, { wait: 5 });
+  const looking = ask(t, phone, 'indoor/look', { centre: 'o', date: FRI });
+  const order = await ping;
+  assert.deepEqual([order.look.key, order.look.date], ['o', FRI]);
+  t.clock.t += 2000;
+  const OUTDOOR = { 'Outdoor Tennis Court 1': [slot(FRI, 16), slot(FRI, 17)], 'Outdoor Tennis Court 2': [slot(FRI, 17), slot(FRI, 15, { status: 'Unavailable' })] };
+  assert.deepEqual(t.app.lookFromAgent({ id: order.look.id, ok: true, sheet: fromPc(OUTDOOR) }), { ok: true });
+  const r = await looking;
+  assert.deepEqual(r, { status: 200, body: { ok: true, look: {
+    centre: 'o', date: FRI, at: at(NOON) + 2000, by: 'pc',
+    note: 'Free start times, as Glasgow Club showed it at 12:00. Each is one hour. Pick one.',
+    slots: [
+      { start: 960, end: 1020, courts: [{ n: 1, name: 'Outdoor Tennis Court 1', price: null }] },
+      { start: 1020, end: 1080, courts: [{ n: 1, name: 'Outdoor Tennis Court 1', price: null }, { n: 2, name: 'Outdoor Tennis Court 2', price: null }] },
+    ],
+    sheet: `https://glasgowclub.gladstonego.cloud/book/calendar/SA008?activityDate=${FRI}T00:00:00.000Z`,
+  } } });
+  // Telegram's card for that day is the outdoor sheet's, by its own name.
+  await tap(t.app, 'gd:o:20261120', 7);
+  assert.deepEqual(t.tg.last().text.split('\n').slice(0, 2), ['<b>Scotstoun outdoor · Fri 20 Nov</b>', r.body.look.note]);
+  t.tg.clear();
+  // A look the app was shown is what a hold may be asked for: court 2 at 17:00, at o; not court 2 at 16:00.
+  assert.deepEqual(await ask(t, phone, 'hold', { centre: 'o', date: FRI, start: 960, court: 2 }), refused(409, 'That list is old. Read the day again, then hold a court.'));
+  const holding = t.app.pingFromAgent(HOME, { wait: 5 });
+  const asked = await ask(t, phone, 'hold', { centre: 'o', date: FRI, start: 1020, court: 2 });
+  assert.equal(asked.status, 200);
+  const h = asked.body.state.hold;
+  assert.deepEqual([h.centre, h.centreName, h.title, h.links.sheet], ['o', 'Scotstoun outdoor', 'Scotstoun outdoor · Fri 20 Nov · 17:00–18:00 · Court 2', `https://glasgowclub.gladstonego.cloud/book/calendar/SA008?activityDate=${FRI}T00:00:00.000Z`]);
+  // The PC's ping collects it with the key o, and the PC's notes about it carry that key.
+  const got = await holding;
+  assert.deepEqual(got, { ok: true, hold: { id: h.id, key: 'o', date: FRI, start: 1020, court: 2 } });
+  const pc = (stage, extra = {}) => t.app.holdFromAgent({ id: h.id, key: 'o', date: FRI, start: 1020, court: 2, stage, ...extra });
+  for (const stage of ['signing-in', 'signed-in', 'adding']) assert.deepEqual(pc(stage), { ok: true });
+  assert.deepEqual(pc('held', { price: '£10.00', left: 12 * 60000 }), { ok: true });
+  assert.deepEqual([stateOf(t, phone).hold.stage, stateOf(t, phone).hold.price], ['held', '£10.00']);
+  assert.deepEqual(pc('released', { basket: 'empty', removed: 1, why: 'time', checked: true }), { ok: true });
+  await settle();
+  const note = stateOf(t, phone).notes[0];
+  assert.deepEqual([note.kind, note.title], ['hold', 'Hold ended · Scotstoun outdoor court 2']);
+  assert.ok(t.logs.includes(`Hold asked for: Scotstoun outdoor ${FRI} 17:00 court 2.`), t.logs.join('\n'));
+});
+
+test('a PC not yet updated for Scotstoun\'s outdoor courts: the look ends with its words, in the app and in Telegram', async () => {
+  const t = makeBot(NOON, { glasgow: turnedAway });
+  const phone = await linkPhone(t);
+  await t.app.pingFromAgent(HOME);
+  const ping = t.app.pingFromAgent(HOME, { wait: 5 });
+  const looking = ask(t, phone, 'indoor/look', { centre: 'o', date: FRI });
+  const order = await ping;
+  t.app.lookFromAgent({ id: order.look.id, ok: false, kind: 'odd', why: 'no such centre or day' });         // what lib/indoor.js on an older PC answers
+  const words = 'Your PC did not read the Scotstoun outdoor sheet. It says: “no such centre or day”. A PC not yet updated for Scotstoun\'s outdoor courts answers so: update the booker on your PC.';
+  assert.deepEqual(await looking, refused(409, words));
+  // In Telegram the same words, read afresh (Try again) once the ten seconds have passed.
+  t.clock.t += 11000;
+  const again = t.app.pingFromAgent(HOME, { wait: 5 });
+  const tapped = tap(t.app, 'gr:o:20261120', 7);
+  const o2 = await again;
+  assert.equal(o2.look.key, 'o');
+  t.app.lookFromAgent({ id: o2.look.id, ok: false, kind: 'odd', why: 'no such centre or day' });
+  await tapped;
+  assert.ok(t.tg.last().text.includes(words.replace(/'/g, '&#39;')) || t.tg.last().text.includes(words), t.tg.last().text);
 });
 
 test('a look by the bot itself, where Glasgow Club lets this server in; and a day that has not opened yet', async () => {

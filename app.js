@@ -27,7 +27,7 @@ const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 
-const VERSION = '2.9.2';
+const VERSION = '2.9.3';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -393,6 +393,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // and the day's sheet comes back on POST /agent/look. One look at a time; the PC gets
   // `pcLookMs` to answer (its pings leave a gap of up to ten seconds, and the read takes a few).
   let lookAsk = null;                                 // the look being waited for: { id, key, date, taken, done }
+  const NOT_READ_BY_PC = 'no such centre or day';     // your PC's answer to a look at a sheet (or day) it does not read (lib/indoor.js there)
   function askPc(centre, dateIso) {
     return new Promise((resolve, reject) => {
       if (lookAsk) lookAsk.done(G.problem('odd', 'another look took its place'));
@@ -420,7 +421,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       try { ask.done(null, G.sheetFromPc(raw.sheet)); } catch (err) { ask.done(err); }
     } else {
       const kind = G.KINDS.includes(raw.kind) && raw.kind !== 'pc' ? raw.kind : 'odd';
-      ask.done(G.problem(kind, String(raw.why || 'no reason given').replace(/\s+/g, ' ').slice(0, 200)));
+      const why = String(raw.why || 'no reason given').replace(/\s+/g, ' ').slice(0, 200);
+      const err = G.problem(kind, why);
+      // Your PC's own "no" to the sheet itself (a PC not yet updated for Scotstoun's outdoor
+      // courts says this of them): the look ends with its words, not with the site's.
+      if (why === NOT_READ_BY_PC) {
+        const sheet = G.CENTRES[ask.key];
+        err.say = `Your PC did not read the ${sheet ? sheet.label : 'Glasgow Club'} sheet. It says: “${why}”.${ask.key === 'o' ? ' A PC not yet updated for Scotstoun\'s outdoor courts answers so: update the booker on your PC.' : ''}`;
+      }
+      ask.done(err);
     }
     return { ok: true };
   }
@@ -497,7 +506,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   let holdQuiet = 0;
   const clock = ms => { const w = londonWall(ms); return hhmm(w.hh * 60 + w.mm); };
   const holdLive = (t = now()) => !!hold && !hold.end && t - hold.heard < HOLD_LOST_MS;
-  const holdName = h => `${G.CENTRES[h.key].name} ${h.date} ${hhmm(h.start)} court ${h.court}`;
+  const holdName = h => `${G.CENTRES[h.key].label} ${h.date} ${hhmm(h.start)} court ${h.court}`;
   const nearHoldGuard = t => [-1, 0, 1].some(d => {
     const rel = londonInstant(addDays(todayCivil(t), d), releaseMin);
     return t >= rel - HOLD_BEFORE_MS && t <= rel + HOLD_AFTER_MS;
@@ -539,7 +548,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   function holdEnded(h) {
     try {
       const [, ...lines] = UI.indoorHold(ctx(), h).caption.split('\n').map(A.plain);
-      note('hold', `${h.end === 'booked' ? 'Booked' : 'Hold ended'} · ${G.CENTRES[h.key].name} court ${h.court}`,
+      note('hold', `${h.end === 'booked' ? 'Booked' : 'Hold ended'} · ${G.CENTRES[h.key].label} court ${h.court}`,
         `${label(civilOf(h.date))} · ${hhmm(h.start)}–${hhmm(h.start + 60)}. ${lines.join(' ')}`);
     } catch (e) {
       log(`Could not keep a note about the hold: ${e.message}`);
@@ -794,7 +803,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       : `A hold I am not following ${ending ? `ended (${stage})` : 'is going on'}, and your PC says Pay ${s.pressed === 'maybe' ? 'may have been' : 'was'} pressed for it: told you so.`);
     // The same words as a note for the app, which has no hold to show them on either.
     const [, ...lines] = scr.caption.split('\n').map(A.plain);
-    const where = s.court ? `${G.CENTRES[s.court.key].name} court ${s.court.court}` : 'a court your PC was holding';
+    const where = s.court ? `${G.CENTRES[s.court.key].label} court ${s.court.court}` : 'a court your PC was holding';
     note('hold', `${ending ? (stage === 'booked' ? 'Booked' : 'Hold ended') : couldNot ? 'Not paid by your PC' : 'Paying'} · ${where}`,
       `${s.court ? `${label(civilOf(s.court.date))} · ${hhmm(s.court.start)}–${hhmm(s.court.start + 60)}. ` : ''}${lines.join(' ')}`);
     const chat = owner();
@@ -1286,7 +1295,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (data === 'h') return { screen: UI.home(c), view: 'h' };
     if (data === 'b') return { screen: UI.venues() };
     if (data === 'bk') return { screen: UI.calendar(c) };
-    if ((m = /^g:([gs])$/.exec(data))) return { screen: UI.indoorDays(c, m[1]) };
+    if ((m = /^g:([gso])$/.exec(data))) return { screen: UI.indoorDays(c, m[1]) };
     if ((m = /^cal:(\d{4})(\d{2})$/.exec(data))) return { screen: UI.calendar(c, civil(+m[1], +m[2], 1)) };
     if ((m = /^d:(\d{8})$/.exec(data))) return { screen: UI.times(c, UI.fromD8(m[1])) };
     if ((m = /^t:(\d{8}):(\d{4})$/.exec(data))) return { screen: UI.lengths(c, UI.fromD8(m[1]), UI.fromHm(m[2])) };
@@ -1411,8 +1420,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     let data = String(q.data || '');
     const fresh = data.startsWith('n:');                                   // on a booking message: keep it, open a new card
     if (fresh) data = data.slice(2);
-    const indoorMatch = /^g([drt]):([gs]):(\d{8})(?::(\d{4}))?$/.exec(data);
-    const holdMatch = /^gh:([gs]):(\d{8}):(\d{4}):(\d{1,2})$/.exec(data);
+    const indoorMatch = /^g([drt]):([gso]):(\d{8})(?::(\d{4}))?$/.exec(data);
+    const holdMatch = /^gh:([gso]):(\d{8}):(\d{4}):(\d{1,2})$/.exec(data);
     if (indoorMatch || holdMatch) {
       // A tap can be answered once. If something fails after that, the word goes as a message.
       let answered = false;
@@ -1971,7 +1980,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const [title, ...lines] = scr.caption.split('\n').map(A.plain);
     const keys = scr.keyboard.inline_keyboard.flat().map(b => b.callback_data);
     return {
-      id: h.id, startedBy: h.by, centre: h.key, centreName: centre.name, date: h.date, start: h.start, end: h.start + 60,
+      id: h.id, startedBy: h.by, centre: h.key, centreName: centre.label, date: h.date, start: h.start, end: h.start + 60,
       court: h.court, courtName: `Court ${h.court}`, stage: h.stage, live: !h.end, ended: h.end,
       price: h.price || null, until: h.until, heardAt: h.heard, title, lines,
       can: { release: keys.includes(`gx:${h.id}`), done: keys.includes(`gp:${h.id}`), pay: payNo(h, x.now) === null },
@@ -2019,7 +2028,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       run: runNow(t),
       indoor: {
         linked, days: UI.INDOOR_DAYS, quietUntil: siteQuietUntil(t) || null, holdNo: noHold ? (noHold.say || noHold.toast) : null,
-        centres: Object.values(G.CENTRES).map(ce => ({ key: ce.key, name: ce.name, site: G.sheetUrl(ce, iso(today)) })),
+        centres: Object.values(G.CENTRES).map(ce => ({ key: ce.key, name: ce.name, site: G.sheetUrl(ce, iso(today)), label: ce.label, type: ce.type })),
       },
       card: cardView(),
       hold: holdView(x),

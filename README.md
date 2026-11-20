@@ -9,7 +9,7 @@ The work is split in two because ClubSpark sits behind Cloudflare, which turns c
 
 Your ClubSpark password stays on your PC. The bot never sees it and never touches ClubSpark.
 
-It also finds free **indoor courts at Gorbals and Scotstoun** (Glasgow Club), and can have your PC put one in your basket for you to pay for; see [Indoor courts](#indoor-courts-glasgow-club).
+It also finds free **courts at Gorbals and Scotstoun** (Glasgow Club: indoor, and at Scotstoun outdoor too), and can have your PC put one in your basket for you to pay for; see [Indoor courts](#indoor-courts-glasgow-club).
 
 There is an **iPhone app** too, which does the same things as the Telegram chat, and can also have your PC pay for a court it holds; see [The iPhone app](#the-iphone-app).
 
@@ -33,7 +33,7 @@ A one-off date that is already open is booked on the PC's next run (21:55 that n
 
 ## Indoor courts (Glasgow Club)
 
-**Book a date** on the menu first asks where: Kelvingrove Park, Gorbals or Scotstoun. For the two indoor centres the bot shows a day's free start times, read from Glasgow Club's booking site as any visitor sees them, then which courts are free at the time you pick. Under them are a **Hold** button for each free court, and a button that opens that day's sheet on Glasgow Club's own page, where you can book and pay yourself.
+**Book a date** on the menu first asks where: Kelvingrove Park, Gorbals (indoor), Scotstoun (indoor) or Scotstoun (outdoor: its own sheet on Glasgow Club's site, hourly from 08:00 to 18:00, from version 2.9.3; your PC reads and holds it once its booker is updated for it, and a booker not yet updated says so). For each of the three the bot shows a day's free start times, read from Glasgow Club's booking site as any visitor sees them, then which courts are free at the time you pick. Under them are a **Hold** button for each free court, and a button that opens that day's sheet on Glasgow Club's own page, where you can book and pay yourself.
 
 **Hold** has your PC do the first half of the booking. It signs in to Glasgow Club with the login kept on the PC, puts that court in your basket, presses "Continue to payment" and stops there, with the payment page open in a Chrome window on the PC. The card in Telegram follows each step, then shows the price and two buttons: **I have paid** and **Let it go**. Signing in to Glasgow Club on your phone does not show that basket (it is kept in the browser that filled it), so the court is paid for on the PC: from the iPhone app, which has your PC pay with the card it keeps (below), or in the Chrome window on the PC itself, after which you tap **I have paid**. Unpaid, the PC takes the court out of the basket again after 12 minutes (it waits up to five more while your bank's own page is showing). It takes out only a court that is still in the basket, and it calls a court booked only when your Bookings page lists it more often than it did just after signing in; anything else is said as "I could not see it", with what the basket showed.
 
@@ -60,7 +60,7 @@ If your PC is asleep, the card says so and offers **Wake my PC** (when waking is
 | `/off thu` | Stop Thursdays. `/off all` clears every weekly booking. |
 | `/book 25 nov 19:00 2h` | Book one Kelvingrove date. `/book` alone asks where first. Also `25/11`, `wed` (the coming Wednesday), `tomorrow`, `2026-11-25`. The list holds 60 one-off dates at most. |
 | `/cancel 2` | Remove one-off number 2 from `/plan`. `/cancel 25 nov` removes that date's. |
-| `/gorbals`, `/scotstoun` | The free indoor courts at that centre: pick a day, then a start time, then **Hold** a court (your PC puts it in your basket, and you pay) or open Glasgow Club's page to book and pay yourself. See [Indoor courts](#indoor-courts-glasgow-club). |
+| `/gorbals`, `/scotstoun` | The free indoor courts at that centre (Scotstoun's outdoor courts are under **Book a date**): pick a day, then a start time, then **Hold** a court (your PC puts it in your basket, and you pay) or open Glasgow Club's page to book and pay yourself. See [Indoor courts](#indoor-courts-glasgow-club). |
 | `/plan` | Your weekly and one-off bookings, how each stands, and the next booking run. |
 | `/order 3 4 5 2 1 6` | Which courts to try first. |
 | `/pause`, `/resume` | Stop and restart booking. |
@@ -197,9 +197,9 @@ lib/appapi.js     the iPhone app's API, the parts that need nothing else: pairin
 lib/push.js       notifications to the linked phones, by Expo's push service
 lib/ui.js         the tap-through screens and their buttons
 lib/wake.js       the Wake-on-LAN magic packet, and where it may go
-lib/glasgowclub.js  Glasgow Club's free indoor courts, read as a visitor (by your PC, or from here
-                  where the site allows it); never books or pays. Its table has each sheet's court
-                  type, and Scotstoun's outdoor courts, whose id is not known yet
+lib/glasgowclub.js  Glasgow Club's free courts, read as a visitor (by your PC, or from here where
+                  the site allows it); never books or pays. Its table has each sheet (Gorbals,
+                  Scotstoun indoor, Scotstoun outdoor) with its court type and the name it goes by
 lib/venues.js     every venue the bot knows: the seven parks on ClubSpark and Glasgow Club's two
 lib/clubspark.js  the parks from the app: a day's free courts and Book now, both by your PC
                   (POST /agent/clubspark/look and /book), and the limits that spare your home connection
