@@ -27,7 +27,7 @@ const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 
-const VERSION = '2.9.1';
+const VERSION = '2.9.2';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -795,7 +795,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     // The same words as a note for the app, which has no hold to show them on either.
     const [, ...lines] = scr.caption.split('\n').map(A.plain);
     const where = s.court ? `${G.CENTRES[s.court.key].name} court ${s.court.court}` : 'a court your PC was holding';
-    note('hold', `${ending ? (stage === 'booked' ? 'Booked' : 'Hold ended') : couldNot ? 'Not paid' : 'Paying'} · ${where}`,
+    note('hold', `${ending ? (stage === 'booked' ? 'Booked' : 'Hold ended') : couldNot ? 'Not paid by your PC' : 'Paying'} · ${where}`,
       `${s.court ? `${label(civilOf(s.court.date))} · ${hhmm(s.court.start)}–${hhmm(s.court.start + 60)}. ` : ''}${lines.join(' ')}`);
     const chat = owner();
     if (chat !== null) postNote(id, chat, scr, t);

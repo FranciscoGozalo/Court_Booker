@@ -671,7 +671,7 @@ test('the bot restarted while the PC paid: you are told in a message and a note,
   other.app.holdFromAgent(failed);
   await settle();
   assert.equal(other.tg.calls.filter(c => c.method === 'send' && c.text.includes(STRAY)).length, 1);
-  assert.deepEqual(stateOf(other, p2).notes.map(n => n.title), ['Not paid · Gorbals court 3']);
+  assert.deepEqual(stateOf(other, p2).notes.map(n => n.title), ['Not paid by your PC · Gorbals court 3']);
 });
 
 test('nothing sealed is ever written to the log, to disk, to Telegram or to the app, over HTTP as in the app itself', async () => {

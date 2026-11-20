@@ -19,7 +19,7 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.9.1 (`api: 2`; 2.9.1 adds `card.tag`, see `card`). `api: 2` adds the card and Pay
+This file describes the API as built in version 2.9.2 (`api: 2`; 2.9.1 added `card.tag`, see `card`). `api: 2` adds the card and Pay
 (`pc.cardKey`, `card`, `hold.can.pay`, the hold stages `"paying"` and `"approve"`, `POST /app/card`,
 `POST /app/card/forget` and `what: "pay"` in `POST /app/hold/order`), and Glasgow Life's seven parks
 on ClubSpark (`POST /app/clubspark/look` and `/book`, `state.clubspark`), with every venue and its
@@ -89,7 +89,7 @@ week's 7 sessions and 14 hours, one card on its way to the PC at a time, and one
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.9.1", api: 2 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.9.2", api: 2 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -129,7 +129,7 @@ current etag the answer waits up to `wait` seconds for a change and then, if the
 
 ```
 state = {
-  now, bot: "2.9.1",
+  now, bot: "2.9.2",
   venue: { name: "Kelvingrove Park", short: "KP", first: 540, last: 1260, lengths: [1, 2],
            courts: [1,2,3,4,5,6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
   venues: [ { key, name, club: "clubspark" | "glasgow", types: ["outdoor"] | ["indoor"] | …,
@@ -950,7 +950,7 @@ goes for every sentence in the state.
 | `warn` | 2 minutes before, the run has not started | "The booking run has not started" or "Your PC has not checked in" | the two lines of Telegram's warning |
 | `warn` | 8 minutes after, no result | "No word from your PC" | "It started on Tue 24 Nov · 16:00–18:00 but has not said how it went. Check ClubSpark, and book by hand if it is not there." |
 | `hold` | a hold ended, whoever started it | "Hold ended · Gorbals court 3", or "Booked · Gorbals court 3" | "Fri 20 Nov · 18:00–19:00. " and then the hold's last `lines` |
-| `hold` | after a restart of the bot, the PC says of a hold the bot no longer follows that Pay was pressed (or may have been), or that it could not pay: once while it goes on, once when it ends | "Paying · Gorbals court 3", "Not paid · Gorbals court 3", then "Booked · …" or "Hold ended · …" ("… · a court your PC was holding" when the PC's note does not say which) | "Fri 20 Nov · 18:00–19:00. I am not following this hold any more (I was restarted while your PC had it), so its card does not change. This is what your PC says: …" |
+| `hold` | after a restart of the bot, the PC says of a hold the bot no longer follows that Pay was pressed (or may have been), or that it could not pay: once while it goes on, once when it ends | "Paying · Gorbals court 3", "Not paid by your PC · Gorbals court 3", then "Booked · …" or "Hold ended · …" ("… · a court your PC was holding" when the PC's note does not say which) | "Fri 20 Nov · 18:00–19:00. I am not following this hold any more (I was restarted while your PC had it), so its card does not change. This is what your PC says: …" |
 | `info` | the PC started tonight's run | "Booking at 22:00" | "Tue 24 Nov · 16:00–18:00. Your PC is awake and signing in." |
 | `info` | the PC would not go to sleep | "Your PC stayed awake" | "It did not go to sleep: <reason>." |
 
