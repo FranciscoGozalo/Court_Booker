@@ -585,3 +585,192 @@ test('a note from the PC about a hold counts as the PC being in touch', async ()
   t.clock.t += 2.5 * 60000;                                                                    // five minutes since its last ping
   assert.equal(t.app.pcState(), 'awake');
 });
+
+// ---------- paying from your PC ----------
+// Only when the PC says with the court that paying is set up there (a card and a limit in its
+// .env). The card never comes to the bot: all it handles is the amount and your two taps.
+
+const heldReady = t => note(t, 'held', { price: '£23.00', left: 12 * 60000, pay: 'ready' });
+
+test('the card of a court your PC can pay for: Pay comes first, and it asks before it does anything', () => {
+  const ctx = ctxAt(`${TUE}T12:02:00Z`);
+  const s = UI.indoorHold(ctx, holdAt({ pay: 'ready' }));
+  assert.deepEqual(keysOf(s), ['Pay £23.00 from my PC', 'Open my basket', 'I have paid', 'Let it go']);
+  assert.equal(s.keyboard.inline_keyboard[0][0].callback_data, 'gy:a1b2c3d4e5f6');
+  assert.equal(s.caption.split('\n')[2], '<b>Pay from my PC</b>: your PC pays with the card kept on it, once you have confirmed the amount.');
+  assert.match(s.caption.split('\n')[3], /^Or on this phone: open your basket below and sign in\./);
+  fits(s);
+  // The question: the amount once more, and what will happen.
+  const q = UI.indoorHold(ctx, holdAt({ pay: 'ready', payState: 'confirm' }));
+  assert.deepEqual(q.caption.split('\n').slice(1), [
+    'Pay <b>£23.00</b> for this court with the card kept on your PC?',
+    'Your PC types the card into Glasgow Club\'s payment page and presses Pay. If your bank asks you to approve it, that is yours to do in your banking app.',
+  ]);
+  assert.deepEqual(q.keyboard.inline_keyboard.flat().map(b => [b.text, b.callback_data]), [['Yes, pay £23.00', 'gz:a1b2c3d4e5f6:2300'], ['Back', 'gb:a1b2c3d4e5f6']]);
+  fits(q);
+  // While it pays, and once Pay is pressed, there is nothing to tap.
+  const paying = UI.indoorHold(ctx, holdAt({ pay: 'ready', payState: 'asked', order: 'pay' }));
+  assert.deepEqual([paying.caption.split('\n')[2], keysOf(paying)], ['Paying: your PC is typing the card into the payment page and pressing Pay…', []]);
+  const pressed = UI.indoorHold(ctx, holdAt({ pay: 'ready', payState: 'pressed', payAmount: '£23.00', pressedAt: at(`${TUE}T12:03:00Z`), payWords: 'Processing <payment>' }));
+  assert.deepEqual(pressed.caption.split('\n').slice(1), [
+    'Your PC pressed <b>Pay £23.00</b> at 12:03. If your bank asks you to approve it, do that now in your banking app.',
+    'Waiting for Glasgow Club\'s answer…',
+    'The payment page says: “Processing &lt;payment&gt;”',
+  ]);
+  assert.deepEqual(keysOf(pressed), []);
+  // It could not pay: said, with the other ways still there, and Pay not offered again.
+  const failed = UI.indoorHold(ctx, holdAt({ pay: 'ready', payState: 'failed', payFailed: 'the expiry box: it did not hold what was typed' }));
+  assert.equal(failed.caption.split('\n')[2], 'Your PC could not pay: the expiry box: it did not hold what was typed. Pay was not pressed, so nothing was paid.');
+  assert.deepEqual(keysOf(failed), ['Open my basket', 'I have paid', 'Let it go']);
+  // Set up, but not for this one: why, and no Pay button. Not set up at all: not a word.
+  const over = UI.indoorHold(ctx, holdAt({ pay: 'over', payWhy: '£30.00 is more than your limit for one payment (GLASGOW_PAY_MAX, £25)' }));
+  assert.equal(over.caption.split('\n')[2], 'Paying from your PC is not on for this one: £30.00 is more than your limit for one payment (GLASGOW_PAY_MAX, £25).');
+  assert.deepEqual(keysOf(over), ['Open my basket', 'I have paid', 'Let it go']);
+  assert.ok(!UI.indoorHold(ctx, holdAt()).caption.includes('Paying from your PC'));
+});
+
+test('how it ended after your PC pressed Pay: booked and paid, or what is known and where to look', () => {
+  const ctx = ctxAt(`${TUE}T12:20:00Z`);
+  const end = over => { const s = UI.indoorHold(ctx, holdAt({ pressed: true, ...over })); fits(s); return wordsOf(s); };
+  assert.equal(end({ end: 'booked', words: 'Thank you' }), '<b>Booked and paid.</b> Your PC pressed Pay, and the court is on your Bookings page at Glasgow Club now; it was not before.\nAfter the payment the page said: “Thank you”');
+  assert.equal(end({ end: 'unsure', checked: true, basket: 'still' }), [
+    'Your PC pressed Pay, and the payment page never moved on, but I could not see the court as a new booking on your Bookings page.',
+    `It is still in the basket on your PC, so it does not look paid for. I left it there; unpaid, it lapses by itself. I have closed Chrome on your PC. ${LOOK_UNDER} Look in your banking app too: if the money has gone and the court is not under Bookings, that is one for Glasgow Club.`,
+  ].join('\n'));
+  assert.match(end({ end: 'left', checked: true, basket: 'gone', words: 'Payment failed' }), /^Your PC pressed Pay and the payment page moved on, but I could not see the court as a new booking on your Bookings page\.\nThe page said: “Payment failed”\n/);
+  assert.equal(end({ end: 'failed', stage: 'held', why: 'it stopped: Chrome went away' }), `Something went wrong after your PC pressed Pay: it stopped: Chrome went away.\nI cannot say how it ended. ${LOOK_UNDER} Look in your banking app too.`);
+});
+
+test('Pay from my PC: asked for, confirmed with the amount, sent to the PC until it answers, and never twice', async () => {
+  const t = await started();
+  assert.deepEqual(heldReady(t), { ok: true });
+  await settle();
+  assert.deepEqual(texts(t.tg.last()), ['Pay £23.00 from my PC', 'Open my basket', 'I have paid', 'Let it go']);
+  assert.ok(t.logs.some(l => /is in the basket \(£23\.00\); your PC can pay for it if you say so\.$/.test(l)));
+  // Tap Pay: the question. Nothing is sent to the PC for that.
+  await tap(t.app, `gy:${t.id}`, 7);
+  await settle();
+  assert.deepEqual(texts(t.tg.last()), ['Yes, pay £23.00', 'Back']);
+  assert.deepEqual(note(t, 'held', { beat: true }), { ok: true });
+  // Back, and Pay again.
+  await tap(t.app, `gb:${t.id}`, 7);
+  await settle();
+  assert.deepEqual(texts(t.tg.last()), ['Pay £23.00 from my PC', 'Open my basket', 'I have paid', 'Let it go']);
+  await tap(t.app, `gy:${t.id}`, 7);
+  // Yes: the PC is told the amount with its next note, and again until it has said how it went.
+  await tap(t.app, `gz:${t.id}:2300`, 7);
+  assert.equal(lastAnswer(t), 'Paying £23.00');
+  await settle();
+  assert.equal(t.tg.last().text.split('\n')[2], 'Paying: your PC is typing the card into the payment page and pressing Pay…');
+  assert.deepEqual(texts(t.tg.last()), []);
+  assert.deepEqual(note(t, 'held', { beat: true }), { ok: true, order: 'pay', amount: '£23.00' });
+  assert.deepEqual(note(t, 'held', { beat: true }), { ok: true, order: 'pay', amount: '£23.00' });
+  await tap(t.app, `gz:${t.id}:2300`, 7);                                                        // a second tap on Yes
+  assert.equal(lastAnswer(t), 'Your PC is paying.');
+  await tap(t.app, `gx:${t.id}`, 7);                                                             // and nothing else is taken meanwhile
+  assert.equal(lastAnswer(t), 'Your PC is paying. Wait for its answer.');
+  // The PC pressed Pay: no more orders go out, and the card waits for the answer.
+  t.clock.t += 8000;
+  assert.deepEqual(note(t, 'held', { beat: true, pay: 'pressed', left: 6 * 60000 }), { ok: true });
+  await settle();
+  assert.equal(t.tg.last().text.split('\n')[1], 'Your PC pressed <b>Pay £23.00</b> at 12:00. If your bank asks you to approve it, do that now in your banking app.');
+  assert.deepEqual(texts(t.tg.last()), []);
+  await tap(t.app, `gx:${t.id}`, 7);
+  assert.equal(lastAnswer(t), 'Your PC has pressed Pay. Wait for the answer.');
+  await tap(t.app, `gz:${t.id}:2300`, 7);
+  assert.equal(lastAnswer(t), 'Pay has been pressed already.');
+  assert.deepEqual(note(t, 'held', { beat: true, pay: 'pressed', left: 5 * 60000 }), { ok: true });
+  // What the payment page says meanwhile is shown; then the ending.
+  note(t, 'held', { beat: true, pay: 'pressed', left: 5 * 60000, words: 'Approve this payment in your banking app' });
+  await settle();
+  assert.equal(t.tg.last().text.split('\n')[3], 'The payment page says: “Approve this payment in your banking app”');
+  note(t, 'booked', { words: 'Thank you. Your booking is confirmed', pressed: true });
+  await settle();
+  assert.deepEqual(rest(t.tg.last()), ['<b>Booked and paid.</b> Your PC pressed Pay, and the court is on your Bookings page at Glasgow Club now; it was not before.', 'After the payment the page said: “Thank you. Your booking is confirmed”']);
+  assert.ok(t.logs.includes('Hold: you confirmed paying £23.00 for Gorbals 2026-11-20 18:00 court 3 from your PC.'));
+  assert.ok(t.logs.includes('Hold: your PC pressed Pay for Gorbals 2026-11-20 18:00 court 3 (£23.00).'));
+});
+
+test('"Yes, pay" only counts for the amount that was shown, after the question, on a court the PC can pay for', async () => {
+  const t = await started();
+  heldReady(t);
+  await tap(t.app, `gz:${t.id}:2300`, 7);                                                        // Yes without the question (an old button)
+  assert.equal(lastAnswer(t), 'The amount has changed. Look again.');
+  await tap(t.app, `gy:${t.id}`, 7);
+  await tap(t.app, `gz:${t.id}:4600`, 7);                                                        // another amount
+  assert.equal(lastAnswer(t), 'The amount has changed. Look again.');
+  assert.deepEqual(note(t, 'held', { beat: true }), { ok: true });                               // nothing was sent to the PC
+  // A court the PC did not say it can pay for: no Pay, whatever is tapped.
+  const plain = await started();
+  held(plain);
+  for (const data of [`gy:${plain.id}`, `gz:${plain.id}:2300`]) {
+    await tap(plain.app, data, 7);
+    assert.equal(lastAnswer(plain), 'Paying from your PC is not on for this court.');
+  }
+  assert.deepEqual(note(plain, 'held', { beat: true }), { ok: true });
+  // Before the court is in the basket, and once the hold is over: no.
+  const early = await started();
+  note(early, 'signing-in');
+  await tap(early.app, `gy:${early.id}`, 7);
+  assert.equal(lastAnswer(early), 'Paying from your PC is not on for this court.');
+  note(early, 'failed', { why: 'x' });
+  await tap(early.app, `gy:${early.id}`, 7);
+  assert.equal(lastAnswer(early), 'That hold is over.');
+  await tap(early.app, 'gy:ffffffffffff', 7);
+  assert.equal(lastAnswer(early), 'I am no longer following that hold.');
+});
+
+test('the PC could not pay: the card says why, Pay is not offered again, and the court can still be let go', async () => {
+  const t = await started();
+  heldReady(t);
+  await tap(t.app, `gy:${t.id}`, 7);
+  await tap(t.app, `gz:${t.id}:2300`, 7);
+  assert.deepEqual(note(t, 'held', { beat: true, pay: 'failed', payWhy: 'the payment page says "Pay £46.00", not the £23.00 you confirmed' }), { ok: true });
+  await settle();
+  assert.equal(t.tg.last().text.split('\n')[2], 'Your PC could not pay: the payment page says "Pay £46.00", not the £23.00 you confirmed. Pay was not pressed, so nothing was paid.');
+  assert.deepEqual(texts(t.tg.last()), ['Open my basket', 'I have paid', 'Let it go']);
+  await tap(t.app, `gy:${t.id}`, 7);
+  assert.equal(lastAnswer(t), 'That did not work; the card says why.');
+  await tap(t.app, `gx:${t.id}`, 7);
+  assert.equal(lastAnswer(t), 'Letting it go');
+  assert.deepEqual(note(t, 'held', { beat: true }), { ok: true, order: 'release' });
+});
+
+test('told to pay twice over, a PC that comes back with neither a press nor a reason is not acting on it: said, and the order withdrawn', async () => {
+  const t = await started();
+  heldReady(t);
+  await tap(t.app, `gy:${t.id}`, 7);
+  await tap(t.app, `gz:${t.id}:2300`, 7);
+  assert.deepEqual(note(t, 'held', { beat: true }), { ok: true, order: 'pay', amount: '£23.00' });
+  assert.deepEqual(note(t, 'held', { beat: true }), { ok: true, order: 'pay', amount: '£23.00' });
+  await settle();
+  assert.equal(t.tg.last().text.split('\n')[2], 'Paying: your PC is typing the card into the payment page and pressing Pay…');
+  assert.deepEqual(note(t, 'held', { beat: true }), { ok: true });                               // the third note: it is not acting on it
+  await settle();
+  assert.equal(t.tg.last().text.split('\n')[2], 'Your PC could not pay: your PC did not act on it. Pay was not pressed, so nothing was paid.');
+  // While the PC is at it (it sends nothing while it types), however long that takes, nothing is concluded.
+  const slow = await started();
+  heldReady(slow);
+  await tap(slow.app, `gy:${slow.id}`, 7);
+  await tap(slow.app, `gz:${slow.id}:2300`, 7);
+  note(slow, 'held', { beat: true });
+  slow.clock.t += 60000;
+  await slow.app.tick();
+  assert.equal(slow.tg.last().text.split('\n')[2], 'Paying: your PC is typing the card into the payment page and pressing Pay…');
+  assert.deepEqual(note(slow, 'held', { beat: true, pay: 'pressed', left: 6 * 60000 }), { ok: true });
+});
+
+test('after Pay is pressed the hold runs on the PC\'s clock for the answer, and an ending that could not see the booking says where to look', async () => {
+  const t = await started();
+  heldReady(t);                                                                                  // until 12:12
+  await tap(t.app, `gy:${t.id}`, 7);
+  await tap(t.app, `gz:${t.id}:2300`, 7);
+  t.clock.t = at(`${TUE}T12:11:00Z`);
+  note(t, 'held', { beat: true, pay: 'pressed', left: 6 * 60000 });                              // pressed a minute before the hold's own end
+  for (t.clock.t = at(`${TUE}T12:11:04Z`); t.clock.t < at(`${TUE}T12:23:00Z`); t.clock.t += 4000) { note(t, 'held', { beat: true, pay: 'pressed', left: Math.max(0, at(`${TUE}T12:17:00Z`) - t.clock.t) }); await t.app.tick(); }
+  assert.match(t.tg.last().text.split('\n')[1], /^Your PC pressed <b>Pay £23\.00<\/b> at 12:11\./);   // still waiting at 12:23, eleven minutes after 12:12
+  note(t, 'unsure', { words: '', checked: true, basket: 'still', pressed: true });
+  await settle();
+  assert.match(rest(t.tg.last())[0], /^Your PC pressed Pay, and the payment page never moved on, but I could not see the court as a new booking/);
+  assert.match(rest(t.tg.last())[1], /Look in your banking app too/);
+});

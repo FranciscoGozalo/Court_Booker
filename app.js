@@ -443,7 +443,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // and stops at the payment page, in a Chrome window on the PC (tools/glasgow-club-book.js
   // there). The request rides on the PC's ping, like a look. The tool then says each step on
   // POST /agent/hold, and every note of its is answered with what you have tapped since: "Let it
-  // go" or "I have paid". Paying is always yours: neither the bot nor the PC can do it.
+  // go", "I have paid", or "Pay". Paying is yours: the bot never can, and your PC only does when
+  // you have put a card and a limit in its .env and then tap Pay and confirm the amount, each
+  // time (lib/pay.js in the booker). The card itself never comes here.
   // One court at a time, never around the PC's nightly booking run, at most HOLD_PER_HOUR an hour.
   const HOLD_STAGES = ['signing-in', 'signed-in', 'adding', 'held'];
   const HOLD_ENDS = ['failed', 'refused', 'released', 'booked', 'left', 'unsure', 'closed', 'slept', 'gone'];
@@ -545,7 +547,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     const h = { id: crypto.randomBytes(6).toString('hex'), by: where.by, chat: where.chat, card: where.card, wide: where.wide, cardless: !!where.cardless,
       key, date: dateIso, start, court, at: t, heard: t,
-      taken: false, takenAt: null, stage: 'asked', end: null, order: null, price: '', heldAt: null, until: null, why: '', basket: '', removed: null, words: '', checked: false, silent: false, draws: null, redrawAt: null };
+      taken: false, takenAt: null, stage: 'asked', end: null, order: null, price: '', heldAt: null, until: null, why: '', basket: '', removed: null, words: '', checked: false, silent: false, draws: null, redrawAt: null,
+      // Paying from your PC. `pay`: what the PC said of it with the court ('ready', or why not). `payState`: null, 'confirm'
+      // (you tapped Pay, and are asked to confirm the amount), 'asked' (confirmed: the PC is told), 'pressed', 'failed'.
+      pay: '', payWhy: '', payState: null, payAmount: '', payTold: 0, pressedAt: null, payFailed: '', payWords: '', pressed: false };
     hold = h;
     holdStarts.push(t);
     log(`Hold asked for: ${holdName(h)}.`);
@@ -595,11 +600,34 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       drawHold(h);
       return { toast: 'Stopped', ok: true };
     }
-    if (h.order) return { toast: h.order === 'release' ? 'Already letting it go.' : 'Already checking.' };
+    if (h.order) return { toast: h.order === 'release' ? 'Already letting it go.' : h.order === 'pay' ? 'Your PC is paying. Wait for its answer.' : 'Already checking.' };
+    if (h.payState === 'pressed') return { toast: 'Your PC has pressed Pay. Wait for the answer.' };
+    if (h.payState === 'confirm') h.payState = null;
     h.order = what;
     log(`Hold: you tapped ${what === 'done' ? 'I have paid' : 'Let it go'}.`);
     drawHold(h);
     return { toast: what === 'done' ? 'Checking your Bookings page' : 'Letting it go', ok: true };
+  }
+  // "Pay £… from my PC" (gy), its "Back" (gb) and "Yes, pay £…" (gz, with the amount in pence, so
+  // that what is confirmed is what was shown). Only on a court that is in the basket, when the
+  // PC said paying is set up, and once: after "Yes" the PC is told the amount with its next note.
+  function holdPay(id, what, pence) {
+    const h = hold;
+    if (!h || h.id !== id) return { toast: 'I am no longer following that hold.' };
+    if (h.end) return { toast: 'That hold is over.' };
+    if (h.stage !== 'held' || h.pay !== 'ready' || !h.price) return { toast: 'Paying from your PC is not on for this court.' };
+    if (h.order) return { toast: h.order === 'pay' ? 'Your PC is paying.' : 'Too late for that: it is being dealt with.' };
+    if (h.payState === 'pressed' || h.payState === 'failed' || h.payState === 'asked') return { toast: h.payState === 'failed' ? 'That did not work; the card says why.' : 'Pay has been pressed already.' };
+    if (what === 'ask') { h.payState = 'confirm'; drawHold(h); return {}; }
+    if (what === 'back') { h.payState = null; drawHold(h); return {}; }
+    if (h.payState !== 'confirm' || pence !== Math.round(Number(h.price.slice(1)) * 100)) { h.payState = null; drawHold(h); return { toast: 'The amount has changed. Look again.' }; }
+    h.order = 'pay';
+    h.payAmount = h.price;
+    h.payState = 'asked';
+    h.payTold = 0;
+    log(`Hold: you confirmed paying ${h.price} for ${holdName(h)} from your PC.`);
+    drawHold(h);
+    return { toast: `Paying ${h.price}` };
   }
   // A note from the PC's tool about a hold: a step, or how it ended. The answer carries what
   // you have tapped since. A hold given up on here is told to let go; one this bot does not
@@ -625,6 +653,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       h.basket = ['empty', 'items', 'unclear', 'untouched', 'gone', 'still'].includes(raw.basket) ? raw.basket : '';
       h.removed = Number.isInteger(raw.removed) && raw.removed >= 0 ? raw.removed : null;
       h.checked = raw.checked === true;
+      h.pressed = raw.pressed === true || h.payState === 'pressed';
       if (raw.kind === 'challenge') {                                    // the site was checking visitors: no holds, and no looks by the PC, for an hour
         holdQuiet = t + HOLD_QUIET_MS;
         if (indoor.turnedAway) indoor.turnedAway('pc', 'the site was checking its visitors when your PC went to hold a court');
@@ -642,10 +671,35 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         const left = Number(raw.left);
         h.heldAt = t;
         h.until = t + (left > 0 && left <= 30 * 60 * 1000 ? left : 12 * 60 * 1000);
-        log(`Hold: ${holdName(h)} is in the basket${h.price ? ` (${h.price})` : ''}.`);
+        // Whether your PC can pay for this one itself, as the PC says: only then is Pay offered.
+        h.pay = ['ready', 'over', 'bad', 'boxes'].includes(raw.pay) ? raw.pay : '';
+        h.payWhy = h.pay && h.pay !== 'ready' ? text(raw.payWhy) : '';
+        log(`Hold: ${holdName(h)} is in the basket${h.price ? ` (${h.price})` : ''}${h.pay === 'ready' ? '; your PC can pay for it if you say so' : ''}.`);
+      }
+    } else if (stage === 'held' && h.stage === 'held') {
+      // How paying went, once you had confirmed it: Pay pressed (the wait for the page's
+      // answer then runs on the PC's clock, sent along), or not pressed and why.
+      if (raw.pay === 'pressed') {
+        const left = Number(raw.left);
+        if (left > 0 && left <= 30 * 60 * 1000) h.until = t + left;
+        if (h.payState !== 'pressed') {
+          h.payState = 'pressed'; h.pressedAt = t; h.pressed = true; h.order = null; redraw = true;
+          log(`Hold: your PC pressed Pay for ${holdName(h)}${h.payAmount ? ` (${h.payAmount})` : ''}.`);
+        }
+        const words = text(raw.words);
+        if (words && words !== h.payWords) { h.payWords = words; redraw = true; }
+      } else if (raw.pay === 'failed' && (h.payState === 'asked' || h.payState === 'confirm')) {
+        h.payState = 'failed'; h.payFailed = text(raw.payWhy) || 'no reason was given'; h.order = null; redraw = true;
+        log(`Hold: your PC could not pay for ${holdName(h)} (${h.payFailed}).`);
+      } else if (h.payState === 'asked' && h.payTold >= 2) {
+        // Told to pay in the answers to its last two notes, it has come back with neither a
+        // press nor a reason: it is not acting on it, so Pay was not pressed.
+        h.payState = 'failed'; h.payFailed = 'your PC did not act on it'; h.order = null; redraw = true;
+        log('Hold: your PC did not act on the order to pay.');
       }
     }
     if (redraw) drawHold(h);
+    if (h.order === 'pay') { h.payTold++; return { ok: true, order: 'pay', amount: h.payAmount }; }
     return h.order ? { ok: true, order: h.order } : { ok: true };
   }
   // Looked at by the timer: a hold the PC never collected, one it has gone silent on, and one
@@ -857,6 +911,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (data === 'sl') return { screen: UI.sleepConfirm(c) };
     if (data === 'sl:ok') return requestSleep();
     if ((m = /^g([xp]):([0-9a-f]{12})$/.exec(data))) return holdOrder(m[2], m[1] === 'x' ? 'release' : 'done');
+    if ((m = /^g([yb]):([0-9a-f]{12})$/.exec(data))) return holdPay(m[2], m[1] === 'y' ? 'ask' : 'back');
+    if ((m = /^gz:([0-9a-f]{12}):(\d{1,6})$/.exec(data))) return holdPay(m[1], 'yes', Number(m[2]));
     return { toast: 'That button is out of date. Send /menu.' };
   }
 
