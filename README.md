@@ -120,7 +120,7 @@ While the dot is green, the same place on the menu has **Sleep my PC** (and ther
 
 ## The iPhone app
 
-The app (the separate Court_Booker_App repository) is another way in to the same bot. It shows what the Telegram chat shows: your weekly and one-off bookings, the next booking run, what was booked and the gate codes, your PC's dot, the free indoor courts and a court being held. And it asks for the same things: book or remove a date, set a weekday, court order, pause, wake or sleep your PC, hold an indoor court. Each request is carried out by the same code as the Telegram command or button, with the same checks and the same words when the answer is no. **The app adds one power**: paying for a court your PC holds, with the card your PC keeps (see **Pay from the app** above). Telegram cannot, since only the app has the card's security code; everything else the app does, you can already do in the chat.
+The app (the separate Court_Booker_App repository) is another way in to the same bot. It shows what the Telegram chat shows: your weekly and one-off bookings, the next booking run, what was booked and the gate codes, your PC's dot, the free indoor courts and a court being held. And it asks for the same things: book or remove a date, set a weekday, court order, pause, wake or sleep your PC, hold an indoor court. Each request is carried out by the same code as the Telegram command or button, with the same checks and the same words when the answer is no. **The app adds two powers**. One is paying for a court your PC holds, with the card your PC keeps (see **Pay from the app** above): Telegram cannot, since only the app has the card's security code. The other is Glasgow Life's parks, their free courts and a court booked now (below): a phone you link can have your PC book there at most 4 times an hour, only a court the app was shown free in the last 15 minutes, within the weekly allowance, and never one that costs money. Everything else the app does, you can already do in the chat.
 
 - **Link a phone:** send `/app`. The bot answers with a six-digit code (and its own address, if the app asks where the bot is). Type the code into the app within 10 minutes. It works once, five wrong tries cancel it, and a new `/app` replaces it. The bot tells you in Telegram when a phone has been linked. Up to five phones can be linked.
 - **Unlink:** `/app forget` unlinks every phone at once; the app can also unlink its own phone. A phone is linked for the chat that owns the bot: if the bot ever comes to answer to another chat (`TELEGRAM_CHAT_ID` set or changed), phones linked for the old one are unlinked when it starts. `/status` says how many phones are linked, when any are.
@@ -130,6 +130,16 @@ The app (the separate Court_Booker_App repository) is another way in to the same
 - **Where it comes in:** on the same web address as your PC's link, under `/app/`, so the app works wherever the PC is linked (`AGENT_PUBLIC_KEY` or `AGENT_TOKEN` is set). The two are kept apart: a phone's token opens nothing of the PC's, and the PC's key opens nothing of the app's.
 
 The contract between the bot and the app, request by request and field by field, is [docs/app-api.md](docs/app-api.md).
+
+### The parks, from the app (version 2.9)
+
+In the app, Glasgow Life's seven parks on ClubSpark (Drumchapel, Garrowhill, Kelvingrove, Knightswood, Maryhill, Queens Park and Victoria Park) can be read and booked now, for any day that is already open:
+
+- **Free courts:** your PC opens that park's booking sheet for the day in a hidden Chrome of its own, as any visitor would, and sends back the free courts.
+- **Book now:** your PC signs in to ClubSpark as its nightly run does and books exactly the court you picked, or nothing: if it has gone, it says so and takes no other. It presses "Continue booking" only after the bot says go. The outcome is an ordinary result, with the card here, a note and a notification. Bookings are free with the annual pass; your PC never pays.
+- **Your home connection comes first:** a day's look is kept 3 minutes; at most 6 reads in 10 minutes, all phones together; no read from 21:00 and no booking from 21:25, until 22:30, nor while the nightly run is still going; one thing at a time, never beside a hold, at most 4 bookings an hour; and if ClubSpark ever turns your PC away (its "Just a moment" check, or a page that never shows, or a 403), nothing at all for 2 hours, said here in Telegram. Nothing tries to get round such a check.
+- **The weekly allowance:** at most 7 sessions and 14 hours a week across the parks (taken to run Monday to Sunday). Book now, `/book`, `/set` and the app refuse what would pass it, and the nightly run is not handed a job that would, which then gets a "Not booked" card saying why. Every court the bot has booked counts, cancelled or not.
+- **Scheduling stays Kelvingrove's:** the weekly times and one-off dates are booked by your PC's nightly run, which books the one venue in its `.env`. The other parks are booked with Book now.
 
 ## The pictures
 
@@ -179,7 +189,7 @@ lib/schedule.js   which days open when, and what the PC should book now
 lib/messages.js   the words
 lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /agent/ping, which may wait
                   for an instruction such as sleep, a look at Glasgow Club or a court to hold there,
-                  POST /agent/look, POST /agent/hold,
+                  POST /agent/look, POST /agent/hold, POST /agent/clubspark/look and /book,
                   POST /agent/progress, POST /agent/result),
                   the public banner pages for /wide, and the iPhone app's door (/app/...)
 lib/appapi.js     the iPhone app's API, the parts that need nothing else: pairing codes, tokens,
@@ -188,7 +198,12 @@ lib/push.js       notifications to the linked phones, by Expo's push service
 lib/ui.js         the tap-through screens and their buttons
 lib/wake.js       the Wake-on-LAN magic packet, and where it may go
 lib/glasgowclub.js  Glasgow Club's free indoor courts, read as a visitor (by your PC, or from here
-                  where the site allows it); never books or pays
+                  where the site allows it); never books or pays. Its table has each sheet's court
+                  type, and Scotstoun's outdoor courts, whose id is not known yet
+lib/venues.js     every venue the bot knows: the seven parks on ClubSpark and Glasgow Club's two
+lib/clubspark.js  the parks from the app: a day's free courts and Book now, both by your PC
+                  (POST /agent/clubspark/look and /book), and the limits that spare your home connection
+lib/allowance.js  Glasgow Life Tennis's weekly allowance: 7 sessions and 14 hours a week
 lib/telegram.js   Telegram Bot API client
 lib/store.js      the settings file
 assets/           the banners

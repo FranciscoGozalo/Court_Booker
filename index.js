@@ -78,7 +78,8 @@ async function main() {
   // own tokens (docs/app-api.md), so it is there only where this is.
   if (linked) {
     const appApi = { hello: app.appHello, pair: app.appPair, auth: app.appAuth, state: app.appState, ask: app.appAsk };
-    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onLook: app.lookFromAgent, onHold: app.holdFromAgent, onProgress: app.progressFromAgent, picture: app.picture, token: agentToken, publicKey, log, appApi });
+    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onLook: app.lookFromAgent, onHold: app.holdFromAgent, onProgress: app.progressFromAgent, picture: app.picture, token: agentToken, publicKey, log, appApi,
+      onClubSpark: app.clubSparkFromAgent });
     const port = Number(process.env.PORT) || 8080;
     server.listen(port, () => log(`Listening for your PC on port ${port} (${[publicKey && 'signed requests', agentToken && 'AGENT_TOKEN'].filter(Boolean).join(' or ')}).`));
     server.on('error', e => log(`The endpoint for your PC could not start: ${e.message}`));
