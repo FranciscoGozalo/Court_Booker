@@ -21,7 +21,7 @@ const UI = require('./lib/ui');
 const { readMac, publicIPv4, sendWake } = require('./lib/wake');
 const G = require('./lib/glasgowclub');
 const A = require('./lib/appapi');
-const { createExpoPush } = require('./lib/push');
+const { createExpoPush, mask: maskPush } = require('./lib/push');
 
 const VERSION = '2.8';
 const STATE_VERSION = 4;
@@ -31,6 +31,7 @@ const OFFLINE_MS = 24.5 * 3600 * 1000;     // not heard from since before last n
 const SENT_KEEP_MS = 3 * 86400000;
 const RESULTS_KEEP_MS = 60 * 86400000;
 const MAX_AHEAD_DAYS = 90;
+const MAX_ONCE = 60;                       // one-off dates on the list at once, however they are asked for
 const HEADS_UP_MS = 30 * 60 * 1000;   // the heads-up card only goes out when the PC checks in this close to a release
 const PREFLIGHT_MS = 20 * 60 * 1000;       // this long before a release, make sure the PC answers (waking it if asleep)
 const PREFLIGHT_WAIT_MS = 3 * 60 * 1000;   // how long the PC gets to answer that wake-up before you are told
@@ -40,6 +41,8 @@ const GONE = ['test', 'free', 'signin', 'style', 'lead', 'warn', 'go', 'code']; 
 // Said to a button, and to the app, that asks for an indoor day or time which is not on offer.
 const DAY_GONE = 'That day is no longer on offer. Pick again.';
 const TIME_GONE = 'That time is no longer on offer. Pick again.';
+// Said to the app when it asks to hold a court that no look showed it free in the last 15 minutes.
+const LIST_OLD = 'That list is old. Read the day again, then hold a court.';
 // What the iPhone app can ask for (POST /app/<name>, docs/app-api.md).
 const APP_ASKS = ['unpair', 'once', 'once/remove', 'plan', 'plan/remove', 'order', 'pause', 'pc/sleep', 'pc/wake', 'indoor/look', 'hold', 'hold/order', 'push'];
 
@@ -155,6 +158,25 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const save = () => store.save(state);
   const envOwner = intIn(env.TELEGRAM_CHAT_ID, -1e15, 1e15);
   const owner = () => envOwner ?? state.owner;
+  // A phone is linked to the app for one Telegram chat: the bot's owner at the time. One that
+  // was linked while the bot answered to another chat (the settings file was someone else's, or
+  // TELEGRAM_CHAT_ID was) does not outlive the owner taking the bot back: it is dropped here.
+  {
+    const mine = owner();
+    const fileWasAnothers = envOwner !== null && state.owner !== null && state.owner !== envOwner;
+    const before = state.apps.length;
+    let stamped = 0;
+    state.apps = state.apps.filter(d => {
+      if (d.owner !== null) return d.owner === mine;
+      if (mine === null || fileWasAnothers) return false;       // it does not say whose it is, and the file was not this owner's
+      d.owner = mine;
+      stamped++;
+      return true;
+    });
+    const dropped = before - state.apps.length;
+    if (dropped) log(`Unlinked ${dropped === 1 ? 'a phone' : `${dropped} phones`} linked to the app while this bot answered to another chat.`);
+    if (dropped || stamped) save();
+  }
   const releaseMin = parseTime(env.RELEASE_TIME) ?? 22 * 60;
   const daysAhead = intIn(env.DAYS_AHEAD, 1, 30) ?? 7;
   const cfg = () => ({ plan: state.plan, once: state.once, order: state.order, releaseMin, daysAhead });
@@ -170,8 +192,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
 
   // ---------- notes: what the bot tells you unprompted, kept for the iPhone app ----------
   // The last 30 are kept, and each also goes as a notification to every linked phone that gave
-  // a push token. Best effort, and never in the way: the Telegram message has gone before this
-  // is called, the notification is not waited for, and nothing here can throw.
+  // a push token. Best effort, and never in the way: the notification is not waited for, and
+  // nothing here can throw. A push token is never written in the log. A phone whose token the
+  // push service no longer knows stays linked, but gets no more notifications until the app
+  // gives a token again.
   function note(kind, title, body) {
     try {
       const n = A.makeNote(kind, title, body, now());
@@ -180,7 +204,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const tokens = [...new Set(state.apps.map(d => d.push).filter(Boolean))];
       if (tokens.length) {
         Promise.resolve().then(() => pushOut(tokens, { title: n.title, body: n.body }))
-          .catch(e => log(`A notification could not be sent: ${(e && e.message) || e}`));
+          .then(told => {
+            const gone = told && Array.isArray(told.unregistered) ? told.unregistered : [];
+            const phones = state.apps.filter(d => d.push && gone.includes(d.push));
+            if (!phones.length) return;
+            for (const d of phones) d.push = null;
+            save();
+            log(`The push service no longer knows ${phones.length === 1 ? 'a linked phone' : `${phones.length} linked phones`}, so no more notifications go there until the app asks for them again.`);
+          })
+          .catch(e => log(`A notification could not be sent: ${maskPush((e && e.message) || e)}`));
       }
     } catch (e) {
       log(`Could not keep a note for the app: ${(e && e.message) || e}`);
@@ -497,12 +529,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
   // The checks behind the Hold button, and the start of a hold when nothing stands in the way.
   // The app goes through here as well. `where` says who asked and where the hold's card is:
-  // { by: 'telegram' | 'app', chat, card, wide, cardless }. Returns { bad: true } (not a time on
-  // offer), { no } (what holdBlocker said) or { h } (the hold, now waiting for the PC's ping).
+  // { by: 'telegram' | 'app', chat, card, wide, cardless, stale }. Returns { bad: true } (not a
+  // time on offer), { old: true } (`stale`: asked by the app for a court no recent look showed it
+  // free), { no } (what holdBlocker said) or { h } (the hold, now waiting for the PC's ping).
   function holdStart(key, dateIso, start, court, where) {
     const t = now(), date = civilOf(dateIso), today = todayCivil(t);
     if (iso(date) !== dateIso || date < today || date > addDays(today, UI.INDOOR_DAYS - 1) || !(court >= 1 && court <= 20)
       || !(start >= 0 && start <= 23 * 60 && start % 5 === 0) || londonInstant(date, start) <= t) return { bad: true };
+    if (where.stale) return { old: true };                               // from the app, for a court no recent look showed it free
     const no = holdBlocker(t);
     if (no) return { no };
     if (hold && !hold.end) {                                             // one that went silent long ago: it is over, and a PC that still has it lets go
@@ -554,13 +588,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const h = hold;
     if (!h || h.id !== id) return { toast: 'I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up.' };
     if (h.end) return { toast: 'That hold is over.' };
+    if (what === 'done' && h.stage !== 'held') return { toast: 'It is not in your basket yet.' };      // "I have paid" says nothing until there is something to pay for, and never stops a hold
     if (!h.taken) {                                                      // the PC has not collected it: nothing to undo
       giveUpOn(h, 'stopped');
       log('Hold stopped before the PC collected it.');
       drawHold(h);
       return { toast: 'Stopped', ok: true };
     }
-    if (what === 'done' && h.stage !== 'held') return { toast: 'It is not in your basket yet.' };
     if (h.order) return { toast: h.order === 'release' ? 'Already letting it go.' : 'Already checking.' };
     h.order = what;
     log(`Hold: you tapped ${what === 'done' ? 'I have paid' : 'Let it go'}.`);
@@ -660,7 +694,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const statusInfo = () => ({
     version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused,
     linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null, pc: pcState(),
-    wake: wakeState(), wokeAt, indoor: indoor.health(),
+    wake: wakeState(), wokeAt, indoor: indoor.health(), phones: state.apps.length,
   });
   // The menu cards sent since this start, so a tap, or a change in your PC's state, can redraw
   // them: { kind (banner), wide, caption, keyboard, view ('h' home, 's' status, or null) }.
@@ -732,13 +766,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // ---------- what you ask for ----------
   // The changes behind the commands, the buttons and the app, so that all three do the same
   // thing with the same checks. What is said about each is the caller's business.
-  // A one-off Kelvingrove date: { no } with the sentence that refuses it, { already: true }
-  // when that date and time are on the list, or { added: true }.
+  // A one-off Kelvingrove date: { no } with the sentence that refuses it (`full`: because the
+  // list holds as many as it may), { already: true } when that date and time are on the list,
+  // or { added: true }.
   function addOnce(dateIso, start, hours, t) {
     const date = civilOf(dateIso), today = todayCivil(t);
     if (date < today || londonInstant(date, start) <= t) return { no: `${label(date)} at ${hhmm(start)} has already passed.` };
     if (date > addDays(today, MAX_AHEAD_DAYS)) return { no: `That is more than ${MAX_AHEAD_DAYS} days away. Try a nearer date.` };
     if (state.once.some(o => o.date === dateIso && o.start === start)) return { already: true };
+    if (state.once.length >= MAX_ONCE) return { no: `Your list already has ${MAX_ONCE} one-off dates, which is as many as I keep. Remove one first.`, full: true };
     state.once = cleanOnce([...state.once, { date: dateIso, start, hours }]); save();
     return { added: true };
   }
@@ -780,6 +816,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         return { screen: UI.calendar(c), toast: 'That time is no longer available. Pick again.' };
       }
       const r = addOnce(dateIso, start, hours, c.now);
+      if (r.full) return { screen: UI.bookings(c), toast: r.no };          // the list is full: here it is, to remove one from
       if (r.no) return { screen: UI.calendar(c), toast: 'That time is no longer available. Pick again.' };
       if (r.already) return { screen: UI.added(c, dateIso, start, hours, true), toast: 'Already on your list' };
       log(`Added ${dateIso} ${hhmm(start)} by button`);
@@ -1364,13 +1401,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // checks and the words are the same, and the app can do nothing you cannot do here.
   const pairing = A.createPairing();
   const pairLimiter = A.createLimiter();
+  const lookLimiter = A.createLimiter(A.LOOKS_PER_MIN, A.LOOKS_WINDOW_MS);      // fresh reads asked for through the app, all phones together
+  const appShown = new Map();                         // what a look last showed the app free: "g:2026-11-20" -> { at, free: Set("1080:3") }
   const appHello = () => ({ ok: true, bot: VERSION, api: A.API });
 
   // A phone gives the code from /app and is handed its token, once. Returns { status, body }.
+  // Only a try against a code that is waiting counts towards the ten in ten minutes: with no
+  // code to guess at there is nothing to protect, and a stranger's tries must not keep you out.
   function appPair(body) {
     const t = now();
-    if (!pairLimiter.allow(t)) return { status: 429, body: { ok: false, why: 'slow' } };
     const b = body && typeof body === 'object' ? body : {};
+    if (!pairing.waiting(t)) return { status: 400, body: { ok: false, why: pairing.check(b.code, t).why, left: 0 } };       // none, or expired
+    if (!pairLimiter.allow(t)) return { status: 429, body: { ok: false, why: 'slow' } };
     const tried = pairing.check(b.code, t);
     if (tried.why) {
       if (tried.why === 'wrong') log(`A wrong code was tried for linking a phone (${tried.left} ${tried.left === 1 ? 'try' : 'tries'} left on it).`);
@@ -1378,7 +1420,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     if (state.apps.length >= A.MAX_DEVICES) return { status: 400, body: { ok: false, why: 'full', left: tried.left } };
     let made;
-    do { made = A.newDevice(b.name, t); } while (state.apps.some(d => d.id === made.device.id));      // an id of its own
+    do { made = A.newDevice(b.name, t, owner()); } while (state.apps.some(d => d.id === made.device.id));      // an id of its own
     const { token, device } = made;
     state.apps.push(device);
     pairing.use();
@@ -1396,7 +1438,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // noted at most once a minute: that is part of the state, and so of its etag.
   function appAuth(token) {
     const d = A.findDevice(state.apps, token);
-    if (!d) return null;
+    if (!d || d.owner !== owner()) return null;
     const t = now();
     if (t - d.seenAt >= A.SEEN_EVERY_MS) { d.seenAt = t; save(); }
     return { id: d.id, name: d.name };
@@ -1485,18 +1527,29 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // same way (readIndoor) and refused in the same words.
   async function appLook(v) {
     const no = why => ({ status: 409, body: { ok: false, why } });
-    const date = civilOf(v.date), today = todayCivil(now());
+    const t = now(), date = civilOf(v.date), today = todayCivil(t);
     if (iso(date) !== v.date || date < today || date > addDays(today, UI.INDOOR_DAYS - 1)) return { status: 400, body: { ok: false, why: DAY_GONE } };
+    // A look that needs the sheet read afresh (by your PC, or from here) is one of the twelve
+    // a minute the app may ask for, whether or not the read then works. One answered from
+    // what is already known asks nothing of anyone, and is not counted.
+    if (!indoor.peek(v.centre, v.date, { fresh: v.fresh }) && !lookLimiter.allow(t)) {
+      return no(`That is ${A.LOOKS_PER_MIN} looks at Glasgow Club's sheet within a minute, which is as many as I ask for. Wait a minute, then look again.`);
+    }
     let got;
-    try { got = await readIndoor(v.centre, v.date, v.fresh); } catch (err) { return no(G.whyText(err)); }
+    try { got = await readIndoor(v.centre, v.date, v.fresh); } catch (err) { return no(A.whole(G.whyText(err))); }
     const slots = [];
     for (const s of got.slots) {
       if (s.opensAt !== null) continue;                                  // not open for booking yet: the note says when
       let at = slots.find(o => o.start === s.start);
       if (!at) slots.push(at = { start: s.start, end: s.end, courts: [] });
-      at.courts.push({ n: s.court, name: s.name || `Court ${s.court}`, price: null });      // the sheet carries no price: that shows once a court is held
+      at.courts.push({ n: s.court, name: A.whole(s.name || `Court ${s.court}`), price: null });      // the sheet carries no price: that shows once a court is held
     }
     const [, ...words] = UI.indoorDay(ctx(), v.centre, v.date, got).caption.split('\n').map(A.plain);
+    // What the app has now been shown free: for the next 15 minutes a hold may be asked for one
+    // of these courts, and for no other (kept in memory only, so not across a restart).
+    const shownAt = now();
+    for (const [key, shown] of appShown) if (shownAt - shown.at >= A.SHOWN_MS) appShown.delete(key);
+    appShown.set(`${v.centre}:${v.date}`, { at: shownAt, free: new Set(slots.flatMap(s => s.courts.map(c => `${s.start}:${c.n}`))) });
     return { status: 200, body: { ok: true, look: {
       centre: v.centre, date: v.date, at: got.at, by: got.via === 'pc' ? 'pc' : 'bot', note: words.join('\n'), slots,
       sheet: G.sheetUrl(G.CENTRES[v.centre], v.date),
@@ -1525,7 +1578,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         return { status: 200, body: { ok: true } };
       case 'once': {
         const r = addOnce(v.date, v.start, v.hours, t);
-        if (r.no) return no(400, r.no);
+        if (r.no) return no(r.full ? 409 : 400, r.no);
         if (r.added) log(`Added ${v.date} ${hhmm(v.start)} from the app`);
         return done(r.already ? { already: true } : {});
       }
@@ -1555,8 +1608,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       case 'indoor/look':
         return appLook(v);
       case 'hold': {
-        const r = holdStart(v.centre, v.date, v.start, v.court, { by: 'app', chat: owner(), card: null, wide: false, cardless: true });
+        // Telegram only offers Hold under a court that a sheet showed free. The app's equal: the
+        // court must be one that a look showed the app free in the last 15 minutes.
+        const shown = appShown.get(`${v.centre}:${v.date}`);
+        const stale = !(shown && t - shown.at < A.SHOWN_MS && shown.free.has(`${v.start}:${v.court}`));
+        const r = holdStart(v.centre, v.date, v.start, v.court, { by: 'app', chat: owner(), card: null, wide: false, cardless: true, stale });
         if (r.bad) return no(400, TIME_GONE);
+        if (r.old) return no(409, LIST_OLD);
         return r.no ? no(409, r.no.say || r.no.toast) : done();
       }
       case 'hold/order': {

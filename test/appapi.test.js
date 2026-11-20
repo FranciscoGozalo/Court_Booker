@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { createApp, loadState, backupLine } = require('../app');
 const { createServer, signedText, readPublicKey } = require('../lib/server');
-const { createExpoPush, EXPO_URL } = require('../lib/push');
+const { createExpoPush, mask, EXPO_URL, TIMEOUT_MS } = require('../lib/push');
 const A = require('../lib/appapi');
 const G = require('../lib/glasgowclub');
 const M = require('../lib/messages');
@@ -28,13 +28,20 @@ const PUSH_TOKEN = 'ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]';
 const settle = () => new Promise(r => setTimeout(r, 5));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// What the stand-in for Glasgow Club shows free on any day: court 3 at 18:00 and 19:00, court 4 at 18:00.
+const FREE = [
+  { start: 1080, end: 1140, court: 3, name: 'Tennis Hall Court 3', opensAt: null },
+  { start: 1080, end: 1140, court: 4, name: 'Tennis Hall Court 4', opensAt: null },
+  { start: 1140, end: 1200, court: 3, name: 'Tennis Hall Court 3', opensAt: null },
+];
 // The bot with stand-ins for Telegram, storage, the clock, Glasgow Club and the push service.
-function makeBot(t0 = NOON, { state = {}, env = {}, linked = true, glasgow = null, pcLookMs = 2000, pcHoldMs = 25000, push = null, wake = null } = {}) {
+// `store`: the settings file to start from (the same one again is the bot after a restart).
+function makeBot(t0 = NOON, { state = {}, env = {}, linked = true, glasgow = null, pcLookMs = 2000, pcHoldMs = 25000, push = null, wake = null, store = null } = {}) {
   const clock = { t: at(t0) };
   const tg = fakeTelegram(clock);
   const logs = [], pushes = [], woke = [];
-  const store = memStore({ v: 4, owner: OWNER, order: [3, 4, 5, 2, 1, 6], ...state });
-  const reader = glasgow ? glasgow(clock) : { asked: [], day: async (key, date) => { reader.asked.push(`${key}:${date}`); return { at: clock.t, slots: [], listed: 1 }; }, peek: () => null, health: () => null };
+  store = store || memStore({ v: 4, owner: OWNER, order: [3, 4, 5, 2, 1, 6], ...state });
+  const reader = glasgow ? glasgow(clock) : { asked: [], day: async (key, date) => { reader.asked.push(`${key}:${date}`); return { at: clock.t, slots: FREE.map(s => ({ ...s })), listed: 12 }; }, peek: () => null, health: () => null };
   const app = createApp({
     now: () => clock.t, tg, store, pictures: PICTURES, linked, env, glasgow: reader, pcLookMs, pcHoldMs, log: l => logs.push(l),
     push: push || (async (tokens, message) => { pushes.push({ tokens, ...message }); }),
@@ -56,6 +63,12 @@ async function linkPhone(t, name = 'Francisco\'s iPhone') {
   return { token: r.body.token, id: r.body.device.id, device: t.app.appAuth(r.body.token) };
 }
 const ask = (t, phone, name, body = {}) => t.app.appAsk(phone.device, name, body);
+// The app reads a day, so it has been shown what is free there (a hold may only be asked for such a court).
+async function seeFree(t, phone, centre = 'g', date = FRI) {
+  const r = await ask(t, phone, 'indoor/look', { centre, date });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  return r.body.look;
+}
 const STATE_KEYS = ['now', 'bot', 'venue', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'once', 'order', 'results', 'run', 'indoor', 'hold', 'notes', 'devices'];
 const HOLD_KEYS = ['id', 'startedBy', 'centre', 'centreName', 'date', 'start', 'end', 'court', 'courtName', 'stage', 'live', 'ended', 'price', 'until', 'heardAt', 'title', 'lines', 'can', 'links'];
 // The state as a phone is shown it. Whenever it is looked at here, it is also checked to be
@@ -77,14 +90,16 @@ const buttons = call => call.extra.reply_markup.inline_keyboard.flat();
 const texts = call => buttons(call).map(b => b.text);
 const lastAnswer = t => t.tg.answers[t.tg.answers.length - 1];
 
-// The bot's HTTP server with the app's door open, as index.js sets it up.
+// The bot's HTTP server with the app's door open, as index.js sets it up. What the server logs
+// goes with the bot's own log (t.logs).
 async function withServer(t, fn, extra = {}) {
   const a = t.app;
   const appApi = { hello: a.appHello, pair: a.appPair, auth: a.appAuth, state: a.appState, ask: a.appAsk };
   const server = createServer({ getJobs: a.jobsForAgent, onResult: a.resultFromAgent, onPing: a.pingFromAgent, onLook: a.lookFromAgent, onHold: a.holdFromAgent, onProgress: a.progressFromAgent,
-    token: AGENT, appApi, appPollMs: 15, ...(typeof extra === 'function' ? extra(appApi) : extra) });
+    token: AGENT, appApi, appPollMs: 15, log: l => t.logs.push(l), ...(typeof extra === 'function' ? extra(appApi) : extra) });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
-  const base = `http://127.0.0.1:${server.address().port}`;
+  const port = server.address().port;
+  const base = `http://127.0.0.1:${port}`;
   const call = async (method, path, { token, body, headers = {} } = {}) => {
     const res = await fetch(base + path, {
       method,
@@ -94,8 +109,24 @@ async function withServer(t, fn, extra = {}) {
     return { status: res.status, json: await res.json().catch(() => null) };
   };
   try {
-    await fn({ base, get: (path, opts) => call('GET', path, opts), post: (path, body = {}, opts = {}) => call('POST', path, { ...opts, body }) });
-  } finally { await new Promise(r => server.close(r)); }
+    await fn({ base, port, server, call, get: (path, opts) => call('GET', path, opts), post: (path, body = {}, opts = {}) => call('POST', path, { ...opts, body }) });
+  } finally { await new Promise(r => { if (server.closeAllConnections) server.closeAllConnections(); server.close(r); }); }
+}
+// A request written straight onto a socket, for what fetch will not send (half a request, a body
+// far too large). Resolves when the server closes the connection, or after `giveUpMs`.
+function raw(port, text, giveUpMs = 3000) {
+  const net = require('node:net');
+  return new Promise(resolve => {
+    const began = Date.now();
+    const s = net.connect(port, '127.0.0.1');
+    let out = '', done = false;
+    const end = closed => { if (done) return; done = true; s.destroy(); resolve({ out, closed, ms: Date.now() - began }); };
+    s.on('data', d => { out += d; });
+    s.on('error', () => {});
+    s.on('close', () => end(true));
+    s.on('connect', () => s.write(text));
+    setTimeout(() => end(false), giveUpMs).unref();
+  });
 }
 
 // ---------- the pure parts (lib/appapi.js) ----------
@@ -231,8 +262,8 @@ test('settings saved before the app existed load as they were, and the state ver
   assert.deepEqual([loadState(null).apps, loadState(null).notes], [[], []]);
   // The one-line backup says nothing of the phones: a line that is copied about opens no door.
   const { hash } = A.newToken();
-  const linked = loadState({ ...old, apps: [{ id: 'a1b2c3d4', name: 'iPhone', hash, at: 1, seenAt: 2, push: PUSH_TOKEN }], notes: [{ id: 'aa11bb22cc', at: 9, kind: 'booked', title: 'Court 3 booked', body: 'x' }] });
-  assert.deepEqual(linked.apps, [{ id: 'a1b2c3d4', name: 'iPhone', hash, at: 1, seenAt: 2, push: PUSH_TOKEN }]);
+  const linked = loadState({ ...old, apps: [{ id: 'a1b2c3d4', name: 'iPhone', hash, at: 1, seenAt: 2, push: PUSH_TOKEN, owner: OWNER }], notes: [{ id: 'aa11bb22cc', at: 9, kind: 'booked', title: 'Court 3 booked', body: 'x' }] });
+  assert.deepEqual(linked.apps, [{ id: 'a1b2c3d4', name: 'iPhone', hash, at: 1, seenAt: 2, push: PUSH_TOKEN, owner: OWNER }]);
   assert.deepEqual(linked.notes, [{ id: 'aa11bb22cc', at: 9, kind: 'booked', title: 'Court 3 booked', body: 'x' }]);
   assert.deepEqual(Object.keys(JSON.parse(backupLine(linked))).sort(), ['once', 'order', 'owner', 'plan', 'v']);
   assert.equal(JSON.parse(backupLine(linked)).v, 4);
@@ -243,7 +274,7 @@ test('settings saved before the app existed load as they were, and the state ver
 });
 
 test('whatever is in the saved file for the phones and the notes is made safe to use', () => {
-  const good = { id: 'a1b2c3d4', name: 'iPhone', hash: 'a'.repeat(64), at: 1, seenAt: 2, push: null };
+  const good = { id: 'a1b2c3d4', name: 'iPhone', hash: 'a'.repeat(64), at: 1, seenAt: 2, push: null, owner: OWNER };
   const hash = n => String(n).repeat(64).slice(0, 64);
   for (const junk of [null, 'x', 7, {}, { 0: good }]) assert.deepEqual(loadState({ v: 4, apps: junk }).apps, []);
   const apps = loadState({ v: 4, apps: [
@@ -253,14 +284,14 @@ test('whatever is in the saved file for the phones and the notes is made safe to
     { ...good, id: 'B1B2C3D4', hash: hash(1) },                              // not an id of ours
     { ...good, id: 'a1b2c3d4', hash: hash(2) },                              // the same id twice
     { ...good, id: 'c1b2c3d4' },                                             // the same token twice
-    { id: 'd1b2c3d4', hash: hash(3), name: `  <b>Pat's</b>\n\tphone ${'x'.repeat(80)}`, at: 'yesterday', seenAt: {}, push: 'https://evil.example/hook', token: 'kept by mistake', admin: true },
-    { id: 'e1b2c3d4', hash: hash(4), name: 12, at: 5, push: PUSH_TOKEN },
+    { id: 'd1b2c3d4', hash: hash(3), name: `  <b>Pat's</b>\n\tphone ${'x'.repeat(80)}`, at: 'yesterday', seenAt: {}, push: 'https://evil.example/hook', owner: '42', token: 'kept by mistake', admin: true },
+    { id: 'e1b2c3d4', hash: hash(4), name: 12, at: 5, push: PUSH_TOKEN, owner: 4.5 },
     { id: 'f1b2c3d4', hash: hash(5) }, { id: 'f2b2c3d4', hash: hash(6) }, { id: 'f3b2c3d4', hash: hash(7) },
   ] }).apps;
   assert.equal(apps.length, 5);                                              // five phones at most
   assert.deepEqual(apps[0], good);
-  assert.deepEqual(apps[1], { id: 'd1b2c3d4', name: '<b>Pat\'s</b> phone '.padEnd(40, 'x'), hash: hash(3), at: 0, seenAt: 0, push: null });      // forty characters of a name, and only what a phone is kept as
-  assert.deepEqual(apps[2], { id: 'e1b2c3d4', name: 'iPhone', hash: hash(4), at: 5, seenAt: 5, push: PUSH_TOKEN });
+  assert.deepEqual(apps[1], { id: 'd1b2c3d4', name: '<b>Pat\'s</b> phone '.padEnd(40, 'x'), hash: hash(3), at: 0, seenAt: 0, push: null, owner: null });      // forty characters of a name, and only what a phone is kept as
+  assert.deepEqual(apps[2], { id: 'e1b2c3d4', name: 'iPhone', hash: hash(4), at: 5, seenAt: 5, push: PUSH_TOKEN, owner: null });      // whose it is: a chat's number, or not known
   assert.deepEqual(apps.map(d => d.id), ['a1b2c3d4', 'd1b2c3d4', 'e1b2c3d4', 'f1b2c3d4', 'f2b2c3d4']);
   // Notes: only whole ones, of a kind the app knows, the newest first, thirty at most, never too long.
   const note = (n, over = {}) => ({ id: n.toString(16).padStart(10, '0'), at: n, kind: 'warn', title: `t${n}`, body: `b${n}`, ...over });
@@ -430,16 +461,36 @@ test('pairing: the code from /app is good once, for a token of which only the SH
     assert.match(r.json.device.id, /^[0-9a-f]{8}$/);
     assert.deepEqual(r.json.device, { id: r.json.device.id, name: 'Francisco\'s iPhone' });
     const saved = t.store.load();
-    assert.deepEqual(saved.apps, [{ id: r.json.device.id, name: 'Francisco\'s iPhone', hash: crypto.createHash('sha256').update(r.json.token).digest('hex'), at: t.clock.t, seenAt: t.clock.t, push: null }]);
+    assert.deepEqual(saved.apps, [{ id: r.json.device.id, name: 'Francisco\'s iPhone', hash: crypto.createHash('sha256').update(r.json.token).digest('hex'), at: t.clock.t, seenAt: t.clock.t, push: null, owner: OWNER }]);
     assert.ok(!JSON.stringify(saved).includes(r.json.token));
-    assert.ok(!t.logs.join('\n').includes(r.json.token) && !t.logs.join('\n').includes(code));
     assert.equal((await get('/app/state', { token: r.json.token })).status, 200);
+    assert.equal((await post('/app/pause', { paused: false }, { token: r.json.token })).status, 200);
     // Used twice: there is no code any more.
     assert.deepEqual(await post('/app/pair', { code, name: 'again' }), { status: 400, json: { ok: false, why: 'none', left: 0 } });
     assert.equal(t.store.load().apps.length, 1);
     // A phone that gives no name is an iPhone.
     const second = await post('/app/pair', { code: Number(await codeFrom(t)) });
     assert.equal(second.json.device.name, 'iPhone');
+    // After all that, neither token (nor any length of one worth having), nor a token's hash, nor a
+    // code is in the log, the server's own included.
+    const logged = t.logs.join('\n');
+    for (const token of [r.json.token, second.json.token]) for (let i = 0; i + 12 <= token.length; i++) assert.ok(!logged.includes(token.slice(i, i + 12)), 'a piece of a token is in the log');
+    assert.ok(!logged.includes(code) && !logged.includes(saved.apps[0].hash));
+    assert.ok(logged.includes('From the app: pause'));                                     // and what a phone asked for is named, without what it sent
+    assert.ok(!/paused|false/.test(logged));
+  });
+});
+
+test('pairing: the same right code sent three times at once links one phone', async () => {
+  const t = makeBot();
+  await withServer(t, async ({ post }) => {
+    const code = await codeFrom(t);
+    const answers = await Promise.all([1, 2, 3].map(i => post('/app/pair', { code, name: `Phone ${i}` })));
+    assert.deepEqual(answers.map(a => `${a.status} ${a.json.why || 'linked'}`).sort(), ['200 linked', '400 none', '400 none']);
+    assert.equal(t.app.state.apps.length, 1);
+    assert.equal(t.store.load().apps.length, 1);
+    await settle();
+    assert.equal(t.tg.calls.filter(c => /^<b>Phone linked<\/b>/.test(c.text)).length, 1);
   });
 });
 
@@ -453,11 +504,15 @@ test('pairing: a wrong code counts down and the fifth cancels it; a code runs ou
     assert.deepEqual(await post('/app/pair', { code }), { status: 400, json: { ok: false, why: 'none', left: 0 } });                   // the right code, too late
     assert.deepEqual(t.app.state.apps, []);
     assert.ok(t.logs.includes('A wrong code was tried for linking a phone (1 try left on it).'));
+    assert.ok(!t.logs.join('\n').includes(wrongFor(code)) && !t.logs.join('\n').includes(code));        // what was tried is not written down, right or wrong
     // Ten minutes on, a code that nobody used has run out; the next /app gives one that works.
     const stale = await codeFrom(t);
     t.clock.t += 10 * 60000;
     assert.deepEqual(await post('/app/pair', { code: stale }), { status: 400, json: { ok: false, why: 'expired', left: 0 } });
     assert.equal((await post('/app/pair', { code: await codeFrom(t) })).status, 200);
+    // After a restart of the bot the code is gone with it: "none", not "expired".
+    const again = makeBot(NOON, { store: t.store });
+    assert.deepEqual(again.app.appPair({ code: stale }).body, { ok: false, why: 'none', left: 0 });
   });
 });
 
@@ -475,24 +530,60 @@ test('pairing: five phones at most, and a sixth is told the list is full without
   assert.deepEqual(t.app.state.apps.map(d => d.name), ['Phone 1', 'Phone 3', 'Phone 4', 'Phone 5', 'Phone 6']);
 });
 
-test('pairing: at most ten tries in any ten minutes, whoever makes them', async () => {
+test('pairing: at most ten tries in any ten minutes at a code that is waiting, whoever makes them', async () => {
   const t = makeBot();
   await withServer(t, async ({ post }) => {
-    const code = await codeFrom(t);
-    for (let i = 0; i < 4; i++) assert.equal((await post('/app/pair', { code: wrongFor(code) })).json.why, 'wrong');
-    const fresh = await codeFrom(t);                                                       // a new code does not reset the count
-    for (let i = 0; i < 4; i++) assert.equal((await post('/app/pair', { code: wrongFor(fresh) })).json.why, 'wrong');
-    t.clock.t += 60000;
-    for (let i = 0; i < 2; i++) assert.equal((await post('/app/pair', { code: wrongFor(fresh) })).status, 400);        // the tenth; the code is cancelled by now
     const slow = { status: 429, json: { ok: false, why: 'slow' } };
-    const last = await codeFrom(t);
-    assert.deepEqual(await post('/app/pair', { code: last }), slow);                        // even the right code waits
-    t.clock.t += 9 * 60000 - 1;
-    assert.deepEqual(await post('/app/pair', { code: last }), slow);
-    t.clock.t += 1;                                                                        // ten minutes after the first eight tries
-    const linked = await post('/app/pair', { code: await codeFrom(t) });
-    assert.equal(linked.status, 200);
-    assert.equal(t.store.load().apps.length, 1);
+    const start = t.clock.t;
+    // One: the owner's own phone.
+    assert.equal((await post('/app/pair', { code: await codeFrom(t), name: 'mine' })).status, 200);
+    // Five more a minute later: a second code, guessed at until it is cancelled.
+    t.clock.t = start + 60000;
+    const second = await codeFrom(t);
+    for (const left of [4, 3, 2, 1, 0]) assert.deepEqual((await post('/app/pair', { code: wrongFor(second) })).json, { ok: false, why: 'wrong', left });
+    // Four more a minute after that, at a third code (a new code does not start the count again): that is ten.
+    t.clock.t = start + 120000;
+    const third = await codeFrom(t);
+    for (const left of [4, 3, 2, 1]) assert.deepEqual((await post('/app/pair', { code: wrongFor(third) })).json, { ok: false, why: 'wrong', left });
+    // Now even the right code has to wait, and waiting does not use the code up.
+    assert.deepEqual(await post('/app/pair', { code: third }), slow);
+    assert.deepEqual(await post('/app/pair', { code: wrongFor(third) }), slow);
+    t.clock.t = start + 10 * 60000 - 1;
+    assert.deepEqual(await post('/app/pair', { code: third }), slow);
+    // Ten minutes after the first try there is room for one more: the third code, still good, links a phone.
+    t.clock.t = start + 10 * 60000;
+    assert.equal((await post('/app/pair', { code: third, name: 'second phone' })).status, 200);
+    assert.deepEqual(await post('/app/pair', { code: await codeFrom(t) }), slow);            // and that was the one
+    assert.deepEqual(t.store.load().apps.map(d => d.name), ['mine', 'second phone']);
+  });
+});
+
+test('pairing: a stranger\'s tries while no code is waiting cost nothing, and never keep the owner out', async () => {
+  const t = makeBot();
+  await withServer(t, async ({ post }) => {
+    // Nobody has asked for a code: every try is told "none", and none of them counts.
+    for (let i = 0; i < 40; i++) assert.deepEqual(await post('/app/pair', { code: String(i).padStart(6, '0') }), { status: 400, json: { ok: false, why: 'none', left: 0 } });
+    assert.equal((await post('/app/pair', { code: await codeFrom(t), name: 'mine' })).status, 200);
+    // A stranger asking once a minute, for forty minutes; every seven minutes the owner sends /app
+    // and types the right code half a minute after one of the stranger's tries. It is taken every time.
+    let taken = 0;
+    for (let minute = 0; minute < 40; minute++) {
+      assert.equal((await post('/app/pair', { code: 'x' })).json.why, 'none');
+      if (minute >= 10 && minute % 7 === 0) {
+        t.clock.t += 30000;
+        if ((await post('/app/pair', { code: await codeFrom(t), name: `phone ${minute}` })).status === 200) taken++;
+        t.clock.t += 30000;
+      } else t.clock.t += 60000;
+    }
+    assert.equal(taken, 4);
+    // A code that ran out unused is not something to guess at either: "expired", and not counted.
+    const stale = await codeFrom(t);
+    t.clock.t += 10 * 60000;
+    for (let i = 0; i < 30; i++) assert.deepEqual(await post('/app/pair', { code: 'y' }), { status: 400, json: { ok: false, why: 'expired', left: 0 } });
+    assert.deepEqual(await post('/app/pair', { code: stale }), { status: 400, json: { ok: false, why: 'expired', left: 0 } });
+    await t.app.handleUpdate(say(OWNER, '/app forget'));
+    assert.equal((await post('/app/pair', { code: await codeFrom(t), name: 'again' })).status, 200);
+    assert.ok(!t.logs.some(l => /wrong code/.test(l)));                                       // and none of it was a wrong try at anything
   });
 });
 
@@ -1081,6 +1172,7 @@ async function heldFromApp(t0 = NOON, opts = {}) {
   const phone = await linkPhone(t);
   await ask(t, phone, 'push', { token: PUSH_TOKEN });
   await t.app.pingFromAgent(HOME);
+  await seeFree(t, phone);                                      // the app has been shown court 3 free at 18:00
   t.tg.clear();
   const ping = t.app.pingFromAgent(HOME, { wait: 5 });
   const asked = await ask(t, phone, 'hold', HOLD);
@@ -1193,6 +1285,7 @@ test('a hold from the app is refused where the Hold button would refuse, in the 
   // The PC is not awake.
   const a = makeBot();
   const phoneA = await linkPhone(a);
+  await seeFree(a, phoneA);
   const notAwake = 'Your PC is not awake, and it is your PC that signs in to Glasgow Club and holds the court. Wake it and try again.';
   assert.deepEqual(await ask(a, phoneA, 'hold', HOLD), refused(409, notAwake));
   assert.equal((await buttonSays(NOON, {})).line, notAwake);
@@ -1203,6 +1296,7 @@ test('a hold from the app is refused where the Hold button would refuse, in the 
     const b = makeBot(`${TUE}T${time}Z`);
     const phoneB = await linkPhone(b);
     await b.app.pingFromAgent(HOME);
+    await seeFree(b, phoneB);
     assert.equal(stateOf(b, phoneB).indoor.holdNo, goes ? null : nearRun, time);
     const r = await ask(b, phoneB, 'hold', HOLD);
     if (goes) assert.equal(r.status, 200, time); else assert.deepEqual(r, refused(409, nearRun), time);
@@ -1222,10 +1316,12 @@ test('a hold from the app is refused where the Hold button would refuse, in the 
   assert.deepEqual(await c.app.pingFromAgent(HOME), { ok: true });                        // nothing was handed to the PC
   assert.equal(stateOf(c, phoneC).hold, null);
   // One hold at a time, whoever started it; and six in an hour at most, counted together.
+  await seeFree(c, phoneC);
   assert.equal((await ask(c, phoneC, 'hold', HOLD)).status, 200);
   assert.deepEqual(await ask(c, phoneC, 'hold', { ...HOLD, start: 1140 }), refused(409, 'Your PC is already holding a court.'));
   const d = makeBot();
   const phoneD = await linkPhone(d);
+  await seeFree(d, phoneD);
   for (let i = 0; i < 6; i++) {
     await d.app.pingFromAgent(HOME);
     const ping = d.app.pingFromAgent(HOME, { wait: 5 });
@@ -1247,6 +1343,7 @@ test('a hold from the app with nobody to carry it out ends as it does in Telegra
   const a = makeBot();
   const phoneA = await linkPhone(a);
   await a.app.pingFromAgent(HOME);
+  await seeFree(a, phoneA);
   a.tg.clear();
   const id = (await ask(a, phoneA, 'hold', HOLD)).body.state.hold.id;
   a.clock.t += 24999;
@@ -1290,6 +1387,7 @@ test('a hold from the app with nobody to carry it out ends as it does in Telegra
   const d = makeBot();
   const phoneD = await linkPhone(d);
   await d.app.pingFromAgent(HOME);
+  await seeFree(d, phoneD);
   const asked = (await ask(d, phoneD, 'hold', HOLD)).body.state.hold;
   const stopped = await ask(d, phoneD, 'hold/order', { id: asked.id, what: 'release' });
   assert.deepEqual([stopped.status, stopped.body.state.hold.ended, stopped.body.state.hold.lines], [200, 'stopped', ['Stopped before your PC had started. Nothing was done.']]);
@@ -1357,6 +1455,8 @@ test('a hold started in Telegram shows in the app, which can let it go; its card
   // Over HTTP, the same request and the same refusal.
   await withServer(t, async ({ post }) => {
     assert.deepEqual(await post('/app/hold/order', { id: h.id, what: 'release' }, { token: phone.token }), { status: 409, json: { ok: false, why: 'That hold is over.' } });
+    assert.deepEqual(await post('/app/hold', HOLD, { token: phone.token }), { status: 409, json: { ok: false, why: 'That list is old. Read the day again, then hold a court.' } });      // the app has not looked at that day yet
+    assert.equal((await post('/app/indoor/look', { centre: 'g', date: FRI }, { token: phone.token })).status, 200);
     const started = await post('/app/hold', HOLD, { token: phone.token });
     assert.deepEqual([started.status, started.json.state.hold.startedBy, started.json.state.hold.stage], [200, 'app', 'asked']);
     assert.deepEqual(await post('/app/hold', { ...HOLD, court: 4 }, { token: phone.token }), { status: 409, json: { ok: false, why: 'Your PC is already holding a court.' } });
@@ -1550,7 +1650,8 @@ test('notifications go to Expo\'s push service as one request, and whatever goes
   const fetchImpl = async (url, init) => { calls.push({ url, init }); const next = answers.shift(); if (next instanceof Error) throw next; return next || new Response(JSON.stringify({ data: [{ status: 'ok' }] }), { status: 200 }); };
   const push = createExpoPush({ fetchImpl, log: l => logs.push(l) });
   assert.equal(EXPO_URL, 'https://exp.host/--/api/v2/push/send');
-  assert.equal(await push([PUSH_TOKEN, 'ExpoPushToken[b]'], { title: 'Court 3 booked', body: 'Thu 26 Nov · 19:00–21:00 · gate 2433' }), undefined);
+  assert.equal(TIMEOUT_MS, 5000);
+  assert.deepEqual(await push([PUSH_TOKEN, 'ExpoPushToken[b]'], { title: 'Court 3 booked', body: 'Thu 26 Nov · 19:00–21:00 · gate 2433' }), { unregistered: [] });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, EXPO_URL);
   assert.equal(calls[0].init.method, 'POST');
@@ -1562,17 +1663,575 @@ test('notifications go to Expo\'s push service as one request, and whatever goes
   ]);
   assert.deepEqual(logs, []);
   // Nobody to tell: nothing is sent.
-  await push([], { title: 'x', body: 'y' });
-  await push(null, { title: 'x', body: 'y' });
+  assert.deepEqual(await push([], { title: 'x', body: 'y' }), { unregistered: [] });
+  assert.deepEqual(await push(null, { title: 'x', body: 'y' }), { unregistered: [] });
   assert.equal(calls.length, 1);
   // The service refuses, answers oddly, cannot be reached, or takes too long: never an error.
   answers.push(new Response('nope', { status: 500 }), new Response(JSON.stringify({ data: [{ status: 'error', message: '"x" is not a registered push notification recipient' }] }), { status: 200 }),
     new Response('not json', { status: 200 }), new Error('getaddrinfo ENOTFOUND exp.host'), Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }));
-  for (let i = 0; i < 5; i++) assert.equal(await push([PUSH_TOKEN], { title: 't', body: 'b' }), undefined);
+  for (let i = 0; i < 5; i++) assert.deepEqual(await push([PUSH_TOKEN], { title: 't', body: 'b' }), { unregistered: [] });
   assert.deepEqual(logs, [
     'Expo\'s push service did not take a notification (HTTP 500).',
     'Expo\'s push service refused 1 of 1 notifications: "x" is not a registered push notification recipient',
     'A notification could not be sent: getaddrinfo ENOTFOUND exp.host',
     'A notification could not be sent: The operation was aborted due to timeout',
   ]);
+});
+
+test('a push token is never written in the log; a phone Expo no longer knows stays linked but gets no more notifications', async () => {
+  const OTHER = 'ExpoPushToken[second-phone_123]';
+  assert.equal(mask(`x ${PUSH_TOKEN} y ${OTHER} z ExponentPushToken[cut off`), 'x [a push token] y [a push token] z [a push token]');
+  assert.equal(mask(null), '');
+  // Expo, as it answers: one answer for each notification, in the order sent. It no longer knows the first phone.
+  const sent = [], expoLogs = [];
+  const expo = async (url, init) => {
+    const to = JSON.parse(init.body).map(m => m.to);
+    sent.push(to);
+    return new Response(JSON.stringify({ data: to.map(token => (token === PUSH_TOKEN
+      ? { status: 'error', message: `"${PUSH_TOKEN}" is not a registered push notification recipient`, details: { error: 'DeviceNotRegistered' } }
+      : token === 'ExpoPushToken[busy]' ? { status: 'error', message: `${token}: too many notifications`, details: { error: 'MessageRateExceeded' } } : { status: 'ok', id: 'x' })) }), { status: 200 });
+  };
+  const push = createExpoPush({ fetchImpl: expo, log: l => expoLogs.push(l) });
+  assert.deepEqual(await push([OTHER, PUSH_TOKEN, 'ExpoPushToken[busy]'], { title: 't', body: 'b' }), { unregistered: [PUSH_TOKEN] });      // only "not registered" means the phone is gone
+  assert.deepEqual(expoLogs, ['Expo\'s push service refused 2 of 3 notifications: "[a push token]" is not a registered push notification recipient']);
+  const down = createExpoPush({ log: l => expoLogs.push(l), fetchImpl: async () => { throw new Error(`could not deliver to ${PUSH_TOKEN}`); } });
+  assert.deepEqual(await down([PUSH_TOKEN], { title: 't', body: 'b' }), { unregistered: [] });
+  assert.equal(expoLogs[1], 'A notification could not be sent: could not deliver to [a push token]');
+  // In the bot: phone A's token is forgotten, phone B's is kept, and both phones stay linked.
+  expoLogs.length = 0; sent.length = 0;
+  const t = makeBot(`${TUE}T22:00:10Z`, { push });
+  const a = await linkPhone(t, 'A'), b = await linkPhone(t, 'B');
+  await ask(t, a, 'push', { token: PUSH_TOKEN });
+  await ask(t, b, 'push', { token: OTHER });
+  await t.app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 });
+  await settle();
+  assert.deepEqual(sent, [[PUSH_TOKEN, OTHER]]);
+  assert.deepEqual(t.app.state.apps.map(d => [d.name, d.push]), [['A', null], ['B', OTHER]]);
+  assert.deepEqual(t.store.load().apps.map(d => d.push), [null, OTHER]);
+  assert.ok(t.app.appAuth(a.token) && t.app.appAuth(b.token));
+  assert.ok(t.logs.includes('The push service no longer knows a linked phone, so no more notifications go there until the app asks for them again.'));
+  await t.app.resultFromAgent({ id: '2026-11-24@19:00', status: 'none', end: 1260 });
+  await settle();
+  assert.deepEqual(sent[1], [OTHER]);                                                       // the next note goes to B alone
+  // A phone that has been unlinked is sent nothing more, whatever token it once gave.
+  await ask(t, b, 'unpair');
+  await t.app.resultFromAgent({ id: '2026-11-25@19:00', status: 'none', end: 1260 });
+  await settle();
+  assert.equal(sent.length, 2);
+  // And the app on A gives a token again: it is told again.
+  await ask(t, a, 'push', { token: 'ExpoPushToken[a-new-one]' });
+  await t.app.resultFromAgent({ id: '2026-11-26@19:00', status: 'none', end: 1260 });
+  await settle();
+  assert.deepEqual(sent[2], ['ExpoPushToken[a-new-one]']);
+  // Through all of it, nothing shaped like a push token reached either log.
+  const logged = [...t.logs, ...expoLogs].join('\n');
+  assert.ok(!/PushToken\[/.test(logged), logged);
+  assert.ok(logged.includes('From the app: push'));
+  // A push that fails with the token in its words: masked in the bot's own log too.
+  const u = makeBot(`${TUE}T22:00:10Z`, { push: async tokens => { throw new Error(`no route for ${tokens[0]}`); } });
+  const phone = await linkPhone(u);
+  await ask(u, phone, 'push', { token: PUSH_TOKEN });
+  await u.app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, end: 1080 });
+  await settle();
+  assert.ok(u.logs.includes('A notification could not be sent: no route for [a push token]'));
+  assert.ok(!/PushToken\[/.test(u.logs.join('\n')));
+});
+
+// ---------- whose the phones are ----------
+
+test('a phone linked while the bot answered to another chat does not outlive the owner taking the bot back', async () => {
+  const STRANGER = 666;
+  const gone = 'Unlinked a phone linked to the app while this bot answered to another chat.';
+  // No TELEGRAM_CHAT_ID and no settings file: the first to send /start owns the bot (as before), and links a phone.
+  const store = memStore(null);
+  const first = makeBot(NOON, { store });
+  await first.app.handleUpdate(say(STRANGER, '/start'));
+  await first.app.handleUpdate(say(STRANGER, '/app'));
+  const theirs = first.app.appPair({ code: /Code: <code>(\d{6})<\/code>/.exec(first.tg.last().text)[1], name: 'not yours' }).body.token;
+  await settle();
+  assert.ok(first.app.appAuth(theirs));
+  assert.equal(store.load().apps[0].owner, STRANGER);                                      // each phone says whose it is
+  // The real owner sets TELEGRAM_CHAT_ID, and the bot restarts on the same settings file.
+  const back = makeBot(NOON, { store, env: { TELEGRAM_CHAT_ID: String(OWNER) } });
+  assert.equal(back.app.appAuth(theirs), null);
+  assert.deepEqual([back.app.state.apps, store.load().apps], [[], []]);
+  assert.deepEqual(back.logs, [gone]);
+  assert.equal(store.load().owner, STRANGER);                                              // the file's own owner is left as it was, as in 2.7
+  await back.app.handleUpdate(say(OWNER, '/status'));
+  assert.ok(!/Phones linked/.test(back.tg.last().text));                                   // nothing linked: /status reads as it always did
+  // The owner links a phone of their own. /status says so, and it stays theirs over any number of
+  // restarts, though the settings file still names the other chat as its owner.
+  const mine = await linkPhone(back, 'Mine');
+  await back.app.handleUpdate(say(OWNER, '/status'));
+  assert.match(back.tg.last().text, /\nIndoor courts \(Glasgow Club\): [^\n]+\nPhones linked to the app: 1\nSettings kept across restarts: yes\n/);
+  for (const restart of [1, 2]) {
+    const again = makeBot(NOON, { store, env: { TELEGRAM_CHAT_ID: String(OWNER) } });
+    assert.ok(again.app.appAuth(mine.token), `restart ${restart}`);
+    assert.deepEqual(again.logs, []);
+    assert.equal(stateOf(again, mine).devices.length, 1);
+  }
+  // TELEGRAM_CHAT_ID taken away again: the bot is the other chat's once more, and the owner's phone is not theirs.
+  const theirsAgain = makeBot(NOON, { store });
+  assert.equal(theirsAgain.app.appAuth(mine.token), null);
+  assert.deepEqual([theirsAgain.app.state.apps, theirsAgain.logs], [[], [gone]]);
+  assert.ok(![...first.logs, ...back.logs, ...theirsAgain.logs].join('\n').includes(theirs.slice(0, 12)));
+});
+
+test('phones in a settings file that do not say whose they are: kept for the file\'s own owner, dropped for any other', async () => {
+  const gone = 'Unlinked a phone linked to the app while this bot answered to another chat.';
+  const made = A.newToken();
+  const phone = { id: 'a1b2c3d4', name: 'iPhone', hash: made.hash, at: 1, seenAt: 1, push: null };       // no owner on it
+  // The file's owner and today's are the same chat: kept, and from now on it says whose it is.
+  for (const env of [{}, { TELEGRAM_CHAT_ID: String(OWNER) }]) {
+    const same = makeBot(NOON, { state: { apps: [phone] }, env });
+    assert.ok(same.app.appAuth(made.token));
+    assert.equal(same.store.load().apps[0].owner, OWNER);
+    assert.deepEqual(same.logs, []);
+  }
+  // TELEGRAM_CHAT_ID names another chat than the settings file does: the phone goes.
+  const other = makeBot(NOON, { state: { owner: 666, apps: [phone] }, env: { TELEGRAM_CHAT_ID: String(OWNER) } });
+  assert.equal(other.app.appAuth(made.token), null);
+  assert.deepEqual([other.store.load().apps, other.logs], [[], [gone]]);
+  // TELEGRAM_CHAT_ID changed from one chat to another while the file happens to name the new one:
+  // a phone linked for the old chat goes all the same, and the new owner's stays.
+  const kept = A.newToken();
+  const moved = makeBot(NOON, { state: { apps: [{ ...phone, owner: 666 }, { ...phone, id: 'b1b2c3d4', hash: kept.hash, owner: OWNER }] }, env: { TELEGRAM_CHAT_ID: String(OWNER) } });
+  assert.deepEqual([moved.app.state.apps.map(d => d.id), moved.logs], [['b1b2c3d4'], [gone]]);
+  assert.deepEqual([moved.app.appAuth(made.token), !!moved.app.appAuth(kept.token)], [null, true]);
+  // Nobody owns the bot yet: nobody's phone is linked to it.
+  const nobody = makeBot(NOON, { store: memStore({ v: 4, apps: [phone, { ...phone, id: 'c1b2c3d4', hash: kept.hash, owner: OWNER }] }) });
+  assert.deepEqual([nobody.app.state.apps, nobody.app.appAuth(made.token), nobody.app.appAuth(kept.token)], [[], null, null]);
+  assert.deepEqual(nobody.logs, ['Unlinked 2 phones linked to the app while this bot answered to another chat.']);
+});
+
+// ---------- what a phone cannot overdo ----------
+
+test('the app may have the sheet read afresh twelve times in a minute; what is already known costs nothing', async () => {
+  const t = makeBot(NOON, { glasgow: letIn(FRIDAY) });                                      // here the bot reads Glasgow Club itself, and keeps each day for a minute
+  const phone = await linkPhone(t);
+  const days = Array.from({ length: 9 }, (_, i) => `2026-11-${17 + i}`);
+  const all = [...days.map(date => ({ centre: 'g', date })), ...days.map(date => ({ centre: 's', date }))];
+  for (const look of all.slice(0, 12)) assert.equal((await ask(t, phone, 'indoor/look', look)).status, 200, JSON.stringify(look));
+  const tooMany = refused(409, 'That is 12 looks at Glasgow Club\'s sheet within a minute, which is as many as I ask for. Wait a minute, then look again.');
+  assert.deepEqual(await ask(t, phone, 'indoor/look', all[12]), tooMany);
+  // A day read a moment ago is answered from what is known: as often as asked, and never counted.
+  for (let i = 0; i < 20; i++) assert.equal((await ask(t, phone, 'indoor/look', all[0])).status, 200);
+  // Refresh on it, ten seconds on, is a new read, and that is refused like any other.
+  t.clock.t += 11000;
+  assert.deepEqual(await ask(t, phone, 'indoor/look', { ...all[0], fresh: true }), tooMany);
+  assert.equal((await ask(t, phone, 'indoor/look', all[0])).status, 200);
+  // The twelve are the app's, not each phone's.
+  const second = await linkPhone(t, 'iPad');
+  assert.deepEqual(await ask(t, second, 'indoor/look', all[17]), tooMany);
+  // Telegram's own looks are not counted, and not held back.
+  await tap(t.app, 'gd:s:20261125', 7);
+  assert.match(t.tg.last().text, /^<b>Scotstoun · Wed 25 Nov<\/b>\nNo court is free that day/);
+  // A minute after the twelve there is room again.
+  t.clock.t = at(NOON) + 59999;
+  assert.deepEqual(await ask(t, phone, 'indoor/look', all[13]), tooMany);
+  t.clock.t += 1;
+  assert.equal((await ask(t, phone, 'indoor/look', all[13])).status, 200);
+});
+
+test('sixty one-off dates at most, for Telegram and the app alike', async () => {
+  const day = n => new Date(Date.UTC(2026, 10, 18 + n)).toISOString().slice(0, 10);
+  const sixty = [];
+  for (let n = 0; n < 15; n++) for (const start of [540, 600, 660, 720]) sixty.push({ date: day(n), start, hours: 1 });
+  const t = makeBot(NOON, { state: { once: sixty } });
+  const phone = await linkPhone(t);
+  assert.equal(stateOf(t, phone).once.length, 60);
+  const full = 'Your list already has 60 one-off dates, which is as many as I keep. Remove one first.';
+  assert.deepEqual(await ask(t, phone, 'once', { date: '2026-12-10', start: 1140, hours: 1 }), refused(409, full));
+  await t.app.handleUpdate(say(OWNER, '/book 10 dec 19:00'));
+  assert.equal(t.tg.last().text, full);
+  await tap(t.app, 'ok:20261210:1900:1', 7);                                               // the Add button, on a card from before the list filled up
+  assert.equal(lastAnswer(t), full);
+  assert.match(t.tg.last().text, /<b>One-off dates<\/b>\n1\. Wed 18 Nov/);                 // the list itself, to remove one from
+  assert.equal(t.app.state.once.length, 60);
+  // One that is on the list is still "already there", and a date that has passed is still said as that.
+  const there = await ask(t, phone, 'once', { date: sixty[0].date, start: sixty[0].start, hours: 2 });
+  assert.deepEqual([there.status, there.body.already], [200, true]);
+  assert.deepEqual(await ask(t, phone, 'once', { date: '2026-11-10', start: 1140, hours: 1 }), refused(400, 'Tue 10 Nov at 19:00 has already passed.'));
+  // Remove one: room for one more, from either side, and then no more.
+  assert.equal((await ask(t, phone, 'once/remove', { date: sixty[0].date, start: sixty[0].start })).status, 200);
+  await t.app.handleUpdate(say(OWNER, '/book 10 dec 19:00'));
+  assert.match(t.tg.last().text, /^<b>Thu 10 Dec · 19:00–20:00<\/b>/);
+  assert.deepEqual(await ask(t, phone, 'once', { date: '2026-12-11', start: 1140, hours: 1 }), refused(409, full));
+  assert.equal(t.store.load().once.length, 60);
+});
+
+test('one phone may have four waits open at once; a fifth is told how things stand at once', async () => {
+  const t = makeBot();
+  const phone = await linkPhone(t), other = await linkPhone(t, 'iPad');
+  await withServer(t, async ({ base, get }) => {
+    const etag = (await get('/app/state', { token: phone.token })).json.etag;
+    const away = new AbortController();
+    const hang = () => fetch(`${base}/app/state?have=${etag}&wait=25`, { headers: { authorization: `Bearer ${phone.token}` }, signal: away.signal }).then(r => r.json(), e => e.name);
+    const four = [hang(), hang(), hang(), hang()];
+    await sleep(80);
+    // The fifth does not wait: it gets the state, the same as it has.
+    const began = Date.now();
+    const fifth = await get(`/app/state?have=${etag}&wait=25`, { token: phone.token });
+    assert.ok(Date.now() - began < 1500, `the fifth took ${Date.now() - began} ms`);
+    assert.deepEqual([fifth.status, Object.keys(fifth.json), fifth.json.etag], [200, ['ok', 'etag', 'state'], etag]);
+    // Another phone has four of its own.
+    const theirs = (await get('/app/state', { token: other.token })).json.etag;
+    assert.deepEqual((await get(`/app/state?have=${theirs}&wait=0.1`, { token: other.token })).json, { ok: true, etag: theirs, same: true });
+    // When the four are over (here the phone goes away), it may wait again.
+    away.abort();
+    assert.deepEqual(await Promise.all(four), ['AbortError', 'AbortError', 'AbortError', 'AbortError']);
+    await sleep(80);
+    for (let i = 0; i < 6; i++) assert.deepEqual((await get(`/app/state?have=${etag}&wait=0.05`, { token: phone.token })).json, { ok: true, etag, same: true });      // waits that end make room as well
+  });
+});
+
+test('a hold from the app is only taken for a court that a look showed the app free in the last fifteen minutes', async () => {
+  const old = refused(409, 'That list is old. Read the day again, then hold a court.');
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  await t.app.pingFromAgent(HOME);
+  // The app has looked at nothing yet.
+  assert.deepEqual(await ask(t, phone, 'hold', HOLD), old);
+  assert.deepEqual(await ask(t, phone, 'hold', { centre: 's', date: '2026-11-25', start: 5, court: 20 }), old);
+  // A day read in Telegram is not a day the app was shown.
+  await tap(t.app, 'gd:g:20261120', 7);
+  assert.deepEqual(await ask(t, phone, 'hold', HOLD), old);
+  // The app reads Gorbals on Friday: courts 3 and 4 free at 18:00, court 3 at 19:00. Those and no others.
+  const look = await seeFree(t, phone);
+  assert.deepEqual(look.slots.map(s => [s.start, s.courts.map(c => c.n)]), [[1080, [3, 4]], [1140, [3]]]);
+  for (const body of [{ ...HOLD, court: 5 }, { ...HOLD, start: 1140, court: 4 }, { ...HOLD, start: 1200 }, { ...HOLD, centre: 's' }, { ...HOLD, date: '2026-11-21' }]) assert.deepEqual(await ask(t, phone, 'hold', body), old, JSON.stringify(body));
+  assert.equal(stateOf(t, phone).hold, null);
+  assert.deepEqual(await t.app.pingFromAgent(HOME), { ok: true });                         // none of it reached the PC
+  // A time that is not on offer at all is still said as that.
+  assert.deepEqual(await ask(t, phone, 'hold', { ...HOLD, court: 21 }), refused(400, 'That time is no longer on offer. Pick again.'));
+  // Fifteen minutes less a millisecond after the look, the list is still good...
+  t.clock.t += 15 * 60000 - 1;
+  await t.app.pingFromAgent(HOME);
+  const started = await ask(t, phone, 'hold', HOLD);
+  assert.equal(started.status, 200);
+  assert.equal((await ask(t, phone, 'hold/order', { id: started.body.state.hold.id, what: 'release' })).status, 200);
+  // ...and a millisecond later it is old.
+  t.clock.t += 1;
+  assert.deepEqual(await ask(t, phone, 'hold', { ...HOLD, court: 4 }), old);
+  // Reading the day again makes it good again, whichever linked phone does the reading.
+  const second = await linkPhone(t, 'iPad');
+  await seeFree(t, second);
+  assert.equal((await ask(t, phone, 'hold', { ...HOLD, court: 4 })).status, 200);
+  // What was shown is kept in memory only: after a restart of the bot the app must look again.
+  const again = makeBot(NOON, { store: t.store });
+  const device = again.app.appAuth(phone.token);
+  await again.app.pingFromAgent(HOME);
+  assert.deepEqual(await again.app.appAsk(device, 'hold', HOLD), old);
+  assert.ok(!JSON.stringify(t.store.load()).includes('1080:3'));
+  // A court on a day that is not open for booking yet was shown, but not as one to book: not one to hold.
+  const early = makeBot(NOON, { glasgow: letIn({ 'Tennis Hall Court 2': [slot('2026-11-25', 18, { before: true, from: '2026-11-18T00:00:00Z' })] }) });
+  const earlyPhone = await linkPhone(early);
+  assert.deepEqual((await seeFree(early, earlyPhone, 's', '2026-11-25')).slots, []);
+  await early.app.pingFromAgent(HOME);
+  assert.deepEqual(await ask(early, earlyPhone, 'hold', { centre: 's', date: '2026-11-25', start: 1080, court: 2 }), old);
+  // Telegram's own Hold button is as it was: it asks for no look by the app.
+  const u = makeBot();
+  await u.app.pingFromAgent(HOME);
+  await tap(u.app, 'gh:g:20261120:1800:3', 7);
+  assert.equal(lastAnswer(u), 'Asking your PC');
+});
+
+test('before the PC has collected a hold, "I have paid" is refused and changes nothing, and Stop stops it', async () => {
+  const early = refused(409, 'It is not in your basket yet.');
+  // From the app.
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  await t.app.pingFromAgent(HOME);
+  await seeFree(t, phone);
+  const h = (await ask(t, phone, 'hold', HOLD)).body.state.hold;
+  assert.deepEqual([h.stage, h.can], ['asked', { release: true, done: false }]);
+  assert.deepEqual(await ask(t, phone, 'hold/order', { id: h.id, what: 'done' }), early);
+  let now = stateOf(t, phone);
+  assert.deepEqual([now.hold.ended, now.hold.live, now.hold.can, now.notes], [null, true, { release: true, done: false }, []]);
+  assert.equal((await t.app.pingFromAgent(HOME)).hold.id, h.id);                           // the PC still collects it
+  assert.deepEqual(await ask(t, phone, 'hold/order', { id: h.id, what: 'done' }), early);  // collected, not yet in the basket: the same
+  assert.equal(stateOf(t, phone).hold.ended, null);
+  // Stop, before the PC has it: over at once, and nothing is handed to the PC.
+  const u = makeBot();
+  const phoneU = await linkPhone(u);
+  await u.app.pingFromAgent(HOME);
+  await seeFree(u, phoneU);
+  const hu = (await ask(u, phoneU, 'hold', HOLD)).body.state.hold;
+  const stopped = await ask(u, phoneU, 'hold/order', { id: hu.id, what: 'release' });
+  assert.deepEqual([stopped.status, stopped.body.state.hold.ended, stopped.body.state.hold.lines], [200, 'stopped', ['Stopped before your PC had started. Nothing was done.']]);
+  assert.deepEqual(await u.app.pingFromAgent(HOME), { ok: true });
+  // The same two in Telegram. Its card only shows Stop this early; an old or made-up "I have paid" button gets the same answer.
+  for (const [button, toast, goesOn] of [['gp', 'It is not in your basket yet.', true], ['gx', 'Stopped', false]]) {
+    const v = makeBot();
+    await v.app.pingFromAgent(HOME);
+    await tap(v.app, 'gh:g:20261120:1800:3', 7);
+    await settle();
+    const id = buttons(v.tg.last()).find(b => b.text === 'Stop').callback_data.slice(3);
+    await tap(v.app, `${button}:${id}`, 7);
+    await settle();
+    assert.equal(lastAnswer(v), toast);
+    const order = await v.app.pingFromAgent(HOME);
+    await settle();
+    if (goesOn) { assert.equal(order.hold.id, id); assert.equal(v.tg.last().text.split('\n')[1], 'Your PC has it and is starting Chrome…'); } else {
+      assert.deepEqual(order, { ok: true });
+      assert.equal(v.tg.last().text.split('\n')[1], 'Stopped before your PC had started. Nothing was done.');
+    }
+  }
+});
+
+// ---------- the server's own part ----------
+
+test('the server itself turns away whatever has no linked phone\'s token, whatever stands behind the door', async () => {
+  // A door with nothing behind it that would say no: only the server's own check is left to do so.
+  const reached = [];
+  const openDoor = {
+    hello: () => ({ ok: true, bot: 'x', api: 1 }),
+    pair: () => ({ status: 400, body: { ok: false, why: 'none', left: 0 } }),
+    auth: token => (token === 'the-one-good-token' ? { id: 'aaaaaaaa' } : null),
+    state: device => { reached.push(['state', device]); return { etag: 'e1', state: { gate: '2433' } }; },
+    ask: async (device, name) => { reached.push(['ask', name]); return { status: 200, body: { ok: true, gate: '2433' } }; },
+  };
+  const server = createServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), token: AGENT, appApi: openDoor });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = (method, path, headers = {}) => fetch(base + path, { method, headers, body: method === 'POST' || method === 'PUT' ? '{}' : undefined }).then(async r => [r.status, await r.text(), r.headers.get('cache-control')]);
+  try {
+    for (const [method, path, headers] of [
+      ['GET', '/app/state', {}], ['GET', '/app/state?have=e1&wait=5', {}], ['GET', '/app/state', { authorization: 'Bearer nonsense' }],
+      ['GET', '/app/state', { authorization: 'the-one-good-token' }], ['GET', '/app/state', { authorization: 'bearer the-one-good-token' }], ['GET', '/app/state', { authorization: 'Token the-one-good-token' }],
+      ['GET', '/app/state?token=the-one-good-token', {}], ['GET', '/app/state', { authorization: `Bearer ${AGENT}` }], ['GET', '/app/state', { authorization: `Basic ${Buffer.from('x:the-one-good-token').toString('base64')}` }],
+      ['POST', '/app/pause', {}], ['POST', '/app/pause?token=the-one-good-token', {}], ['POST', '/app/unpair', { authorization: 'Bearer the-one-good-tokenx' }], ['POST', '/app/hello', {}],
+      ['HEAD', '/app/state', {}], ['HEAD', '/app/hello', {}], ['PUT', '/app/pause', {}], ['DELETE', '/app/state', {}], ['GET', '/app', {}], ['GET', '/app/', {}], ['GET', '/app/hello/', {}],
+    ]) {
+      const [status, text, cache] = await call(method, path, headers);
+      assert.equal(status, 401, `${method} ${path} ${JSON.stringify(headers)}`);
+      if (method !== 'HEAD') assert.equal(text, '{"ok":false,"why":"unpaired"}');
+      assert.equal(cache, 'no-store');
+    }
+    assert.deepEqual(reached, []);
+    // Hello and pair are open; with the token, so is the rest. Every answer says it is not to be kept.
+    assert.deepEqual(await call('GET', '/app/hello?x=1'), [200, '{"ok":true,"bot":"x","api":1}', 'no-store']);
+    assert.deepEqual(await call('POST', '/app/pair'), [400, '{"ok":false,"why":"none","left":0}', 'no-store']);
+    assert.deepEqual(await call('GET', '/app/state', { authorization: 'Bearer the-one-good-token' }), [200, '{"ok":true,"etag":"e1","state":{"gate":"2433"}}', 'no-store']);
+    assert.deepEqual(await call('POST', '/app/anything', { authorization: 'Bearer the-one-good-token' }), [200, '{"ok":true,"gate":"2433"}', 'no-store']);
+    assert.deepEqual(reached, [['state', { id: 'aaaaaaaa' }], ['ask', 'anything']]);
+    // What only looks like the app's door is the PC's, and gets the PC's answer.
+    for (const path of ['/APP/state', '/App/hello', '//app/state', '/apps/state', '/application']) {
+      const [status, text] = await call('GET', path, { authorization: 'Bearer the-one-good-token' });
+      assert.deepEqual([status, JSON.parse(text).why], [401, 'who are you? the PC must sign with its key (AGENT_PUBLIC_KEY) or send AGENT_TOKEN'], path);
+    }
+    assert.equal(reached.length, 2);
+  } finally { await new Promise(r => server.close(r)); }
+});
+
+test('odd paths and methods under /app/ find nothing, and change nothing', async () => {
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  await withServer(t, async ({ call, port }) => {
+    const nothing = { status: 404, json: { ok: false, why: 'no such thing here' } };
+    for (const [method, path] of [['GET', '/app'], ['GET', '/app/'], ['GET', '/app/state/'], ['GET', '/app/STATE'], ['GET', '/app/%73tate'], ['POST', '/app/state'], ['GET', '/app/pause'], ['POST', '/app/pause/'], ['POST', '/app/Pause'],
+      ['POST', '/app/once/remove/'], ['POST', '/app/__proto__'], ['POST', '/app/constructor'], ['POST', '/app/toString'], ['POST', '/app/hasOwnProperty'], ['PUT', '/app/pause'], ['DELETE', '/app/unpair'], ['POST', '/app/hello'], ['POST', '/app/pair/']]) {
+      assert.deepEqual(await call(method, path, { token: phone.token, ...(method === 'GET' || method === 'DELETE' ? {} : { body: { paused: true, all: true } }) }), nothing, `${method} ${path}`);
+    }
+    assert.deepEqual(await call('HEAD', '/app/state', { token: phone.token }), { status: 404, json: null });
+    assert.deepEqual(await call('HEAD', '/app/hello'), { status: 401, json: null });              // hello is open to GET, and to nothing else
+    // A request for something that is not there, with a body that is not JSON, is told about the body first.
+    assert.deepEqual(await call('POST', '/app/nothing', { token: phone.token, body: 'not json' }), { status: 400, json: { ok: false, why: 'The request body must be JSON.' } });
+    // Targets that fetch would tidy up, written as they are.
+    const first = out => out.split('\r\n')[0];
+    for (const target of ['/app/../agent/ping', '/app/../health', '/app/./state', '/app/state#x', '/app/state%00']) {
+      assert.equal(first((await raw(port, `GET ${target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`)).out), 'HTTP/1.1 401 Unauthorized', target);
+      assert.equal(first((await raw(port, `POST ${target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ${phone.token}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}`)).out), 'HTTP/1.1 404 Not Found', target);
+    }
+    // After all of it: nothing paused, nobody unlinked, nothing asked of the PC.
+    assert.deepEqual([t.app.state.paused, t.app.state.apps.length, ({}).paused], [false, 1, undefined]);
+    assert.deepEqual(await t.app.pingFromAgent(HOME), { ok: true });
+    // Unlinking is for the phone that asks, whatever else it sends.
+    const other = await linkPhone(t, 'iPad');
+    assert.deepEqual(await call('POST', '/app/unpair', { token: other.token, body: { all: true, id: phone.id } }), { status: 200, json: { ok: true } });
+    assert.deepEqual(t.app.state.apps.map(d => d.id), [phone.id]);
+  });
+});
+
+test('a waiting GET /app/state looks once a second and gives up after 25 seconds, whatever wait is asked for', async () => {
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  // The server's own interval and limit (nothing is passed in), with a timer that notes how long it was asked to wait and then does not.
+  const waits = [];
+  const quick = { appPollMs: undefined, appTimers: { setTimeout: (fn, ms) => { waits.push(ms); return setTimeout(fn, 0); }, clearTimeout } };
+  await withServer(t, async ({ get }) => {
+    const etag = (await get('/app/state', { token: phone.token })).json.etag;
+    assert.deepEqual((await get(`/app/state?have=${etag}&wait=9999`, { token: phone.token })).json, { ok: true, etag, same: true });
+    assert.deepEqual(waits, Array(25).fill(1000));                   // 25 looks a second apart, and then the answer
+    waits.length = 0;
+    await get(`/app/state?have=${etag}&wait=2.5`, { token: phone.token });
+    assert.deepEqual(waits, [1000, 1000, 500]);
+    waits.length = 0;
+    await get(`/app/state?have=${etag}`, { token: phone.token });
+    await get(`/app/state?have=not-this&wait=25`, { token: phone.token });
+    assert.deepEqual(waits, []);                                     // no wait asked for, or nothing to wait for: no timer at all
+  }, quick);
+});
+
+test('the server cuts off a request that never finishes arriving, and leaves a slow answer alone', async () => {
+  // Its own limits, as it runs on Railway.
+  const usual = createServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), token: AGENT });
+  assert.deepEqual([usual.requestTimeout, usual.headersTimeout], [30000, 15000]);
+  // The same with the times made short, so the test need not wait half a minute.
+  const t = makeBot();
+  const short = { requestTimeoutMs: 400, headersTimeoutMs: 250, checkEveryMs: 50, onPing: async () => { await sleep(900); return { sleep: true }; } };
+  await withServer(t, async ({ port, post, get }) => {
+    // A body that never ends (8 bytes of the 100 promised): the connection is closed, and nothing was answered as if it had arrived.
+    const half = await raw(port, 'POST /app/pair HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"code":', 5000);
+    assert.equal(half.closed, true, 'the connection was left open');
+    assert.ok(half.ms >= 300 && half.ms < 3000, `cut off after ${half.ms} ms`);
+    assert.ok(half.out === '' || half.out.startsWith('HTTP/1.1 408 '), half.out);
+    // Headers that never end: the same, sooner.
+    const headless = await raw(port, 'GET /app/state HTTP/1.1\r\nHost: x\r\n', 5000);
+    assert.equal(headless.closed, true);
+    assert.ok(headless.ms < 3000 && (headless.out === '' || headless.out.startsWith('HTTP/1.1 408 ')), `${headless.ms} ms ${headless.out}`);
+    // The same on the PC's door.
+    assert.equal((await raw(port, `POST /agent/ping HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ${AGENT}\r\nContent-Length: 50\r\n\r\n{"wait":`, 5000)).closed, true);
+    // An ANSWER may take longer than that: the PC's waiting ping (here 0.9 s, on Railway up to 50 s) comes back whole.
+    const began = Date.now();
+    assert.deepEqual(await post('/agent/ping', { wait: 1 }, { token: AGENT }), { status: 200, json: { ok: true, sleep: true } });
+    assert.ok(Date.now() - began >= 850);
+    // And so may a phone's wait for a change.
+    const phone = await linkPhone(t);
+    const etag = (await get('/app/state', { token: phone.token })).json.etag;
+    assert.deepEqual((await get(`/app/state?have=${etag}&wait=0.8`, { token: phone.token })).json, { ok: true, etag, same: true });
+  }, short);
+});
+
+test('a body over 4 KB is refused, and one far over it is dropped without an answer', async () => {
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  await withServer(t, async ({ port, post }) => {
+    const padded = bytes => JSON.stringify({ paused: false, p: 'x'.repeat(bytes - 23) });
+    assert.equal(Buffer.byteLength(padded(4096)), 4096);
+    assert.equal((await post('/app/pause', padded(4096), { token: phone.token })).status, 200);       // the limit itself is fine
+    assert.deepEqual(await post('/app/pause', padded(4097), { token: phone.token }), { status: 413, json: { ok: false, why: 'That request is too large.' } });
+    assert.deepEqual(await post('/app/pair', padded(5000)), { status: 413, json: { ok: false, why: 'That request is too large.' } });      // before anything is looked at, the code included
+    // 300 KB: the server stops listening part of the way through and says nothing.
+    const big = 'x'.repeat(300 * 1024);
+    const dropped = await raw(port, `POST /app/pause HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ${phone.token}\r\nContent-Length: ${big.length}\r\nConnection: close\r\n\r\n${big}`, 5000);
+    assert.deepEqual([dropped.closed, dropped.out], [true, '']);
+  });
+});
+
+// ---------- what is kept, again ----------
+
+test('what 2.8 saves is what 2.7 saved, with the phones and the notes beside it: 2.7 would read its own part as before', async () => {
+  const KNOWN_TO_27 = ['v', 'owner', 'plan', 'once', 'order', 'paused', 'results', 'sent', 'pics', 'lastSeen', 'lastRun', 'home'];
+  // One evening, with the app used for all it can do.
+  const t = makeBot(`${TUE}T21:50:00Z`, { env: WAKE, state: { plan: { tue: { start: 960, hours: 2 } } } });
+  const phone = await linkPhone(t);
+  await ask(t, phone, 'push', { token: PUSH_TOKEN });
+  await ask(t, phone, 'once', { date: '2026-11-25', start: 1140, hours: 2 });
+  await ask(t, phone, 'plan', { day: 'thu', start: 1140, hours: 1 });
+  await ask(t, phone, 'order', { order: [6, 5] });
+  await ask(t, phone, 'pause', { paused: true });
+  await ask(t, phone, 'pause', { paused: false });
+  await t.app.pingFromAgent(HOME);
+  t.clock.t = at(`${TUE}T21:55:05Z`);
+  t.app.jobsForAgent(HOME, { run: true });
+  await settle();
+  await t.app.progressFromAgent({ stage: 'ready' });
+  t.clock.t = at(`${TUE}T22:00:09Z`);
+  await t.app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 });
+  await t.app.handleUpdate(say(OWNER, '/menu'));
+  const saved = t.store.load();
+  // The keys 2.7 knows, in its order, then the two it has never heard of. Still version 4.
+  assert.deepEqual(Object.keys(saved), [...KNOWN_TO_27, 'apps', 'notes']);
+  assert.equal(saved.v, 4);
+  assert.ok(saved.apps.length === 1 && saved.notes.length === 2);
+  // Each of 2.7's fields is in the shape 2.7 wrote and reads.
+  assert.deepEqual(saved.plan, { tue: { start: 960, hours: 2 }, thu: { start: 1140, hours: 1 } });
+  assert.deepEqual(saved.once, [{ date: '2026-11-25', start: 1140, hours: 2 }]);
+  assert.deepEqual([saved.owner, saved.order, saved.paused], [OWNER, [6, 5, 1, 2, 3, 4], false]);
+  assert.deepEqual(saved.results, { '2026-11-24@16:00': { id: '2026-11-24@16:00', status: 'booked', date: '2026-11-24', start: 960, end: 1080, court: '3', gate: '2433', at: at(`${TUE}T22:00:09Z`) } });
+  assert.deepEqual(saved.sent, { [`ready:${at(`${TUE}T22:00:00Z`)}`]: at(`${TUE}T21:55:05Z`) });
+  assert.deepEqual([saved.lastSeen, saved.lastRun, saved.home], [at(`${TUE}T21:55:05Z`), at(`${TUE}T21:55:05Z`), { ip: HOME.ip, at: at(`${TUE}T21:55:05Z`) }]);
+  assert.deepEqual(Object.keys(saved.pics).sort(), ['booked', 'home-asleep', 'home-awake']);
+  // Read with or without the two new keys, 2.7's own fields come out the same: nothing of theirs depends on the new ones.
+  const whole = loadState(saved);
+  const stripped = loadState(Object.fromEntries(KNOWN_TO_27.map(k => [k, saved[k]])));
+  for (const k of KNOWN_TO_27) assert.deepEqual(whole[k], stripped[k], k);
+  for (const k of KNOWN_TO_27) assert.deepEqual(whole[k], saved[k], k);                      // and cleaning them changes nothing
+  assert.deepEqual([stripped.apps, stripped.notes], [[], []]);
+  // The same evening without the app at all leaves the same in those fields.
+  const u = makeBot(`${TUE}T21:50:00Z`, { env: WAKE, state: { plan: { tue: { start: 960, hours: 2 } } } });
+  await u.app.handleUpdate(say(OWNER, '/book 25 nov 19:00 2h'));
+  await u.app.handleUpdate(say(OWNER, '/set thu 19:00'));
+  await u.app.handleUpdate(say(OWNER, '/order 6 5'));
+  await u.app.handleUpdate(say(OWNER, '/pause'));
+  await u.app.handleUpdate(say(OWNER, '/resume'));
+  await u.app.pingFromAgent(HOME);
+  u.clock.t = at(`${TUE}T21:55:05Z`);
+  u.app.jobsForAgent(HOME, { run: true });
+  await settle();
+  await u.app.progressFromAgent({ stage: 'ready' });
+  u.clock.t = at(`${TUE}T22:00:09Z`);
+  await u.app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 });
+  await u.app.handleUpdate(say(OWNER, '/menu'));
+  const plain27 = u.store.load();
+  for (const k of KNOWN_TO_27) assert.deepEqual(saved[k], plain27[k], k);
+});
+
+test('names, titles and bodies are cut by character, never through the middle of an emoji', async () => {
+  const BALL = String.fromCodePoint(0x1F3BE);                                               // one character, two UTF-16 units
+  const halved = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert.equal(A.cut(`ab${BALL}cd`, 3), `ab${BALL}`);
+  assert.equal(A.cut(`ab${BALL}cd`, 2), 'ab');
+  assert.equal(A.cut(`${BALL}${BALL}${BALL}`, 2), `${BALL}${BALL}`);
+  assert.equal(A.cut(`a${BALL.slice(0, 1)}b${BALL.slice(1)}c`, 9), `a${String.fromCharCode(0xFFFD)}b${String.fromCharCode(0xFFFD)}c`);       // half an emoji that arrives on its own is made whole text
+  // A phone's name with the emoji just where the cut falls: forty characters, the emoji whole.
+  const t = makeBot();
+  const r = t.app.appPair({ code: await codeFrom(t), name: `${'x'.repeat(39)}${BALL} phone` });
+  await settle();
+  const kept = t.app.state.apps[0].name;
+  assert.equal(kept, `${'x'.repeat(39)}${BALL}`);
+  assert.deepEqual([Array.from(kept).length, halved.test(kept), r.body.device.name], [40, false, kept]);
+  assert.ok(!halved.test(t.tg.last().text));                                               // what Telegram is sent about it is whole too
+  assert.equal(A.cleanName(`${BALL.repeat(60)}`), BALL.repeat(40));
+  assert.equal(A.cleanName(`${'x'.repeat(39)} ${BALL}`), `${'x'.repeat(39)}`);              // and a cut never leaves a space on the end
+  // Notes: a title of 120 characters and a body of 600, however many units those are.
+  const n = A.makeNote('warn', `${'t'.repeat(119)}${BALL}${BALL}`, `${'b'.repeat(599)}${BALL}${BALL}`, 1);
+  assert.deepEqual([n.title, n.body], [`${'t'.repeat(119)}${BALL}`, `${'b'.repeat(599)}${BALL}`]);
+  // A reason from the PC that Telegram's own cut (300 units) leaves ending in half an emoji is whole in the note.
+  const phone = { device: t.app.appAuth(r.body.token) };
+  t.clock.t = at(`${TUE}T22:05:00Z`);
+  await t.app.resultFromAgent({ id: '2026-11-24@19:00', status: 'failed', why: `${'y'.repeat(299)}${BALL}`, end: 1260 });
+  const note = stateOf(t, phone).notes[0];
+  assert.ok(!halved.test(note.body) && note.body.includes('y'.repeat(299)));
+  const told = [];
+  JSON.stringify(stateOf(t, phone), (key, value) => { if (typeof value === 'string') told.push(value); return value; });
+  assert.ok(told.length > 20 && told.some(s => s.includes('y'.repeat(299))) && !told.some(s => halved.test(s)));      // nor is anything else the app is told
+  // And whatever a settings file holds is made whole and cut the same way on loading.
+  const loaded = loadState({ v: 4, apps: [{ id: 'a1b2c3d4', hash: 'a'.repeat(64), name: `${'x'.repeat(39)}${BALL}${BALL}` }, { id: 'b1b2c3d4', hash: 'b'.repeat(64), name: `half ${BALL.slice(0, 1)}` }],
+    notes: [{ id: 'aa11bb22cc', at: 1, kind: 'info', title: `${'t'.repeat(119)}${BALL}${BALL}`, body: `${'b'.repeat(600)}${BALL}` }] });
+  assert.deepEqual(loaded.apps.map(d => d.name), [`${'x'.repeat(39)}${BALL}`, `half ${String.fromCharCode(0xFFFD)}`]);
+  assert.deepEqual([loaded.notes[0].title, loaded.notes[0].body], [`${'t'.repeat(119)}${BALL}`, 'b'.repeat(600)]);
+});
+
+test('the code and the tokens: made by the system\'s own random source, and compared in constant time', async () => {
+  const realInt = crypto.randomInt, realEqual = crypto.timingSafeEqual;
+  let compared = 0;
+  try {
+    crypto.randomInt = (lo, hi) => { assert.deepEqual([lo, hi], [0, 1000000]); return 482913; };
+    assert.equal(A.createPairing().issue(0).code, '482913');                              // crypto.randomInt, and nothing weaker
+    crypto.randomInt = realInt;
+    crypto.timingSafeEqual = (a, b) => { compared++; return realEqual(a, b); };
+    const p = A.createPairing({ random: () => 7 });
+    p.issue(0);
+    p.check('000008', 1); p.check('000007', 1);
+    assert.equal(compared, 2);                                                            // each try at the code
+    const a = A.newToken(), b = A.newToken();
+    compared = 0;
+    assert.equal(A.findDevice([{ id: 'a', hash: a.hash }, { id: 'b', hash: b.hash }], b.token).id, 'b');
+    assert.equal(compared, 2);                                                            // every phone, not only up to the one that matches
+    compared = 0;
+    assert.equal(A.findDevice([{ id: 'a', hash: a.hash }, { id: 'b', hash: b.hash }], a.token).id, 'a');
+    assert.equal(compared, 2);
+  } finally { crypto.randomInt = realInt; crypto.timingSafeEqual = realEqual; }
 });

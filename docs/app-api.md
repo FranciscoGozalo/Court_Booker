@@ -26,25 +26,40 @@ CORS headers: the API is meant for the phone app, not for a page in a browser.
 - The bot keeps only the SHA-256 of each token (`state.apps`), compares in constant time, and notes
   when each phone was last heard from (at most once a minute). At most 5 phones. The tokens are not
   in the one-line `/backup`; without a Railway volume the links are lost when the bot restarts
-  (`state.kept` says which it is).
+  (`state.kept` says which it is). No token, code or push token is ever written in the bot's log.
+- A phone is linked for one Telegram chat: the bot's owner at that moment. If the bot later
+  answers to another chat (`TELEGRAM_CHAT_ID` is set or changed, or the settings file was another
+  chat's), a phone linked for the old one is unlinked when the bot starts, with a line in the log.
+  `/status` in Telegram says "Phones linked to the app: N" whenever N is not 0.
 - The app's door and the PC's are apart: a phone's token opens nothing under `/agent/`, and the
-  PC's key or `AGENT_TOKEN` opens nothing under `/app/`.
+  PC's key or `AGENT_TOKEN` opens nothing under `/app/`. The token is only taken from the
+  `Authorization` header, written `Bearer <token>`: not from the address, and not in any other form.
 - Pairing: the owner sends `/app` in Telegram and gets a 6-digit code, good for 10 minutes and for
   one use. Five wrong tries cancel it, and a new `/app` replaces it. `/app/pair` takes at most 10
-  tries in any 10 minutes, whoever they come from (`429 { ok: false, why: "slow" }`; tries that
-  are turned away are not counted). When a phone is linked the bot says so in Telegram.
-  `/app forget` in Telegram unlinks every phone and cancels a code that is waiting.
+  tries in any 10 minutes at a code that is waiting, whoever they come from (`429 { ok: false, why:
+  "slow" }`; tries that are turned away are not counted). A try while no code is waiting is
+  answered `none` or `expired` at once and counts for nothing, so nobody can keep the owner out by
+  asking. When a phone is linked the bot says so in Telegram. `/app forget` in Telegram unlinks
+  every phone and cancels a code that is waiting.
 
 Answers every request can get:
 
 | Status | Body | When |
 | --- | --- | --- |
 | 401 | `{ ok: false, why: "unpaired" }` | no token, a token the bot does not know, or a phone that has been unlinked |
-| 404 | `{ ok: false, why: "no such thing here" }` | a path or method the API does not have (asked by a linked phone) |
-| 413 | `{ ok: false, why: "That request is too large." }` | a body over 4 KB |
-| 400 | `{ ok: false, why: "The request body must be JSON." }` | a `POST` whose body is not JSON (an empty body counts as `{}`) |
+| 404 | `{ ok: false, why: "no such thing here" }` | a path or method the API does not have (asked by a linked phone; `HEAD` is such a method) |
+| 413 | `{ ok: false, why: "That request is too large." }` | a body over 4 KB. One far over it (more than 256 KB) is dropped without any answer: the connection is closed |
+| 400 | `{ ok: false, why: "The request body must be JSON." }` | a `POST` from a linked phone whose body is not JSON, whatever the path, one that does not exist included (an empty body counts as `{}`) |
 | 400 | `{ ok: false, why: "The request body must be a JSON object." }` | JSON that is not an object, where fields are needed |
 | 500 | `{ ok: false, why: "Something went wrong on my side. Try again." }` | a fault in the bot; it is in the bot's log |
+
+A request that does not finish arriving is cut off after about 15 seconds for its headers, or 30
+for the whole of it (the connection is closed). That is about sending a request, not about waiting
+for the answer: `GET /app/state` may wait its 25 seconds, and a look its 20.
+
+What the app cannot overdo (each is spelt out where it belongs below): 12 looks that need a fresh
+read in any minute, 60 one-off dates on the list, 4 waits open at once for one phone, and a hold
+only for a court that a look showed the app free in the last 15 minutes.
 
 ## Reading
 
@@ -54,15 +69,19 @@ Answers every request can get:
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
 
 - `code`: the six digits, as a string (spaces are ignored) or a number. `name`: what to call the
-  phone, up to 40 characters; without one it is `"iPhone"`.
+  phone, up to 40 characters (counted as characters, so an emoji is never cut in two); without one
+  it is `"iPhone"`.
 - `token`: 43 characters (32 random bytes, base64url). It is given this once and never again.
   `device.id`: 8 hex characters.
 - `wrong`: not the code that is waiting; `left` counts down 4, 3, 2, 1, 0, and at 0 the code is
   cancelled. Anything that is not the code is a wrong try, a body that cannot be read too.
-- `expired`: the code's ten minutes are over (`left: 0`). It stays "expired" until a new `/app`.
-- `none`: no code is waiting: none was asked for, it has been used, or it was cancelled (`left: 0`).
+- `expired`: the code's ten minutes are over (`left: 0`). It stays "expired" until a new `/app`,
+  or until the bot restarts: a code is kept in memory only, so after a restart the answer is `none`.
+- `none`: no code is waiting: none was asked for, it has been used, it was cancelled, or the bot
+  has restarted since (`left: 0`).
 - `full`: the code is right, but five phones are linked already. The code is not used up (`left`
   as it stood), so it works once a phone has been unlinked. Only someone with the code is told.
+- The same right code sent twice at once links one phone; the other is told `none`.
 
 `POST /app/unpair {}` → `{ ok: true }`: forgets the phone that asked. Its token is then no use.
 
@@ -74,6 +93,8 @@ current etag the answer waits up to `wait` seconds for a change and then, if the
 - `wait` may be a fraction; it is cut to 25. While it waits the bot looks about once a second, so
   a change is at most a second old when it arrives. Changes that only the clock brings (the PC
   falling silent, a day opening, midnight) end the wait like any other.
+- One phone may have four waits open at once. A fifth is not kept waiting: it is answered at once
+  with `{ ok: true, etag, state }`, though the state is the one it has.
 - Each phone has its own etag, because `devices[].me` differs.
 - Two things in the state move by themselves, and each ends a wait: `pc.seenAt`, every time the PC
   is heard from (about once a minute while it is awake, every few seconds while it holds a court),
@@ -253,13 +274,15 @@ look = { centre, date, at, by: "pc" | "bot", note, sheet,
 **`POST /app/once`** `{ date, start, hours }`. `hours` is 1 or 2. As `/book`, any start on the hour
 or half hour that ends by midnight is taken; `venue.first` and `venue.last` are the hours to offer.
 If that date and start are on the list already, nothing changes (not the hours either) and the
-answer has `already: true`.
+answer has `already: true`. The list holds 60 one-off dates at most, however they were asked for
+(`/book` in Telegram is refused in the same words).
 
 - 400 "A one-off booking needs a date (YYYY-MM-DD), a start in minutes after midnight, and hours (1 or 2)."
 - 400 "Slots start on the hour. Try a time like 19:00."
 - 400 "That slot runs past midnight. Try an earlier time."
 - 400 "Tue 10 Nov at 19:00 has already passed." (that day and time)
 - 400 "That is more than 90 days away. Try a nearer date."
+- 409 "Your list already has 60 one-off dates, which is as many as I keep. Remove one first."
 
 **`POST /app/once/remove`** `{ date, start }`. One that is not on the list is no error: the answer
 is the state as it is.
@@ -303,6 +326,14 @@ once a minute, or once in ten seconds with `fresh`. The request waits for the re
 two as a rule, 20 seconds at most when the PC does not answer. One look is asked of the PC at a
 time: a newer look for another day takes the place of one still waiting, which is then refused.
 
+The app, all linked phones together, may have the sheet read afresh 12 times in any minute. A look
+that needs a fresh read (by the PC or by the bot) is one of the 12 whether or not the read then
+works; a look answered from what the bot already knows is not counted. The 13th is refused until
+a minute after the first. Telegram's own looks are neither counted nor held back.
+
+What a look shows the app is remembered for 15 minutes, in memory only: a hold can only be asked
+for a court in a look's `slots` (see `POST /app/hold`).
+
 - `at`: when the sheet was read. `by`: `"pc"` (your PC read it) or `"bot"` (the bot could itself).
 - `slots`: the courts that can be booked now, by start time; `n` is the court's number, `name`
   Glasgow Club's name for it ("Tennis Hall Court 3"), and `price` is always null: the sheet
@@ -318,6 +349,7 @@ time: a newer look for another day takes the place of one still waiting, which i
 - 400 "A look needs a centre (g or s) and a date (YYYY-MM-DD)."
 - 400 "There is no such centre: send g for Gorbals or s for Scotstoun."
 - 400 "That day is no longer on offer. Pick again."
+- 409 "That is 12 looks at Glasgow Club's sheet within a minute, which is as many as I ask for. Wait a minute, then look again."
 - 409 "Your PC's nightly booking run is at 22:00, so I am asking nothing else of it until 22:10."
 - 409 "Glasgow Club's site turns this server away, so your PC reads the free courts for me, and your PC is not awake. Wake it and try again, or open the sheet."
 - 409 "Your PC did not answer in time, so I could not read Glasgow Club's free courts."
@@ -331,9 +363,17 @@ time: a newer look for another day takes the place of one still waiting, which i
 court in the basket and stops at the payment page; paying is the owner's. The answer's `state.hold`
 is the new hold, at stage `"asked"`. The guards are the Hold button's own.
 
+Telegram only offers Hold under a court that a sheet showed free. The app's equal: the centre,
+date, start and court must be ones that a `POST /app/indoor/look` answered to the app (any linked
+phone) in the last 15 minutes showed in its `slots`. What was shown is kept in memory only, so
+after a restart of the bot the app must look again. `indoor.holdNo` does not cover this (it cannot
+know which court will be asked for). The checks come in this order: the shape of the request, then
+whether that time is on offer at all, then this, then the guards.
+
 - 400 "A hold needs a centre (g or s), a date (YYYY-MM-DD), a start in minutes after midnight, and a court number."
 - 400 "There is no such centre: send g for Gorbals or s for Scotstoun."
 - 400 "That time is no longer on offer. Pick again." (a time that has passed, a day not among the nine, a court not from 1 to 20, a start that is not a five-minute step)
+- 409 "That list is old. Read the day again, then hold a court." (no look in the last 15 minutes showed the app that court free then)
 - 409, one of the `indoor.holdNo` sentences:
   - "Your PC is already holding a court."
   - "Your PC is not awake, and it is your PC that signs in to Glasgow Club and holds the court. Wake it and try again."
@@ -346,12 +386,13 @@ is the new hold, at stage `"asked"`. The guards are the Hold button's own.
 `done` is I have paid. It works on a hold started from either side, as Telegram's buttons do. The
 PC hears of it within a few seconds; until then `can.release` and `can.done` are false and the
 hold's `lines` say what is being done. A `release` before the PC has collected the hold ends it
-there and then (`ended: "stopped"`).
+there and then (`ended: "stopped"`). A `done` before the court is in the basket is refused and
+changes nothing, whether or not the PC has collected the hold yet: it never stops a hold.
 
 - 400 "To act on a hold, send its id and what to do: release or done."
 - 409 "I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up."
 - 409 "That hold is over."
-- 409 "It is not in your basket yet." (`done` before stage `"held"`)
+- 409 "It is not in your basket yet." (`done` at any stage before `"held"`)
 - 409 "Already letting it go." or "Already checking."
 
 **`POST /app/push`** `{ token }`. An Expo push token (`ExponentPushToken[…]` or `ExpoPushToken[…]`),
@@ -364,17 +405,28 @@ or null to stop. A token is kept for one phone only: given by a second, it moves
 Whatever the bot tells the owner unprompted in Telegram (a court booked or not, trouble before a
 booking, the PC not answering, how a hold ended) is also kept as a note, the last 30, and sent as a
 notification to every linked phone that gave a push token (Expo's push service), best effort: a
-failed push never delays or fails the Telegram message. A note is made once the Telegram message
-has gone (for a hold started from the app, which has no card, when it ends).
+failed push never delays or fails the Telegram message.
+
+When a note is made, next to its Telegram message:
+
+- A result, a warning, trouble before a booking and the heads-up: after Telegram has taken the
+  message. If Telegram does not take it there is no note either, until it does (the PC sends a
+  result again; a warning is tried again).
+- "Your PC stayed awake" and a hold's ending: at the moment the bot sends the message or redraws
+  the card, whether or not Telegram takes it. (A hold's card is tried again; that message is not.)
+  A hold started from the app has no card: its note is all there is.
 
 `id` is 10 hex characters. `title` (up to 120 characters) and `body` (up to 600) are one line each.
+They are cut by character, never through the middle of an emoji, and half an emoji left by a cut
+made upstream (a reason from the PC, cut at 300 units for Telegram) arrives as U+FFFD. The same
+goes for every sentence in the state.
 
 | `kind` | When | `title` | `body` |
 | --- | --- | --- | --- |
 | `booked` | the PC booked a court | "Court 3 booked" | "Thu 26 Nov · 19:00–21:00 · gate 2433" (or "… · gate code not shown") |
 | `missed` | it could not | "Not booked" | "Tue 24 Nov · 19:00–21:00. No court was free for the whole slot." or "… It did not work: <reason>." |
 | `warn` | trouble before a booking | "Trouble before the booking" | "<reason>. Your PC is trying again (attempt 2 of 3)." |
-| `warn` | 20 minutes before, the PC does not answer | "Your PC is not answering" | "I sent it a wake-up at 21:40, ahead of tonight's booking, and it has not replied. Booking opens at 22:00 for Tue 24 Nov · 16:00–18:00." (with no way to wake it: "It has not been in touch for over a day. Booking opens …") |
+| `warn` | 20 minutes before, the PC does not answer | "Your PC is not answering" | "I sent it a wake-up at 21:40, ahead of tonight's booking, and it has not replied. Booking opens at 22:00 for Tue 24 Nov · 16:00–18:00." With no way to wake it from the bot: "It has not been in touch for over a day. Booking opens …", or, if the PC has never been in touch at all, "It has not been in touch yet. Booking opens …" |
 | `warn` | 2 minutes before, the run has not started | "The booking run has not started" or "Your PC has not checked in" | the two lines of Telegram's warning |
 | `warn` | 8 minutes after, no result | "No word from your PC" | "It started on Tue 24 Nov · 16:00–18:00 but has not said how it went. Check ClubSpark, and book by hand if it is not there." |
 | `hold` | a hold ended, whoever started it | "Hold ended · Gorbals court 3", or "Booked · Gorbals court 3" | "Fri 20 Nov · 18:00–19:00. " and then the hold's last `lines` |
@@ -383,4 +435,18 @@ has gone (for a hold started from the app, which has no card, when it ends).
 
 The notification is the note's `title` and `body`, with the default sound. Each goes to Expo
 (`POST https://exp.host/--/api/v2/push/send`) once, with a 5 second limit; what goes wrong is said
-in the bot's log and nowhere else.
+in the bot's log and nowhere else, with anything shaped like a push token masked first. When Expo
+answers that a token is not registered any more (`DeviceNotRegistered`), the bot forgets that
+phone's push token: the phone stays linked, and gets notifications again once the app sends
+`POST /app/push` with a token. A phone that has been unlinked is sent nothing.
+
+## Known limits
+
+- A restart of the bot during a hold loses the bot's handle on it: `state.hold` is null
+  afterwards, `hold/order` answers "I am no longer following that hold…", and the one-at-a-time
+  and six-an-hour counts start again. The PC still lets the court go by itself when its time is up.
+  What looks showed the app, a waiting pairing code and the run's stage are lost with a restart too.
+- A phone's token does not expire. It stops working when the phone unlinks itself, when
+  `/app forget` is sent, or when the bot comes to answer to another chat.
+- Telegram can only unlink every phone at once (`/app forget`). One phone can only be unlinked
+  from that phone (`POST /app/unpair`).

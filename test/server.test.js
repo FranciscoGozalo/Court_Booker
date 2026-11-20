@@ -177,3 +177,27 @@ test('a note about a hold needs the token, and its answer carries your order bac
     assert.deepEqual(await (await fetch(`${base}/agent/hold`, { method: 'POST', headers: auth, body: '{}' })).json(), { ok: true });
   });
 });
+
+test('a request that never finishes arriving is cut off, while an answer may take its time', async () => {
+  const net = require('node:net');
+  // As it runs: 15 seconds for a request's headers, 30 for the whole of it.
+  const usual = createServer({ token: TOKEN, getJobs: () => ({}), onResult: async () => ({ ok: true }) });
+  assert.deepEqual([usual.headersTimeout, usual.requestTimeout], [15000, 30000]);
+  // The same with the times made short, and a ping whose answer takes longer than either.
+  const slowPing = async () => { await new Promise(r => setTimeout(r, 700)); return { sleep: true }; };
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onPing: slowPing, requestTimeoutMs: 300, headersTimeoutMs: 200, checkEveryMs: 50 }, async base => {
+    const port = Number(new URL(base).port);
+    // The PC's ping with the start of its body and never the rest: the connection is closed on it.
+    const closedAfter = await new Promise(resolve => {
+      const began = Date.now(), s = net.connect(port, '127.0.0.1');
+      s.on('error', () => {});
+      s.on('close', () => resolve(Date.now() - began));
+      s.on('connect', () => s.write(`POST /agent/ping HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ${TOKEN}\r\nContent-Length: 50\r\n\r\n{"wait":`));
+      setTimeout(() => { resolve(null); s.destroy(); }, 4000).unref();
+    });
+    assert.ok(closedAfter !== null && closedAfter >= 250 && closedAfter < 3000, `closed after ${closedAfter} ms`);
+    // The same ping sent whole: its answer, 0.7 s in the making (up to 50 s on the PC's waiting ping), comes back.
+    const res = await fetch(`${base}/agent/ping`, { method: 'POST', headers: auth, body: JSON.stringify({ wait: 1 }) });
+    assert.deepEqual([res.status, await res.json()], [200, { ok: true, sleep: true }]);
+  });
+});
