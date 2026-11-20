@@ -1,6 +1,17 @@
 'use strict';
 // Stand-ins for Telegram, storage and the clock, so a whole release night can be replayed in a test.
 
+// The bot's own timers never hold its process open: a look asked of the PC runs out on a timer that is unref'd
+// (app.js, askPc). In a test that waits for one of those, nothing else is going on, and Node 22 (what Railway
+// runs) then ends the test file with that test, and every test after it, still waiting ("cancelled"); newer
+// Nodes wait. So while a test file runs, one idle timer holds it open. Only in a test file: other users of these
+// stand-ins (the app's local copy of the bot) are left alone.
+if (process.env.NODE_TEST_CONTEXT || /\.test\.js$/.test((require.main && require.main.filename) || '')) {
+  const { after } = require('node:test');
+  const awake = setInterval(() => {}, 60 * 60 * 1000);
+  after(() => clearInterval(awake));
+}
+
 const at = s => Date.parse(s);
 
 // A picture arrives either as a file ({ buf, name }) or as the id Telegram gave it earlier.
