@@ -1209,10 +1209,13 @@ phone's push token: the phone stays linked, and gets notifications again once th
   and only the app and the PC have that key.
 - With automatic payments on, your PC pays at midnight for the Glasgow Club bookings the bot hands it,
   if the app signed them (2.10.1). A bot that is not what it should be can hand it only those: one
-  you have since switched off or removed, too (a signature stays good while the card's pay key does:
-  forget the card, or switch automatic payments off, to stop them all), at its midnight or, for a
-  one-off, once its day is open; each booking once at most, at most `GLASGOW_AUTO_PAY_MAX` (£30), and
+  you have since switched off or removed, too (a signature stays good while the card's pay key does),
+  at its midnight or, for a one-off, once its day is open; each booking once at most, at most `GLASGOW_AUTO_PAY_MAX` (£30), and
   within the PC's daily limit (`GLASGOW_PAY_PER_DAY`, 2). It can also keep one from the PC.
+  To stop them all, do it on the PC itself, where no bot can come between: set `GLASGOW_PAY_PER_DAY=0`
+  in its `.env` (no automatic payment at all), or delete `vaultauto.json` (the kept security code).
+  Forgetting the card, or switching automatic payments off in the app, works too when the bot is
+  what it should be, but both orders travel through it.
 - A bot that is not what it should be can still start holds, drop or delay what the app sends, or
   ask the PC to forget its card: nuisances, not payments.
 - A restart of the bot loses `pc.cardKey` and `card` until the PC's next ping (within a minute while
