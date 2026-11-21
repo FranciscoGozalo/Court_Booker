@@ -19,7 +19,8 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.10.3 (`api: 3`; 2.10.3 changed no field's shape: a Glasgow Club court
+This file describes the API as built in version 2.10.4 (`api: 3`; 2.10.4 added `ref` to each note, the result it is about, and the
+same as `data.ref` on its notification (see "Notes and notifications"); 2.10.3 changed no field's shape: a Glasgow Club court
 held and paid for now also shows in `results`, a hold's `pay` order may ask your PC to use the security code it keeps (see
 "The sealed box"), and many sentences are shorter: `pc.line`, the hold's `lines`, a look's `note`, and the `why` of many
 refusals; 2.10.1 added signed bookings: `auth` on the requests that
@@ -170,7 +171,7 @@ state = {
                         { key: "o", name: "Scotstoun", site, label: "Scotstoun outdoor", type: "outdoor" } ] },
   card:    null | { brand, last4, expMonth, expYear, tag, pending, forgetting, why, auto, autoAsked, autoWhy },   // the card your PC keeps, for Pay and automatic payments
   hold:    null | hold,
-  notes:   [ { id, at, kind: "booked" | "missed" | "warn" | "hold" | "info", title, body } ],   // newest first, the last 30
+  notes:   [ { id, at, kind: "booked" | "missed" | "warn" | "hold" | "info", title, body, ref } ],   // newest first, the last 30; ref (2.10.4): the result it is about, or null
   devices: [ { id, name, at, seenAt, me } ],
 }
 
@@ -1189,6 +1190,13 @@ When a note is made, next to its Telegram message:
   A hold started from the app has no card: its note is all there is.
 
 `id` is 10 hex characters. `title` (up to 120 characters) and `body` (up to 600) are one line each.
+`ref` (2.10.4): the result the note is about, its id as in `results` (`"2026-11-24@16:00"`,
+`"scotstoun/2026-11-25@18:00"`), so the app can open that court when the note is tapped (or, for a
+`missed` one, that date); null for every other note, and for notes kept by a bot before 2.10.4. It is set on
+`booked` and `missed` notes, and on a `hold` note when the hold ended booked. The note's notification
+carries the same as `data: { ref }` (only when there is one), for the app to open when the
+notification is tapped. The result may be gone by then (results are kept 60 days): the app then opens
+nothing in particular.
 They are cut by character, never through the middle of an emoji, and half an emoji left by a cut
 made upstream (a reason from the PC, cut at 300 units for Telegram) arrives as U+FFFD. The same
 goes for every sentence in the state.
