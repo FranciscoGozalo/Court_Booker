@@ -28,7 +28,7 @@ const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 
-const VERSION = '2.10.3';
+const VERSION = '2.10.4';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -238,14 +238,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // nothing here can throw. A push token is never written in the log. A phone whose token the
   // push service no longer knows stays linked, but gets no more notifications until the app
   // gives a token again.
-  function note(kind, title, body) {
+  // `ref` (2.10.4): the result the note is about, so the app opens that court when it, or its notification, is tapped.
+  function note(kind, title, body, ref = null) {
     try {
-      const n = A.makeNote(kind, title, body, now());
+      const n = A.makeNote(kind, title, body, now(), ref);
       state.notes = [n, ...state.notes].slice(0, A.NOTES_KEEP);
       save();
       const tokens = [...new Set(state.apps.map(d => d.push).filter(Boolean))];
       if (tokens.length) {
-        Promise.resolve().then(() => pushOut(tokens, { title: n.title, body: n.body }))
+        Promise.resolve().then(() => pushOut(tokens, n.ref ? { title: n.title, body: n.body, data: { ref: n.ref } } : { title: n.title, body: n.body }))
           .then(told => {
             const gone = told && Array.isArray(told.unregistered) ? told.unregistered : [];
             const phones = state.apps.filter(d => d.push && gone.includes(d.push));
@@ -599,8 +600,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   function holdEnded(h) {
     try {
       const [, ...lines] = UI.indoorHold(ctx(), h).caption.split('\n').map(A.plain);
-      note('hold', `${h.end === 'booked' ? 'Booked' : 'Hold ended'} · ${G.CENTRES[h.key].label} court ${h.court}`,
-        `${label(civilOf(h.date))} · ${hhmm(h.start)}–${hhmm(h.start + 60)}. ${lines.join(' ')}`);
+      // Booked, it is a booking (holdBooked): the note opens it.
+      const centre = G.CENTRES[h.key];
+      note('hold', `${h.end === 'booked' ? 'Booked' : 'Hold ended'} · ${centre.label} court ${h.court}`,
+        `${label(civilOf(h.date))} · ${hhmm(h.start)}–${hhmm(h.start + 60)}. ${lines.join(' ')}`, h.end === 'booked' ? V.resultId(centre.venue, h.date, h.start) : null);
     } catch (e) {
       log(`Could not keep a note about the hold: ${e.message}`);
     }
@@ -875,8 +878,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     // The same words as a note for the app, which has no hold to show them on either.
     const [, ...lines] = scr.caption.split('\n').map(A.plain);
     const where = s.court ? `${G.CENTRES[s.court.key].label} court ${s.court.court}` : 'a court your PC was holding';
+    const booked = ending && stage === 'booked' && s.court ? V.resultId(G.CENTRES[s.court.key].venue, s.court.date, s.court.start) : null;
     note('hold', `${ending ? (stage === 'booked' ? 'Booked' : 'Hold ended') : couldNot ? 'Not paid by your PC' : 'Paying'} · ${where}`,
-      `${s.court ? `${label(civilOf(s.court.date))} · ${hhmm(s.court.start)}–${hhmm(s.court.start + 60)}. ` : ''}${lines.join(' ')}`);
+      `${s.court ? `${label(civilOf(s.court.date))} · ${hhmm(s.court.start)}–${hhmm(s.court.start + 60)}. ` : ''}${lines.join(' ')}`, booked);
     const chat = owner();
     if (chat !== null) postNote(id, chat, scr, t);
   }
@@ -1901,8 +1905,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (!same && chat !== null) {                     // what the card said, as a note for the app
       const after = V.clubOf(r.venue) ? (r.paid === true ? `paid ${r.price || ''}`.trim() : r.paid === 'maybe' ? 'Pay was pressed' : 'not paid')
         : r.gate ? `gate ${r.gate}` : 'gate code not shown';
-      if (r.status === 'booked') note('booked', `Court ${r.court} booked`, `${M.slotOf(r)} · ${after}`);
-      else note('missed', 'Not booked', `${M.slotOf(r)}. ${A.plain(M.failedWhy(r))}`);
+      if (r.status === 'booked') note('booked', `Court ${r.court} booked`, `${M.slotOf(r)} · ${after}`, r.id);
+      else note('missed', 'Not booked', `${M.slotOf(r)}. ${A.plain(M.failedWhy(r))}`, r.id);
     }
     return { ok: true };
   }
@@ -2372,7 +2376,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       },
       card: cardView(),
       hold: holdView(x),
-      notes: state.notes.map(n => ({ id: n.id, at: n.at, kind: n.kind, title: n.title, body: n.body })),
+      notes: state.notes.map(n => ({ id: n.id, at: n.at, kind: n.kind, title: n.title, body: n.body, ref: n.ref ?? null })),
       devices: state.apps.map(d => ({ id: d.id, name: d.name, at: d.at, seenAt: d.seenAt, me: d.id === meId })),
     };
   }

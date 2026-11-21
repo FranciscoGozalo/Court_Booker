@@ -263,7 +263,9 @@ test('a hold paid for and booked is kept as a booking, under the midnight run\'s
   assert.deepEqual(t.tg.calls.map(c => [c.method, c.id]), [['caption', 7]]);
   assert.equal(t.app.state.notes.length, notes + 1);
   assert.equal(t.app.state.notes[0].title, 'Booked · Gorbals court 3');
+  assert.equal(t.app.state.notes[0].ref, GORBALS_FRI);                                         // tapped, the app opens the booking (2.10.4)
   assert.equal(t.pushes.length, pushes + 1);
+  assert.deepEqual(t.pushes.at(-1).data, { ref: GORBALS_FRI });
   // The app's results show it as any other booking at Glasgow Club.
   const shown = t.app.appState(phone).state.results.find(r => r.id === GORBALS_FRI);
   assert.deepEqual({ ...shown, at: 0 }, {

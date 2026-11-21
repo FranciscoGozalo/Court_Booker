@@ -283,7 +283,7 @@ test('settings saved before the app existed load as they were, and the state ver
   const { hash } = A.newToken();
   const linked = loadState({ ...old, apps: [{ id: 'a1b2c3d4', name: 'iPhone', hash, at: 1, seenAt: 2, push: PUSH_TOKEN, owner: OWNER }], notes: [{ id: 'aa11bb22cc', at: 9, kind: 'booked', title: 'Court 3 booked', body: 'x' }] });
   assert.deepEqual(linked.apps, [{ id: 'a1b2c3d4', name: 'iPhone', hash, at: 1, seenAt: 2, push: PUSH_TOKEN, owner: OWNER }]);
-  assert.deepEqual(linked.notes, [{ id: 'aa11bb22cc', at: 9, kind: 'booked', title: 'Court 3 booked', body: 'x' }]);
+  assert.deepEqual(linked.notes, [{ id: 'aa11bb22cc', at: 9, kind: 'booked', title: 'Court 3 booked', body: 'x', ref: null }]);       // kept before 2.10.4: about nothing in particular
   assert.deepEqual(Object.keys(JSON.parse(backupLine(linked))).sort(), ['once', 'onceAway', 'order', 'owner', 'plan', 'v', 'weekly']);
   assert.equal(JSON.parse(backupLine(linked)).v, 4);
   assert.ok(!backupLine(linked).includes(hash));
@@ -320,8 +320,11 @@ test('whatever is in the saved file for the phones and the notes is made safe to
     note(9, { title: 'T'.repeat(500), body: 'B'.repeat(5000), extra: { deep: true } }),
   ] }).notes;
   assert.deepEqual(notes.map(n => n.at), [9, 3, 2, 1]);
-  assert.deepEqual([notes[0].title.length, notes[0].body.length, Object.keys(notes[0])], [120, 600, ['id', 'at', 'kind', 'title', 'body']]);
+  assert.deepEqual([notes[0].title.length, notes[0].body.length, Object.keys(notes[0])], [120, 600, ['id', 'at', 'kind', 'title', 'body', 'ref']]);
   assert.equal(notes[1].title, 't3');
+  // What a note is about (2.10.4): a result's id, or nothing; anything else is dropped.
+  const refs = loadState({ v: 4, notes: [note(1, { ref: '2026-11-24@16:00' }), note(2, { ref: 'scotstoun/2026-11-25@18:00' }), note(3, { ref: '../x' }), note(4, { ref: 7 })] }).notes;
+  assert.deepEqual(refs.map(n => n.ref), [null, null, 'scotstoun/2026-11-25@18:00', '2026-11-24@16:00']);
   assert.equal(loadState({ v: 4, notes: Array.from({ length: 80 }, (_, i) => note(i + 1)) }).notes.length, 30);
   assert.equal(loadState({ v: 4, notes: Array.from({ length: 80 }, (_, i) => note(i + 1)) }).notes[0].at, 80);
 });
@@ -400,7 +403,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.10.3', api: 3 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.10.4', api: 3 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -657,7 +660,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.10.3',
+    bot: '2.10.4',
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
     venues: venuesOn(TUE),
     // Nothing stands in the way of a look or Book now at a park: the PC is awake, and it is midday.
@@ -712,7 +715,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
     },
     card: null,
     hold: null,
-    notes: [{ id: 'aa11bb22cc', at: at('2026-11-12T22:00:10Z'), kind: 'booked', title: 'Court 3 booked', body: 'Thu 19 Nov · 19:00–20:00 · gate 2433' }],
+    notes: [{ id: 'aa11bb22cc', at: at('2026-11-12T22:00:10Z'), kind: 'booked', title: 'Court 3 booked', body: 'Thu 19 Nov · 19:00–20:00 · gate 2433', ref: null }],
     devices: [
       { id: phone.id, name: 'Francisco\'s iPhone', at: at(NOON), seenAt: at(NOON), me: true },
       { id: other.id, name: 'iPad', at: at(NOON), seenAt: at(NOON), me: false },
@@ -1580,9 +1583,10 @@ test('a court booked, or not, is a note and a notification, in the card\'s own f
   let notes = stateOf(t, b).notes;
   assert.deepEqual(notes.map(n => [n.kind, n.title, n.body, n.at]), [['booked', 'Court 3 booked', 'Tue 24 Nov · 16:00–18:00 · gate 2433', at(`${TUE}T22:00:10Z`)]]);
   assert.match(notes[0].id, /^[0-9a-f]{10}$/);
-  assert.deepEqual(Object.keys(notes[0]), ['id', 'at', 'kind', 'title', 'body']);
-  // One notification, to every phone that gave a token (and not to the one that did not).
-  assert.deepEqual(t.pushes, [{ tokens: [PUSH_TOKEN, 'ExpoPushToken[second-phone]'], title: 'Court 3 booked', body: 'Tue 24 Nov · 16:00–18:00 · gate 2433' }]);
+  assert.deepEqual(Object.keys(notes[0]), ['id', 'at', 'kind', 'title', 'body', 'ref']);
+  assert.equal(notes[0].ref, '2026-11-24@16:00');                     // tapped, the app opens that court (2.10.4)
+  // One notification, to every phone that gave a token (and not to the one that did not), carrying the court it is about.
+  assert.deepEqual(t.pushes, [{ tokens: [PUSH_TOKEN, 'ExpoPushToken[second-phone]'], title: 'Court 3 booked', body: 'Tue 24 Nov · 16:00–18:00 · gate 2433', data: { ref: '2026-11-24@16:00' } }]);
   // The same result again (the PC retrying) is neither said nor noted twice.
   await t.app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 });
   await settle();
@@ -1603,6 +1607,7 @@ test('a court booked, or not, is a note and a notification, in the card\'s own f
     ['booked', 'Court 3 booked', 'Tue 24 Nov · 16:00–18:00 · gate 2433'],
   ]);
   assert.deepEqual(t.pushes.map(p => p.title), ['Court 3 booked', 'Court 4 booked', 'Not booked', 'Not booked']);
+  assert.deepEqual(notes.map(n => n.ref), ['2026-11-24@20:00', '2026-11-24@19:00', '2026-11-25@19:00', '2026-11-24@16:00']);   // a miss opens its date
   assert.deepEqual(t.store.load().notes, t.app.state.notes);
   // A result Telegram would not take is not recorded, and not noted: the PC sends it again.
   t.tg.failSend = 1;
