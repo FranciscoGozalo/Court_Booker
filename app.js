@@ -825,11 +825,19 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // code sealed for your PC. Taken only as payNo allows, and only for the price your PC read
   // (for two courts, the total: 2.11). The order then waits for the PC's next note (a few
   // seconds), PAY_ORDER_MS at most.
-  function holdPay(id, amount, sealed) {
+  // `courts` (2.11): the courts the app says, in plain, that it sealed the code for. For a hold of
+  // two it must be exactly the hold's: an app older than 2.11 sends none, and seals its box for one
+  // court, which your PC would refuse, and the hold's one Pay would be spent for every phone. So it is
+  // refused here, before anything is spent. A hold of one takes Pay as it always did, whatever is said.
+  function holdPay(id, amount, sealed, courts = null) {
     const t = now(), h = hold;
     if (!h || h.id !== id) return { toast: 'No longer following that hold. Your PC lets it go when its time is up.' };
     const no = payNo(h, t);
     if (no) return { toast: no };
+    if (h.courts.length > 1 && !sameCourts(courts, h.courts)) {
+      log(`Hold: an order to pay for ${holdName(h)} named ${courts ? M.courtWordsIn({ court: courts[0], courts }) : 'no courts'}: refused, from an app not updated for two courts.`);
+      return { toast: 'Update the app to pay for two courts here.' };
+    }
     if (amount !== h.price) return { toast: `The price is ${h.price}, not ${amount}. Check it before you pay.` };
     h.payState = 'asked';
     h.payAmount = amount;
@@ -2357,8 +2365,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // The hold being followed, or the last one, as the app sees it: the card's own words, and
   // which of its buttons Telegram would show now; and whether Pay from the app would be taken
   // now (payNo, the very check an order to pay goes through). Null if there has been none since the start.
-  // Two courts (2.11): `courts` and `courtNames` all of them, `court` and `courtName` the first
-  // (for an older app), `price` the total and `prices` each court's (null when not read).
+  // Two courts (2.11): `courts` and `courtNames` all of them, `court` the first (for an older app)
+  // and `courtName` "Courts 3 & 4", `price` the total and `prices` each court's (null when not read).
   function holdView(x) {
     const h = hold;
     if (!h) return null;
@@ -2368,7 +2376,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const keys = scr.keyboard.inline_keyboard.flat().map(b => b.callback_data);
     return {
       id: h.id, startedBy: h.by, centre: h.key, centreName: centre.label, date: h.date, start: h.start, end: h.start + 60,
-      court: h.court, courtName: `Court ${h.court}`, courts: h.courts.slice(), courtNames: h.courts.map(n => `Court ${n}`),
+      // `courtName` names both for a hold of two ("Courts 3 & 4"), so an app older than 2.11 never shows one court at the total.
+      court: h.court, courtName: M.courtWords(h), courts: h.courts.slice(), courtNames: h.courts.map(n => `Court ${n}`),
       stage: h.stage, live: !h.end, ended: h.end,
       price: h.price || null, prices: h.prices ? h.prices.slice() : null, until: h.until, heardAt: h.heard, title, lines,
       can: { release: keys.includes(`gx:${h.id}`), done: keys.includes(`gp:${h.id}`), pay: payNo(h, x.now) === null },
@@ -2576,7 +2585,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         return r.no ? no(409, r.no.say || r.no.toast) : done();
       }
       case 'hold/order': {
-        const r = v.what === 'pay' ? holdPay(v.id, v.amount, v.sealed) : holdOrder(v.id, v.what);
+        const r = v.what === 'pay' ? holdPay(v.id, v.amount, v.sealed, v.courts || null) : holdOrder(v.id, v.what);
         return r.ok ? done() : no(409, r.toast);
       }
       case 'card': {

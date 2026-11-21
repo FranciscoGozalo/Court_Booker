@@ -180,7 +180,7 @@ state = {
 }
 
 hold = { id, startedBy: "app" | "telegram", centre, centreName, date, start, end, court, courtName,
-         courts: [3] | [3, 4], courtNames: ["Court 3", …],                  // 2.11: every court held; court and courtName the first
+         courts: [3] | [3, 4], courtNames: ["Court 3", …],                  // 2.11: every court held; court the first, courtName "Courts 3 & 4" for two
          stage, live, ended: null | "released" | "booked" | …, price, prices, until, heardAt,   // price: the total; prices (2.11): each court's, or null
          title, lines: [ … ],                // the Telegram card's own words, without markup
          can: { release, done, pay },
@@ -485,8 +485,9 @@ time, whoever started it.
   hour held (`end` is `start` + 60). `court`: its number; `courtName`: "Court 3".
 - `courts` (2.11): every court of the hold, lowest first: `[3]`, or `[3, 4]` for two at once (asked
   for with `POST /app/hold`; Telegram's Hold button holds one). `courtNames`: "Court 3", "Court 4", in
-  the same order. `court` and `courtName` stay the first of them, for an app older than 2.11. A hold
-  of two is one hold: one at a time, both into the one basket, one payment, and it ends as one.
+  the same order. `court` stays the first of them, for an app older than 2.11; `courtName` names
+  both for a hold of two ("Courts 3 & 4"), so that such an app never shows one court at the total.
+  A hold of two is one hold: one at a time, both into the one basket, one payment, and it ends as one.
 - `stage`: how far it has got: `"asked"` → `"signing-in"` → `"signed-in"` → `"adding"` → `"held"`
   (in the basket) → `"paying"` (your PC took up Pay from the app: it is typing in the card and
   pressing Pay, or waiting for the answer) → `"approve"` (your bank wants you to approve the
@@ -522,8 +523,9 @@ time, whoever started it.
   (only once the court is in the basket). Both are false once one has been asked, once Pay has been
   asked for (while the order is on its way and while the PC pays), and once it is over.
 - `can.pay`: `POST /app/hold/order` with `what: "pay"` and the right amount would be taken now:
-  the same check, so it is false exactly when that request would be refused (but for the amount),
-  and the refusal's sentence says why. Telegram has no Pay button. For two courts (2.11) it is also
+  the same check, so it is false exactly when that request would be refused (but for the amount,
+  and, for two courts, the `courts` the request names), and the refusal's sentence says why.
+  Telegram has no Pay button. For two courts (2.11) it is also
   false until your PC's note from the basket names both (its `courts`): a PC whose booker is older
   than 2.11 holds the first court alone, and says only that one. The lines then say "Can’t pay here:
   your PC didn’t say both courts are in your basket."
@@ -593,7 +595,7 @@ is fine, and things as they stand refuse it (the same request may work later).
 | `POST /app/pc/wake` | Wake my PC | `{}` |
 | `POST /app/indoor/look` | free courts at Glasgow Club for a day | `{ centre: "g" | "s" | "o", date, fresh }` → `{ ok: true, look }` |
 | `POST /app/hold` | Hold | `{ centre, date, start, court, courts? }` (`courts`, 2.11: two at once, app only) |
-| `POST /app/hold/order` | Let it go / I have paid; Pay (app only) | `{ id, what: "release" | "done" }`, or `{ id, what: "pay", amount, sealed }` |
+| `POST /app/hold/order` | Let it go / I have paid; Pay (app only) | `{ id, what: "release" | "done" }`, or `{ id, what: "pay", amount, sealed, courts? }` (`courts`, 2.11: needed for a hold of two) |
 | `POST /app/card` | (app only) | `{ sealed }`: a card, sealed for `pc.cardKey` |
 | `POST /app/card/forget` | (app only) | `{}` |
 | `POST /app/card/auto` | (app only, api 3) | `{ sealed }`: the card's security code for automatic payments |
@@ -1053,10 +1055,15 @@ at once, unseen by the PC; if the PC keeps no other card, that is all there is t
 - 409 "Your PC keeps no card." (the PC has said so, and nothing is on its way)
 - 409 "Your PC is paying for a court just now. Try again once that is over."
 
-**`POST /app/hold/order`** `{ id, what: "pay", amount, sealed }`: pay for the held court with the card
+**`POST /app/hold/order`** `{ id, what: "pay", amount, sealed, courts }`: pay for the held court with the card
 your PC keeps. `amount`: the price the owner confirmed, which must be `hold.price` exactly (for two
 courts, 2.11, the total for both: the PC's order is for that amount, one payment). `sealed`:
-the security code, sealed as above. The answer is the state: the hold's lines say the PC is being
+the security code, sealed as above. `courts` (2.11): the courts the code was sealed for, in plain,
+as in the box (`[3, 4]`): the app from 2.11 sends it with every Pay. For a hold of two it must be
+exactly `hold.courts`; an app older than 2.11 sends none, and seals its box for one court, which your
+PC would refuse, and the hold's one Pay would then be spent for every phone. So such an order is
+refused here, before anything is spent, and the hold can still be paid from an updated app. For a
+hold of one it is not needed, and Pay is taken as before whatever it says. The answer is the state: the hold's lines say the PC is being
 told. The order waits for the PC's next note about the hold (one comes every few seconds), half a
 minute at most, and goes with the answer to it, once; the sealed code is not kept after that. The PC
 says `"paying"` before it types a key. If its next note is from the basket instead, the order did
@@ -1065,6 +1072,7 @@ not reach it: nothing was pressed, and Pay may be asked for again. The checks co
 - 400 "To act on a hold, send its id and what to do: release, done or pay."
 - 400 "To pay, send the hold's id, what: "pay", the amount you confirmed (such as "£23.00") and the sealed security code."
 - 400 "That is not a sealed box I can pass on: it must be standard base64, at most 1024 characters, of a key, a nonce and the box."
+- 400 "At most 2 courts at once." or "courts, when sent, must list the hold's court numbers, each once and lowest first." (2.11)
 - 409 "No longer following that hold. Your PC lets it go when its time is up."
 - 409 "That hold is over."
 - 409 "Your PC is paying for it already." (a second Pay while it pays, or after the press)
@@ -1087,6 +1095,7 @@ not reach it: nothing was pressed, and Pay may be asked for again. The checks co
 - 409 "Your PC could not read the price, so it cannot pay for this court."
 - 409 "No word from your PC for over a minute, so it isn’t asked to pay."
 - 409 "Too little time left to pay from here. Pay at your PC, or let it go." (under 30 seconds of `until`)
+- 409 "Update the app to pay for two courts here." (2.11: a hold of two, and `courts` is not exactly `hold.courts`, or not sent. Nothing is spent: `can.pay` stays as it was. An app older than 2.11 does not reload while a hold is showing: close it and open it again)
 - 409 "The price is £23.00, not £25.00. Check it before you pay." (`amount` is not `hold.price`; for two courts "The price is £46.00, not £23.00. …")
 
 ### What the PC does
@@ -1280,11 +1289,11 @@ The shapes, side by side:
 | Who to whom | What | One court | Two courts |
 | --- | --- | --- | --- |
 | app → bot | `POST /app/hold` | `{ centre, date, start, court }` (or `courts: [3]`) | `{ centre, date, start, court: 3, courts: [3, 4] }` |
-| bot → app | `state.hold` | `court: 3, courtName: "Court 3", courts: [3], courtNames: ["Court 3"]`, `price` | `court: 3, courtName: "Court 3", courts: [3, 4], courtNames: ["Court 3", "Court 4"]`, `price: "£46.00"`, `prices: ["£23.00", "£23.00"]` |
+| bot → app | `state.hold` | `court: 3, courtName: "Court 3", courts: [3], courtNames: ["Court 3"]`, `price` | `court: 3, courtName: "Courts 3 & 4", courts: [3, 4], courtNames: ["Court 3", "Court 4"]`, `price: "£46.00"`, `prices: ["£23.00", "£23.00"]` |
 | bot → PC | the ping's answer | `{ hold: { id, key, date, start, court: 3, courts: [3] } }` | `{ hold: { id, key, date, start, court: 3, courts: [3, 4] } }` |
 | PC → bot | `POST /agent/hold` notes | `court: 3` (a 2.11 booker adds `courts` only for two courts) | `court: 3, courts: [3, 4]`, `price` the total, `prices` each court's |
 | app → PC | the sealed code (Pay) | `{ cvc, id, amount, payKey, centre, date, start, court }`, as before | the same with `courts: [3, 4]`, `amount` the total; or `{ use: "kept", … }` with `courts` too |
-| app → bot | `POST /app/hold/order` (pay) | `amount: hold.price` | `amount: hold.price`, the total |
+| app → bot | `POST /app/hold/order` (pay) | `amount: hold.price` (and `courts: [3]` from a 2.11 app) | `amount: hold.price`, the total, and `courts: [3, 4]` in plain: without it, 409 "Update the app to pay for two courts here." |
 | bot → app | `state.results[]` | `court: "3"`, `courts: null` (or `[3]` when the PC names it so) | one result for the slot: `court: "3 & 4"`, `courts: [3, 4]`, `price` the total, `paid` |
 | app → bot | `POST /app/weekly`, `/change`, `/app/once` | `courts` left out, or `1` | `courts: 2`, signed with the v2 words |
 | bot → app | `state.weekly[]`, `state.once[]` | `courts: 1`, `auth` (v1 words) or null | `courts: 2`, `auth` (v2 words) or null |
@@ -1295,7 +1304,8 @@ The shapes, side by side:
 What the bot checks of two courts: the shape of `courts` (400, as above); that a look showed the app
 both courts free at that start (409 "That list is old…"); and, before it takes Pay from the app, that
 your PC's note from the basket names both (else 409 "Your PC didn’t say both courts are in your
-basket, so it isn’t asked to pay."). Your PC checks the rest: both in the basket, the basket's badge
+basket, so it isn’t asked to pay.") and that the order names both in plain, `courts: [3, 4]` (else
+409 "Update the app to pay for two courts here.", before anything is spent). Your PC checks the rest: both in the basket, the basket's badge
 reading exactly the number of courts it put in, the confirmed amount equal to the total, every amount
 on the payment page either the total or one court's price as read at the basket (anything else and
 nothing is typed or pressed), the Pay button saying exactly the total ("Pay £46.00"), the sealed code
@@ -1319,7 +1329,11 @@ backed up and signed exactly as before. Deploy in this order:
    notes name that one, so the bot does not take Pay from the app for it (above); handed a job of two
    courts, it checks the v2 signature as v1 words, which fails, so it takes no court.
 3. **The app** (an over-the-air update), last. An app older than 2.11 never sends `courts`, shows a
-   result's `court: "3 & 4"` as it is, and ignores the fields it does not know.
+   result's `court: "3 & 4"` and a hold's `courtName: "Courts 3 & 4"` as they are, and ignores the
+   fields it does not know. On a phone still running it (another phone started a hold of two), its
+   Pay is refused with "Update the app to pay for two courts here." and nothing is spent, so the
+   hold can still be paid once that phone has the update (it does not reload while a hold is
+   showing: close the app and open it again).
 
 ## Notes and notifications
 

@@ -297,6 +297,18 @@ test('two courts at once (2.11): what a hold, a weekly booking and a one-off may
   assert.deepEqual(A.readOnce({ date: '2026-11-25', start: 1080, hours: 1, courts: 2 }), { why: A.WHY.clubCourts });                // Kelvingrove's
   assert.deepEqual(A.readOnce({ date: '2026-11-25', start: 1080, hours: 1, courts: 1 }), { date: '2026-11-25', start: 1080, hours: 1 });
   assert.deepEqual(A.readWeeklyChange({ id: 'aaaaaaa3', courts: 2 }), { id: 'aaaaaaa3', fields: { courts: 2 } });
+  // Pay may name, in plain, the courts its box was sealed for: checked as a hold's are, and passed on only when sent.
+  const sealed = crypto.randomBytes(32 + 24 + 16 + 40).toString('base64');
+  const PAY = { id: 'a1b2c3d4e5f6', what: 'pay', amount: '£46.00', sealed };
+  assert.deepEqual(A.readHoldOrder({ ...PAY, courts: [3, 4] }), { ...PAY, courts: [3, 4] });
+  assert.deepEqual(A.readHoldOrder({ ...PAY, courts: [3] }), { ...PAY, courts: [3] });
+  assert.deepEqual(A.readHoldOrder(PAY), PAY);                                                       // an older app's order
+  assert.deepEqual(A.readHoldOrder({ ...PAY, courts: null }), PAY);
+  assert.deepEqual(A.readHoldOrder({ ...PAY, courts: [3, 4, 5] }), { why: 'At most 2 courts at once.' });
+  for (const courts of [[4, 3], [3, 3], [], [3, '4'], [3, 4.5], '3,4', 3]) assert.deepEqual(A.readHoldOrder({ ...PAY, courts }), { why: A.WHY.payCourts }, JSON.stringify(courts));
+  assert.equal(A.WHY.payCourts, 'courts, when sent, must list the hold\'s court numbers, each once and lowest first.');
+  assert.deepEqual(A.readHoldOrder({ ...PAY, sealed: 'x', courts: [3, 4] }), { why: A.WHY.sealed });          // the box is judged first
+  assert.deepEqual(A.readHoldOrder({ id: 'a1b2c3d4e5f6', what: 'release', courts: [9, 1] }), { id: 'a1b2c3d4e5f6', what: 'release' });   // only Pay reads it
 });
 
 // ---------- what is kept ----------
@@ -2100,7 +2112,7 @@ test('two courts at once from the app (2.11): both must be ones a look showed fr
   const asked = await ask(t, phone, 'hold', TWO);
   assert.equal(asked.status, 200);
   const h = asked.body.state.hold;
-  assert.deepEqual([h.court, h.courtName, h.courts, h.courtNames, h.price, h.prices, h.title, h.lines], [3, 'Court 3', [3, 4], ['Court 3', 'Court 4'], null, null,
+  assert.deepEqual([h.court, h.courtName, h.courts, h.courtNames, h.price, h.prices, h.title, h.lines], [3, 'Courts 3 & 4', [3, 4], ['Court 3', 'Court 4'], null, null,
     'Gorbals · Fri 20 Nov · 18:00–19:00 · Courts 3 & 4', ['Asking your PC to hold it. Under a minute.']]);
   assert.deepEqual(await ping, { ok: true, hold: { id: h.id, key: 'g', date: FRI, start: 1080, court: 3, courts: [3, 4] } });
   assert.ok(t.logs.includes('Hold asked for: Gorbals 2026-11-20 18:00 courts 3 & 4.'));
