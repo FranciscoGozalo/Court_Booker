@@ -1500,12 +1500,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // of the one it had. `courts` (2.11): 1, or 2 at Glasgow Club (lib/appapi.js has checked it).
   // Sent again with another number of courts, a one-off takes it, with the signature sent along
   // (which covers it), or with none: the one it had was for the courts it had.
+  // One venue, date and start once, whatever the court type (2.11.2): at Scotstoun, a one-off of the
+  // other type than the one on the list is refused ({ no, taken: true }), and the one there is left
+  // as it was (its type is part of what its signature covers).
   function addOnce(dateIso, start, hours, t, venue = V.SCHEDULED, type = 'outdoor', auth = null, courts = 1) {
     const date = civilOf(dateIso), today = todayCivil(t);
     if (date < today || londonInstant(date, start) <= t) return { no: `${label(date)} at ${hhmm(start)} has already passed.` };
     if (date > addDays(today, MAX_AHEAD_DAYS)) return { no: `That is more than ${MAX_AHEAD_DAYS} days away. Try a nearer date.` };
     const home = venue === V.SCHEDULED;
     const had = (home ? state.once : state.onceAway.filter(o => o.venue === venue)).find(o => o.date === dateIso && o.start === start);
+    if (had && !home && had.type !== type) {
+      return { no: `${label(date)} at ${hhmm(start)} is already scheduled on ${V.venueName(venue)}'s ${had.type} courts. Remove that date first.`, taken: true };
+    }
     if (had) {
       if (courtsOf(had) !== courts) {
         if (courts > 1) had.courts = courts; else delete had.courts;
@@ -2559,7 +2565,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         return { status: 200, body: { ok: true } };
       case 'once': {
         const r = addOnce(v.date, v.start, v.hours, t, v.venue, v.type, v.auth || null, v.courts || 1);
-        if (r.no) return no(r.full || r.allowance ? 409 : 400, r.no);
+        if (r.no) return no(r.full || r.allowance || r.taken ? 409 : 400, r.no);
         if (r.added) log(`Added ${v.venue ? `${V.placeName(v.venue, v.type)} ` : ''}${v.date} ${hhmm(v.start)} from the app`);
         return done(r.already ? { already: true } : {});
       }

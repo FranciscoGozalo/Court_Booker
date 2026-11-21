@@ -718,3 +718,92 @@ test('a one-off date at Glasgow Club on a day already open (2.11.2: as at the pa
     { id: 'gorbals/2026-11-28@19:00', date: '2026-11-28', start: 1140, end: 1200, hours: 1, releaseAt: at('2026-11-21T00:00:00Z'), venue: 'gorbals', type: 'indoor', centre: 'g', from: 'once', auth: v1, courts: 1, open: true },
   ]);
 });
+
+// ---------- Scotstoun indoor and outdoor at the same date and hour (2.11.2) ----------
+// The app treats Scotstoun's indoor and outdoor courts as two places, so it may send a one-off of
+// one type where the other is on the list. The bot keeps one booking per venue, date and start
+// (its ids carry no type), so it must neither fold the two together nor hide one behind the other.
+
+test('Scotstoun (2.11.2): a one-off date of the other court type at a date and hour already on the list is refused, and the one there keeps its courts and signature', async () => {
+  const SAT = '2026-11-21T20:20:00Z';
+  const t = makeBot(SAT);
+  const phone = await linkPhone(t);
+  // Outdoor on Sat 12 Dec at 10:00, then indoor at the same date and hour (one court, then two).
+  const out1 = sign('court-broker/once/v1|scotstoun|outdoor|2026-12-12|600|1');
+  let r = await ask(t, phone, 'once', { venue: 'scotstoun', type: 'outdoor', date: '2026-12-12', start: 600, hours: 1, auth: out1 });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const outdoor = { date: '2026-12-12', start: 600, hours: 1, venue: 'scotstoun', type: 'outdoor', at: at(SAT), auth: out1 };
+  const in1 = sign('court-broker/once/v1|scotstoun|indoor|2026-12-12|600|1');
+  const in2 = sign('court-broker/once/v2|scotstoun|indoor|2026-12-12|600|1|2');
+  const taken = refused(409, 'Sat 12 Dec at 10:00 is already scheduled on Scotstoun\'s outdoor courts. Remove that date first.');
+  assert.deepEqual(await ask(t, phone, 'once', { venue: 'scotstoun', type: 'indoor', date: '2026-12-12', start: 600, hours: 1, auth: in1 }), taken);
+  assert.deepEqual(await ask(t, phone, 'once', { venue: 'scotstoun', type: 'indoor', date: '2026-12-12', start: 600, hours: 1, courts: 2, auth: in2 }), taken);
+  assert.deepEqual(t.store.load().onceAway, [outdoor]);
+  // The same type again is as it always was: already there.
+  r = await ask(t, phone, 'once', { venue: 'scotstoun', type: 'outdoor', date: '2026-12-12', start: 600, hours: 1, auth: out1 });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.already, true);
+  assert.deepEqual(t.store.load().onceAway, [outdoor]);
+  // Fri 4 Dec 21:55: the PC is handed the outdoor date with its own signature, which it can check.
+  t.clock.t = at('2026-12-04T21:55:00Z');
+  assert.deepEqual(t.app.jobsForAgent(HOME, { run: true, venues: true }).jobs, [
+    { id: 'scotstoun/2026-12-12@10:00', date: '2026-12-12', start: 600, end: 660, hours: 1, releaseAt: at('2026-12-05T00:00:00Z'), venue: 'scotstoun', type: 'outdoor', centre: 'o', from: 'once', auth: out1, courts: 1 },
+  ]);
+
+  // The other way round: indoor on Sat 5 Dec at 10:00 for two courts, then outdoor.
+  const t2 = makeBot(SAT);
+  const phone2 = await linkPhone(t2);
+  const ind = sign('court-broker/once/v2|scotstoun|indoor|2026-12-05|600|1|2');
+  r = await ask(t2, phone2, 'once', { venue: 'scotstoun', type: 'indoor', date: '2026-12-05', start: 600, hours: 1, courts: 2, auth: ind });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const out = sign('court-broker/once/v1|scotstoun|outdoor|2026-12-05|600|1');
+  assert.deepEqual(await ask(t2, phone2, 'once', { venue: 'scotstoun', type: 'outdoor', date: '2026-12-05', start: 600, hours: 1, auth: out }),
+    refused(409, 'Sat 5 Dec at 10:00 is already scheduled on Scotstoun\'s indoor courts. Remove that date first.'));
+  assert.deepEqual(state(t2, phone2).once.map(o => [o.id, o.type, o.courts, o.auth]), [['scotstoun/2026-12-05@10:00', 'indoor', 2, ind]]);
+  t2.clock.t = at('2026-11-27T21:55:00Z');
+  assert.deepEqual(t2.app.jobsForAgent(HOME, { run: true, venues: true }).jobs, [
+    { id: 'scotstoun/2026-12-05@10:00', date: '2026-12-05', start: 600, end: 660, hours: 1, releaseAt: at('2026-11-28T00:00:00Z'), venue: 'scotstoun', type: 'indoor', centre: 's', from: 'once', auth: ind, courts: 2 },
+  ]);
+  // Removed first (as the refusal says), the other type is then taken.
+  t2.clock.t = at(SAT);
+  await ask(t2, phone2, 'once/remove', { venue: 'scotstoun', date: '2026-12-05', start: 600 });
+  r = await ask(t2, phone2, 'once', { venue: 'scotstoun', type: 'outdoor', date: '2026-12-05', start: 600, hours: 1, auth: out });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.state.once.map(o => [o.id, o.type, o.courts, o.auth]), [['scotstoun/2026-12-05@10:00', 'outdoor', 1, out]]);
+});
+
+test('Scotstoun (2.11.2): a one-off date of the other court type than a weekly booking at that hour takes the weekly booking\'s place on its date, whichever was added first', async () => {
+  const SAT = '2026-11-21T20:20:00Z';
+  const wTag = sign('court-broker/weekly/v1|scotstoun|outdoor|sat|600|1');
+  const oTag = sign('court-broker/once/v1|scotstoun|indoor|2026-12-12|600|1');
+  const weekly = { venue: 'scotstoun', type: 'outdoor', day: 'sat', start: 600, hours: 1, auth: wTag };
+  const once = { venue: 'scotstoun', type: 'indoor', date: '2026-12-12', start: 600, hours: 1, auth: oTag };
+  const weeklyJob = (date, opens) => ({ id: `scotstoun/${date}@10:00`, date, start: 600, end: 660, hours: 1, releaseAt: at(opens), venue: 'scotstoun', type: 'outdoor', centre: 'o', from: 'weekly', auth: wTag, courts: 1 });
+  for (const order of [[['weekly', weekly], ['once', once]], [['once', once], ['weekly', weekly]]]) {
+    const t = makeBot(SAT);
+    const phone = await linkPhone(t);
+    for (const [name, body] of order) {
+      const r = await ask(t, phone, name, body);
+      assert.equal(r.status, 200, `${name}: ${JSON.stringify(r.body)}`);
+      assert.equal(r.body.already, undefined);
+    }
+    // The Saturday before: the weekly booking, outdoor, as always.
+    t.clock.t = at('2026-11-27T21:55:00Z');
+    assert.deepEqual(t.app.jobsForAgent(HOME, { run: true, venues: true }).jobs, [weeklyJob('2026-12-05', '2026-11-28T00:00:00Z')], order[0][0]);
+    // Sat 12 Dec: the indoor date, with its own signature, in place of the weekly booking that day.
+    t.clock.t = at('2026-12-04T21:55:00Z');
+    assert.deepEqual(state(t, phone).release.jobs, [{ id: 'scotstoun/2026-12-12@10:00', venue: 'scotstoun', type: 'indoor', date: '2026-12-12', start: 600, end: 660, from: 'once' }], order[0][0]);
+    assert.deepEqual(t.app.jobsForAgent(HOME, { run: true, venues: true }).jobs, [
+      { id: 'scotstoun/2026-12-12@10:00', date: '2026-12-12', start: 600, end: 660, hours: 1, releaseAt: at('2026-12-05T00:00:00Z'), venue: 'scotstoun', type: 'indoor', centre: 's', from: 'once', auth: oTag, courts: 1 },
+    ], order[0][0]);
+    // The Saturday after: the weekly booking again.
+    t.clock.t = at('2026-12-11T21:55:00Z');
+    assert.deepEqual(t.app.jobsForAgent(HOME, { run: true, venues: true }).jobs, [weeklyJob('2026-12-19', '2026-12-12T00:00:00Z')], order[0][0]);
+  }
+  // A one-off of the same type as the weekly booking is that booking, as it always was (the weekly one first).
+  const cfg = { ...CFG, weekly: [{ id: 'aaaaaaaa', ...weekly, on: true }], once: [], away: [{ ...once, type: 'outdoor' }] };
+  assert.deepEqual(S.requestsOn(require('../lib/time').civil(2026, 12, 12), cfg).map(r => [r.id, r.type, r.kind]), [['scotstoun/2026-12-12@10:00', 'outdoor', 'weekly']]);
+  // ...and Kelvingrove's are as they were.
+  const kg = { ...CFG, weekly: [{ id: 'bbbbbbbb', venue: 'kelvingrove', type: 'outdoor', day: 'sat', start: 600, hours: 2, on: true }], once: [{ date: '2026-12-12', start: 600, hours: 1 }], away: [] };
+  assert.deepEqual(S.requestsOn(require('../lib/time').civil(2026, 12, 12), kg).map(r => [r.id, r.hours, r.kind]), [['2026-12-12@10:00', 2, 'weekly']]);
+});

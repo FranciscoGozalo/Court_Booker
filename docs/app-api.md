@@ -821,6 +821,14 @@ your PC takes no court for it.
   and the result says so ("No court free for the whole time. Nothing was paid."). The app offers
   07:00 to 21:00 starts on a day it has no look for.
 - **Courts**: `courts: 2` takes two courts at the same hour, all or none (see "Two courts at once (2.11)").
+- **Scotstoun's indoor and outdoor courts** (2.11.2): one venue, date and start once, whatever the type
+  (a result's id carries no type). A one-off of the other type than the one already on the list at
+  that date and start is refused (409, below), and the one there is left exactly as it was: its
+  type, courts and signature. Remove it first (`POST /app/once/remove`), then send the other. A
+  one-off of the other type than a weekly booking at that venue, weekday and start is taken, and
+  on its date it is booked in that weekly booking's place, with its own signature (`from: "once"`);
+  the weekly booking is booked on its other dates as before. A one-off of the same type as the
+  weekly booking is that booking, as it always was.
 
 - 400 "A one-off booking needs a date (YYYY-MM-DD), a start in minutes after midnight, and hours (1 or 2)."
 - 400 "courts, when sent, must be 1 or 2."
@@ -835,6 +843,7 @@ your PC takes no court for it.
 - 400 "That slot runs past midnight. Try an earlier time."
 - 400 "Tue 10 Nov at 19:00 has already passed." (that day and time)
 - 400 "That is more than 90 days away. Try a nearer date."
+- 409 "Sat 12 Dec at 10:00 is already scheduled on Scotstoun's outdoor courts. Remove that date first." (2.11.2: the other court type at that date and start)
 - 409 "Your list already has 60 one-off dates, which is as many as I keep. Remove one first."
 - 409 "That would be 8 sessions in the week of Mon 23 Nov; the limit is 7." or "That would be 15 hours in the week of Mon 23 Nov; the limit is 14."
 
