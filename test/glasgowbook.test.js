@@ -372,7 +372,7 @@ test('a booking waiting for your PC\'s ping is looked at again before it is hand
     assert.equal(gb.takeOrder(env.t), null, name);
     assert.equal(gb.takeOrder(env.t), null, name);
     await settle();
-    assert.deepEqual(kept, [{ id: RID, venue: 'gorbals', status: 'failed', type: 'indoor', end: 1140, paid: false, why: `${why}, so it was not handed to your PC` }], name);
+    assert.deepEqual(kept, [{ id: RID, venue: 'gorbals', status: 'failed', type: 'indoor', end: 1140, paid: false, why: `${why}, so it was not handed to your PC`, bookId: gb.view(env.t).id }], name);
     assert.deepEqual([gb.view(env.t).ended, gb.view(env.t).line], ['notsent', `Not booked: ${why}, so it was not handed to your PC. Nothing was paid.`], name);
   }
   // In the bot: a PC rolled back to an older booker says nothing of Book now on the very ping that
@@ -683,6 +683,179 @@ test('your PC\'s result is the follower\'s first: it replaces an ending decided 
   await h.app.resultFromAgent(notPaidOf('No court free for the whole time'));
   await settle();
   assert.deepEqual([stateOf(h, phoneH).glasgow.book.ended, h.app.state.results[RID].why], ['refused', 'No court free for the whole time']);
+});
+
+// What a Book now at an hour that has a result kept already is told, and what Courts keeps.
+const NOT_BOOKED_CARD = /^<b>Not booked · Gorbals · Fri 20 Nov · 18:00–19:00<\/b>/;
+const toldOf = t => ({ cards: t.tg.calls.filter(c => NOT_BOOKED_CARD.test(c.text || '')).length, notes: t.app.state.notes.length, pushes: t.pushes.length });
+const toldSince = (t, before) => { const now = toldOf(t); return Object.fromEntries(Object.keys(now).map(k => [k, now[k] - before[k]])); };
+const TOLD = { cards: 1, notes: 1, pushes: 1 };
+const UNTOLD = { cards: 0, notes: 0, pushes: 0 };
+const PRESSED_WHY = 'Pay was pressed, but your Bookings page does not list the court as a new booking (your bank\'s approval had not come when your PC stopped waiting)';
+const maybeOf = (extra = {}) => resultOf({ status: 'failed', court: undefined, courts: undefined, paid: 'maybe', why: PRESSED_WHY, ...extra });
+const MAY_HAVE_PAID = 'Your PC may already have paid for Gorbals on Fri 20 Nov at 18:00. Check Bookings on Glasgow Club’s site and your banking app.';
+
+test('each Book now is told of on its own, even at an hour that has a result kept already: a second try whose Pay may have been pressed has its card, its note and its push; two tries ending in the same words are two endings; the same result sent again is told once', async () => {
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  // The first, Court 3: gone when your PC looked. Nothing was paid.
+  await started(t, phone);
+  let before = toldOf(t);
+  await t.app.resultFromAgent(notPaidOf('Court 3 was no longer free at 18:00, and your PC takes no other court'));
+  await settle();
+  assert.deepEqual(toldSince(t, before), TOLD);
+  // The second, Court 4: the go-ahead, Pay pressed, and the court not under Bookings.
+  t.clock.t += MIN;
+  const { id } = await started(t, phone, { ...BODY, court: 4 });
+  assert.deepEqual(pcSays(t, { id, stage: 'paying', price: '£23.00', courts: [4] }), { ok: true, go: true });
+  before = toldOf(t);
+  await t.app.resultFromAgent(maybeOf());
+  await settle();
+  assert.deepEqual(toldSince(t, before), TOLD);
+  assert.match(t.tg.calls.filter(c => NOT_BOOKED_CARD.test(c.text || '')).pop().text, /Pay was pressed, and whether the payment went through is not known/);
+  assert.deepEqual([t.app.state.results[RID].paid, stateOf(t, phone).glasgow.book.ended], ['maybe', 'failed']);
+  // The same result sent again (its answer was lost on the way): told once.
+  before = toldOf(t);
+  await t.app.resultFromAgent(maybeOf());
+  await settle();
+  assert.deepEqual(toldSince(t, before), UNTOLD);
+  // Two tries that end in the same words are two endings, each told: not collected in time, twice.
+  const u = makeBot();
+  const phoneU = await linkPhone(u);
+  for (let i = 0; i < 2; i++) {
+    await pcPing(u);
+    await seeFree(u, phoneU);
+    assert.equal((await ask(u, phoneU, 'glasgow/book', BODY)).status, 200);
+    before = toldOf(u);
+    u.clock.t += GB.COLLECT_MS;
+    await u.app.tick();
+    await settle();
+    assert.deepEqual([stateOf(u, phoneU).glasgow.book.ended, toldSince(u, before)], ['nopickup', TOLD]);
+    u.clock.t += MIN;
+  }
+});
+
+test('your PC\'s word replacing an ending decided here comes with a card of its own, and a word that nothing was paid replaces "Pay may have been pressed" only when it is about that very Book now', async () => {
+  // Silent after the go-ahead ("maybe"), then your PC's link: its tool had gone before Pay was pressed.
+  const a = makeBot();
+  const phoneA = await linkPhone(a);
+  const ca = await started(a, phoneA);
+  pcSays(a, { id: ca.id, stage: 'paying', price: '£23.00', courts: [3] });
+  a.clock.t += 4 * MIN;
+  await a.app.tick();
+  await settle();
+  assert.deepEqual([a.app.state.results[RID].paid, stateOf(a, phoneA).glasgow.book.ended], ['maybe', 'silent']);
+  let before = toldOf(a);
+  assert.deepEqual(pcSays(a, { id: ca.id, stage: 'gone', why: 'the booking tool stopped with code 7' }), { ok: true });
+  await settle();
+  assert.deepEqual([a.app.state.results[RID].paid, stateOf(a, phoneA).glasgow.book.ended], [false, 'gone']);
+  assert.deepEqual(toldSince(a, before), TOLD);
+  // Silent after the go-ahead, then your PC's own result: it did not pay.
+  const b = makeBot();
+  const phoneB = await linkPhone(b);
+  const cb = await started(b, phoneB);
+  pcSays(b, { id: cb.id, stage: 'paying', price: '£23.00', courts: [3] });
+  b.clock.t += 4 * MIN;
+  await b.app.tick();
+  await settle();
+  before = toldOf(b);
+  await b.app.resultFromAgent(notPaidOf('your PC did not pay: Glasgow Club\'s payment page did not load. The court was taken out of your basket again'));
+  await settle();
+  assert.deepEqual([b.app.state.results[RID].paid, stateOf(b, phoneB).glasgow.book.ended], [false, 'failed']);
+  assert.deepEqual(toldSince(b, before), TOLD);
+});
+
+test('a slot whose Pay was pressed, or may have been, is not booked now: refused before anything reaches your PC, whichever court type, and the moment a Book now ends so; Courts keeps what it had', async () => {
+  const kept = (id, type, paid) => ({ [id]: { id, status: 'failed', date: FRI, start: 1080, end: 1140, type, price: '£23.00', paid, why: PRESSED_WHY, at: at('2026-11-13T00:31:00Z') } });
+  // The midnight run pressed Pay, and your bank's approval never came (or it paid, and Bookings did not show it).
+  for (const paid of ['maybe', true]) {
+    const t = makeBot(NOON, { state: { results: kept(RID, 'indoor', paid) } });
+    const phone = await linkPhone(t);
+    await pcPing(t);
+    await seeFree(t, phone);
+    assert.deepEqual(await ask(t, phone, 'glasgow/book', BODY), refused(409, MAY_HAVE_PAID));
+    assert.deepEqual(await ask(t, phone, 'glasgow/book', { ...BODY, court: 4 }), refused(409, MAY_HAVE_PAID));
+    assert.deepEqual(await pcPing(t), { ok: true });                                               // nothing to collect
+    assert.equal(stateOf(t, phone).glasgow.book, null);
+    assert.deepEqual([t.app.state.results[RID].paid, t.app.state.results[RID].why], [paid, PRESSED_WHY]);
+  }
+  // Scotstoun's outdoor courts at that hour stop its indoor ones (one result id for both), named as kept.
+  const s = makeBot(NOON, { state: { results: kept('scotstoun/2026-11-20@18:00', 'outdoor', 'maybe') } });
+  const phoneS = await linkPhone(s);
+  await pcPing(s);
+  await seeFree(s, phoneS, 's');
+  assert.deepEqual(await ask(s, phoneS, 'glasgow/book', { ...BODY, venue: 'scotstoun', type: 'indoor' }),
+    refused(409, 'Your PC may already have paid for Scotstoun outdoor on Fri 20 Nov at 18:00. Check Bookings on Glasgow Club’s site and your banking app.'));
+  // A Book now that has just ended with Pay perhaps pressed counts at once, before its result is kept
+  // (its card slow on its way).
+  const g = makeBot();
+  const phoneG = await linkPhone(g);
+  const cg = await started(g, phoneG);
+  pcSays(g, { id: cg.id, stage: 'paying', price: '£23.00', courts: [3] });
+  const fast = g.tg.sendPhoto;
+  g.tg.sendPhoto = async (...a) => { await new Promise(r => setTimeout(r, 150)); return fast(...a); };
+  pcSays(g, { id: cg.id, stage: 'gone', why: 'the booking tool stopped with code 1', pressed: 'maybe' });
+  await settle();
+  await seeFree(g, phoneG);
+  assert.equal(g.app.state.results[RID], undefined);
+  assert.deepEqual(await ask(g, phoneG, 'glasgow/book', { ...BODY, court: 4 }), refused(409, MAY_HAVE_PAID));
+  await new Promise(r => setTimeout(r, 250));
+  assert.equal(g.app.state.results[RID].paid, 'maybe');
+  // One gone quiet after the go-ahead, its four minutes up before its timer has run: the same.
+  const q = makeBot();
+  const phoneQ = await linkPhone(q);
+  const cq = await started(q, phoneQ);
+  pcSays(q, { id: cq.id, stage: 'paying', price: '£23.00', courts: [3] });
+  q.clock.t += 4 * MIN;
+  await pcPing(q);
+  await seeFree(q, phoneQ);
+  assert.deepEqual(await ask(q, phoneQ, 'glasgow/book', { ...BODY, court: 4 }), refused(409, MAY_HAVE_PAID));
+  await settle();
+  assert.deepEqual([stateOf(q, phoneQ).glasgow.book.ended, q.app.state.results[RID].paid], ['silent', 'maybe']);
+  // A try that ended with nothing paid is no hindrance (above: a second try at that hour).
+});
+
+test('a word that nothing was paid never replaces a result kept where Pay was pressed, or may have been, from another run: it is told all the same, once, and Telegram being down changes nothing; a booking still replaces it', async () => {
+  // The midnight run's: Pay pressed, your bank's approval never came. Then your PC's word for that slot that nothing was paid.
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  await t.app.resultFromAgent(maybeOf());
+  await settle();
+  let before = toldOf(t);
+  const twice = notPaidOf('your PC has paid, or tried to pay, for this slot before, and pays for each once at most: look under Bookings on Glasgow Club\'s site and in your banking app');
+  await t.app.resultFromAgent(twice);
+  await settle();
+  assert.deepEqual(toldSince(t, before), TOLD);
+  let r = stateOf(t, phone).results[0];
+  assert.deepEqual([r.paid, r.why, r.price], ['maybe', `It didn’t work: ${PRESSED_WHY}. Pay was pressed, and whether the payment went through is not known: look in your banking app and under Bookings on Glasgow Club's site.`, '£23.00']);
+  assert.match(t.logs.join('\n'), /Result for gorbals\/2026-11-20@18:00 said, but not kept over the one kept/);
+  // Sent again (its answer was lost on the way): told once.
+  before = toldOf(t);
+  await t.app.resultFromAgent(twice);
+  await settle();
+  assert.deepEqual(toldSince(t, before), UNTOLD);
+  assert.equal(t.app.state.results[RID].paid, 'maybe');
+  // A booking replaces it, as it replaces any.
+  await t.app.resultFromAgent(resultOf());
+  await settle();
+  assert.deepEqual([t.app.state.results[RID].status, t.app.state.results[RID].paid], ['booked', true]);
+  // Scotstoun: an outdoor Book now under way when the indoor courts' result for that hour comes (one
+  // result id for both), Pay perhaps pressed there. The Book now's own result, nothing paid, with
+  // Telegram down: the booking has it, and Courts keeps the indoor "maybe".
+  const RID_S = 'scotstoun/2026-11-20@17:00';
+  const d = makeBot();
+  const phoneD = await linkPhone(d);
+  await started(d, phoneD, { venue: 'scotstoun', type: 'outdoor', date: FRI, start: 1020, court: 1, auth: AUTH });
+  await d.app.resultFromAgent({ id: RID_S, date: FRI, start: 1020, end: 1080, type: 'indoor', status: 'failed', price: '£23.00', paid: 'maybe', why: PRESSED_WHY });
+  await settle();
+  assert.equal(stateOf(d, phoneD).glasgow.book.live, true);
+  d.tg.failSend = 5;
+  assert.deepEqual(await d.app.resultFromAgent({ id: RID_S, date: FRI, start: 1020, end: 1080, type: 'outdoor', status: 'failed', paid: false,
+    why: 'Court 1 was no longer free at 17:00, and your PC takes no other court' }), { ok: true });
+  d.tg.failSend = 0;
+  await settle();
+  r = d.app.state.results[RID_S];
+  assert.deepEqual([r.type, r.paid, r.why, stateOf(d, phoneD).glasgow.book.ended], ['indoor', 'maybe', PRESSED_WHY, 'failed']);
 });
 
 test('the timers: not collected in 25 seconds, collected and never started in 90, silent for four minutes, still going after half an hour', async () => {

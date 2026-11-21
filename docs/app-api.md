@@ -441,6 +441,10 @@ for the parks'): `price` the price asked for the court (`"£23.00"`, or null whe
 `paid` true (paid with the card your PC keeps), false (nothing was paid) or `"maybe"` (Pay was
 pressed, and whether the payment went through is not known: look in the banking app and under
 Bookings on Glasgow Club's site). The `why` of one not booked ends with what was paid, in words.
+A result not booked whose Pay was pressed, or may have been (`paid` true or `"maybe"`), stays (2.11.3)
+over a later word for that slot that nothing was paid: that word has its card and its note, but the
+result stays, to look into. Only a booking replaces it, or your PC's own word about the very Book now
+at Glasgow Club whose ending the bot decided (see "How it can end" there).
 `gate`: the gate code, a string (null if not booked, or if none was shown). `why`: null when
 booked; "No court free for the whole time." for `none`; "It didn’t work: <the PC's reason>."
 for `failed`. `at`: when the result came in.
@@ -1498,7 +1502,10 @@ the state, with `glasgow.book` at stage `"asked"`; from then on it moves in the 
 - It is never kept as a one-off (not in `once`, never among the jobs at 21:55), so no later run can
   pay for it.
 - The checks come in this order: the shape; the day; the time; a booking kept already for that venue,
-  date and start, of either court type (Scotstoun's indoor and outdoor share a result's id); a look
+  date and start, of either court type (Scotstoun's indoor and outdoor share a result's id); a slot
+  whose Pay was pressed, or may have been, of either court type (a result kept for it with `paid`
+  true or `"maybe"`, from the midnight run or a Book now, or a Book now that has just ended so and
+  whose result is still on its way: your PC pays for each slot once at most); a look
   showing the app every court asked for free at that start in the last 15 minutes (as for a hold);
   then the guards in `glasgow.bookNo`, in the order below.
 
@@ -1512,6 +1519,7 @@ the state, with `glasgow.book` at stage `"asked"`; from then on it moves in the 
 - 400 "Not open yet: opens Sun 22 Nov at 00:00." (the app schedules those: `POST /app/once`)
 - 400 "That time is no longer on offer. Pick again."
 - 409 "Court 3 is already booked for you at Gorbals on Fri 20 Nov at 18:00." ("Courts 3 & 4 are …"; at Scotstoun, the place as booked: "… at Scotstoun outdoor …")
+- 409 "Your PC may already have paid for Gorbals on Fri 20 Nov at 18:00. Check Bookings on Glasgow Club’s site and your banking app." (at Scotstoun, the place as kept: "… for Scotstoun outdoor …")
 - 409 "That list is old. Read the day again, then book a court."
 - 409, the `glasgow.bookNo` sentences, checked in this order:
   1. "Your PC isn’t linked, and it’s your PC that books Glasgow Club." (not over HTTP)
@@ -1601,8 +1609,17 @@ your banking app and under Bookings on Glasgow Club's site.").
 | `silent`, after the go-ahead | `"maybe"` | "no word from your PC while it was paying for Court 3" |
 | `timeout`, after the go-ahead | `"maybe"` | "I stopped following it half an hour after your PC took it, while it was paying for Court 3" |
 
-Your PC's word (`refused`, `gone`, `quit`) replaces an ending this bot decided (`notsent` …
-`timeout`), with a card of its own.
+Your PC's word (`refused`, `gone`, `quit`, or its result) replaces an ending this bot decided
+(`notsent` … `timeout`), with a card of its own, a note and a notification, and so does a "nothing
+was paid" from it over a `"maybe"` decided here.
+
+Each Book now is told of on its own, even at an hour that has a result kept already (a second try
+for Court 4 after Court 3 had gone, say, or two tries both not collected in time). Only the same
+result sent again (its answer lost on the way) is not told twice. A word that nothing was paid
+never replaces a result kept for that slot whose Pay was pressed, or may have been, from another run
+(the midnight run's, or another Book now's): it is told (the card, the note, the notification), and
+`results` keeps the payment to look into. And a slot like that is not booked again here at all (the
+409 above).
 
 ### Mixed versions
 
@@ -1627,7 +1644,9 @@ to Hold.
   before it signs in). So a second court at an hour already booked is refused here ("Court 2 is
   already booked …"), and a slot your PC once started to pay for (a key typed, even if it then stopped
   before Pay) is refused by your PC after that ("your PC has paid, or tried to pay, for this slot
-  before …"). For those, hold the court in Telegram, or book on Glasgow Club's site.
+  before …"). One this bot knows Pay was pressed for, or may have been, is refused here first, before
+  anything reaches your PC ("Your PC may already have paid for …"). For those, once you have looked
+  under Bookings and in your banking app, hold the court in Telegram, or book on Glasgow Club's site.
 - A Book now and a hold count together toward the six sign-ins an hour, but a hold refused for it
   still says "That’s 6 holds in an hour."
 - What looks showed the app, and the booking being followed, are kept in memory only: after a restart

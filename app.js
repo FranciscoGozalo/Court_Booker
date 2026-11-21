@@ -116,6 +116,27 @@ function cleanResult(raw) {
   }
   return r;
 }
+// The same, for an ending Book now at Glasgow Club decided here (`own`, 2.11.3): with which Book now
+// it is (`bookId`, lib/glasgowbook.js), never taken from your PC's own results.
+function ownResult(raw, own) {
+  const r = cleanResult(raw);
+  if (r && own && typeof raw.bookId === 'string' && /^[0-9a-f]{12}$/.test(raw.bookId)) r.bookId = raw.bookId;
+  return r;
+}
+// Whether `r` says again what the result kept for its id says, so it is not told twice: a booking of
+// the same court; anything else in the same words, about the same payment, from the same Book now at
+// Glasgow Club (each Book now is told of on its own, 2.11.3, even at an hour with a result already).
+function sameResult(kept, r) {
+  return !!kept && kept.status === r.status && kept.court === r.court
+    && (r.status === 'booked' || (kept.paid === r.paid && kept.price === r.price && kept.why === r.why && kept.bookId === r.bookId));
+}
+// Whether the result kept for an id stands over `r` (not booked) at Glasgow Club: Pay was pressed for
+// that slot, or may have been, and `r` says nothing was paid. It is told, but Courts keeps the payment
+// to look into. Only your PC's word about that very Book now (`bookId`) replaces one decided here.
+function paidStands(kept, r) {
+  return !!kept && kept.status !== 'booked' && (kept.paid === 'maybe' || kept.paid === true)
+    && r.status !== 'booked' && r.paid !== 'maybe' && r.paid !== true && !(r.bookId && r.bookId === kept.bookId);
+}
 
 // What your PC last said of its card (2.11.1), kept on disk so that a restart of the bot does not
 // show the app "no card" until the PC's next ping: { kept, auto }. `kept` is the summary a ping
@@ -1489,14 +1510,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   async function keepResult(raw, opts = {}) {
     try { return await resultFromAgent(raw, opts); } catch (e) {
       log(`Could not send the card for ${raw.id}: ${e.message}`);
-      keepAnyway(cleanResult(raw));
+      keepAnyway(ownResult(raw, opts.own));
       return { ok: true };
     }
   }
-  // A result kept without its card (Telegram would not take it): never over a booking kept for that id.
+  // A result kept without its card (Telegram would not take it): never over a booking kept for that id,
+  // nor a word that nothing was paid over a slot whose Pay was pressed, or may have been (paidStands).
   function keepAnyway(r) {
     const prev = r && state.results[r.id];
-    if (r && !(prev && prev.status === 'booked')) { state.results[r.id] = { ...r, at: now() }; save(); }
+    if (r && !(prev && prev.status === 'booked') && !paidStands(prev, r)) { state.results[r.id] = { ...r, at: now() }; save(); }
   }
   // Tests may give `clubspark` (the waits in lib/clubspark.js) alongside createApp's other options.
   const cs = CS.createClubSpark({
@@ -2081,8 +2103,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // follower first, before anything here can fail or return early (a booking kept already, Telegram
   // down), and is kept even when Telegram will not take its card, as a park's Book now's is. `own`:
   // an ending the follower decided itself, on its way to being kept (not heard by it again).
+  // Each Book now is told of on its own, even at an hour with a result kept already (sameResult), and
+  // a word that nothing was paid is told but not kept over a slot whose Pay was pressed, or may have
+  // been (paidStands): Courts keeps the payment to look into.
   async function resultFromAgent(raw, { quiet = false, own = false } = {}) {
-    const r = cleanResult(raw);
+    const r = ownResult(raw, own);
     if (!r) return { ok: false, why: 'that result is missing something or does not make sense' };
     const followed = quiet || own ? null : gb.onResult(r);
     if (!followed) return takeResult(r, quiet, own);
@@ -2092,10 +2117,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       return { ok: true };
     }
   }
+  // Results told but not kept (paidStands), the last few: the same one sent again is not told twice.
+  const toldOnly = new Set();
+  const toldKey = r => JSON.stringify([r.id, r.status, r.court, r.paid, r.price, r.why, r.bookId]);
   async function takeResult(r, quiet, own = false) {
     const prev = state.results[r.id];
     if (prev && prev.status === 'booked' && (r.status !== 'booked' || quiet)) return { ok: true };       // a booking stands
-    const same = quiet || (prev && prev.status === r.status && prev.court === r.court);
+    const same = quiet || sameResult(prev, r) || toldOnly.has(toldKey(r));
     const chat = owner();
     if (!same && chat !== null) {
       if (r.status === 'booked') await sendCard(chat, 'booked', M.bookedCaption(r), UI.afterBooked());
@@ -2108,10 +2136,16 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       log(`Result for ${r.id} not kept over the one kept meanwhile (${meanwhile ? meanwhile.status : 'none'}).`);
       return { ok: true };
     }
-    state.results[r.id] = { ...r, at: now() };
-    for (const k of Object.keys(state.results)) if (now() - state.results[k].at > RESULTS_KEEP_MS) delete state.results[k];
-    save();
-    log(`${quiet ? 'Kept as a booking' : 'Result from the PC'}: ${r.id} ${r.status}${r.court ? ` (${M.courtWords(r)})` : ''}`);
+    if (paidStands(meanwhile, r)) {
+      toldOnly.add(toldKey(r));
+      if (toldOnly.size > 20) toldOnly.delete(toldOnly.values().next().value);
+      log(`Result for ${r.id} said, but not kept over the one kept (Pay was pressed for it, or may have been).`);
+    } else {
+      state.results[r.id] = { ...r, at: now() };
+      for (const k of Object.keys(state.results)) if (now() - state.results[k].at > RESULTS_KEEP_MS) delete state.results[k];
+      save();
+      log(`${quiet ? 'Kept as a booking' : 'Result from the PC'}: ${r.id} ${r.status}${r.court ? ` (${M.courtWords(r)})` : ''}`);
+    }
     if (!same && chat !== null) {                     // what the card said, as a note for the app
       const after = V.clubOf(r.venue) ? (r.paid === true ? `paid ${r.price || ''}`.trim() : r.paid === 'maybe' ? 'Pay was pressed' : 'not paid')
         : r.gate ? `gate ${r.gate}` : 'gate code not shown';
