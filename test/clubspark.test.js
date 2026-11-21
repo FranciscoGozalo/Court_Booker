@@ -144,7 +144,7 @@ test('a look: asked on the PC\'s ping, answered with the free courts by start ti
   const t = makeBot();
   const phone = await linkPhone(t);
   const r = await lookAnswered(t, phone, { venue: 'queenspark', date: FRI });
-  assert.deepEqual(r, { status: 200, body: { ok: true, look: { venue: 'queenspark', date: FRI, at: at(NOON) + 3000, by: 'pc', note: 'Free courts, as ClubSpark showed it at 12:00.', slots: SLOTS } } });
+  assert.deepEqual(r, { status: 200, body: { ok: true, look: { venue: 'queenspark', date: FRI, at: at(NOON) + 3000, by: 'pc', note: '', slots: SLOTS } } });
   assert.match(t.logs.join('\n'), /ClubSpark: asking your PC for Queens Park on 2026-11-20\./);
   // Over HTTP: the app's door, and the PC's.
   const appApi = { hello: t.app.appHello, pair: t.app.appPair, auth: t.app.appAuth, state: t.app.appState, ask: t.app.appAsk };
@@ -200,7 +200,7 @@ test('at most six fresh reads in any ten minutes, for all the parks and every ph
   const phone = await linkPhone(t), other = await linkPhone(t, 'iPad');
   const parks = ['drumchapel', 'garrowhill', 'kelvingrove', 'knightswood', 'maryhill', 'queenspark'];
   for (const venue of parks) { assert.equal((await lookAnswered(t, phone, { venue, date: FRI })).status, 200, venue); t.clock.t += 10000; }
-  const full = `That is 6 reads of ClubSpark within ten minutes, which is as many as I ask your PC for, to keep your home connection in good standing with ClubSpark. The next can be at 12:10.`;
+  const full = 'That’s 6 reads in ten minutes, to keep your home connection in good standing with ClubSpark. Next at 12:10.';
   const idle = t.app.pingFromAgent(HOME, { wait: 0.02 });
   assert.deepEqual(await ask(t, other, 'clubspark/look', { venue: 'victoriapark', date: FRI }), refused(409, full));
   assert.deepEqual(await ask(t, phone, 'clubspark/look', { venue: 'queenspark', date: '2026-11-21' }), refused(409, full));
@@ -220,8 +220,8 @@ test('no fresh read from 21:00, no booking from 21:25, neither until 22:30, nor 
   const t = makeBot(`${TUE}T20:55:00Z`, { state: { plan: { tue: { start: 960, hours: 2 } } } });
   const phone = await linkPhone(t);
   const known = (await lookAnswered(t, phone, { venue: 'queenspark', date: FRI })).body.look;
-  const noRead = 'Your PC\'s nightly booking run is at 22:00, so ClubSpark is not read from 21:00 to 22:30, to leave the connection quiet before it.';
-  const noBook = 'Your PC\'s nightly booking run is at 22:00, so nothing is booked at ClubSpark from 21:25 to 22:30.';
+  const noRead = 'Not available 21:00–22:30, around the nightly booking.';
+  const noBook = 'Not available 21:25–22:30, around the nightly booking.';
   // 20:59:59 nothing stands in the way; from 21:00 no fresh read, though a booking from a look shown before still goes.
   t.clock.t = at(`${TUE}T20:59:59Z`);
   await t.app.pingFromAgent(HOME);
@@ -248,7 +248,7 @@ test('no fresh read from 21:00, no booking from 21:25, neither until 22:30, nor 
   t.app.jobsForAgent(HOME, { run: true });
   t.clock.t = at(`${TUE}T22:31:00Z`);
   await t.app.pingFromAgent(HOME);
-  const going = 'Your PC\'s nightly booking run is still going, so nothing else is read or booked at ClubSpark until it has finished.';
+  const going = 'Not available until the nightly booking has finished.';
   assert.deepEqual(await ask(t, phone, 'clubspark/look', { venue: 'maryhill', date: FRI }), refused(409, going));
   // Once it has reported, the parks are open to the app again.
   await t.app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 });
@@ -264,18 +264,18 @@ test('turned away: two hours of nothing at ClubSpark from the app, said in the l
   t.clock.t = at(NOON) + 5 * MIN;
   const r = await lookAnswered(t, phone, { venue: 'maryhill', date: FRI }, { ok: false, kind: 'challenge', why: 'ClubSpark showed a "Just a moment" page' });
   const pausedAt = t.clock.t, until = pausedAt + 2 * 60 * MIN;
-  assert.deepEqual(r, refused(409, 'ClubSpark turned your PC away just now (ClubSpark showed a "Just a moment" page), so it is left alone until 14:05: nothing is read or booked there from the app until then.'));
+  assert.deepEqual(r, refused(409, 'ClubSpark turned your PC away just now (ClubSpark showed a "Just a moment" page). Not available until 14:05.'));
   // Said in Telegram once, as a note (and a notification), and in the log.
   await settle();
   const told = t.tg.calls.filter(c => c.method === 'send');
   assert.equal(told.length, 1);
-  assert.equal(told[0].text, '<b>ClubSpark turned your PC away</b>\nClubSpark turned your PC away at 12:05, reading Maryhill Park\'s courts (ClubSpark showed a "Just a moment" page), which is how it treats a connection it is checking. Nothing more is read or booked at ClubSpark from the app until 14:05. Your nightly booking run uses the same connection: if ClubSpark still turns it away at 22:00, that run may not get through.');
+  assert.equal(told[0].text, '<b>ClubSpark turned your PC away</b>\nAt 12:05, reading Maryhill Park\'s courts (ClubSpark showed a "Just a moment" page). Nothing is read or booked there from the app until 14:05. If it still turns your PC away at 22:00, the nightly booking may not get through.');
   const s = stateOf(t, phone);
   assert.deepEqual([s.notes[0].kind, s.notes[0].title], ['warn', 'ClubSpark turned your PC away']);
   assert.equal(t.pushes.length, 1);
   assert.match(t.logs.join('\n'), /ClubSpark turned your PC away reading Maryhill Park's courts \(ClubSpark showed a "Just a moment" page\)\. Nothing more is read or booked there from the app until 14:05\./);
   // For two hours: no reads, no bookings, and the state says why.
-  const quiet = 'ClubSpark turned your PC away at 12:05, as it does when it checks a connection, so it is left alone until 14:05: nothing is read or booked there from the app until then.';
+  const quiet = 'ClubSpark turned your PC away at 12:05. Not available until 14:05.';
   assert.deepEqual([s.clubspark.quietUntil, s.clubspark.lookNo, s.clubspark.bookNo], [until, quiet, quiet]);
   t.clock.t = until - 1;
   const idle = t.app.pingFromAgent(HOME, { wait: 0.02 });
@@ -286,7 +286,7 @@ test('turned away: two hours of nothing at ClubSpark from the app, said in the l
   t.clock.t = pausedAt + 2 * MIN;
   const shown = await ask(t, phone, 'clubspark/look', { venue: 'queenspark', date: FRI });
   assert.deepEqual(shown.body.look.slots, known.slots);
-  assert.equal(shown.body.look.note, `Free courts, as ClubSpark showed it at 12:00.\n${quiet}`);
+  assert.equal(shown.body.look.note, quiet);
   assert.deepEqual(await ask(t, phone, 'clubspark/book', { venue: 'queenspark', date: FRI, start: 1080, hours: 1, court: 1 }), refused(409, quiet));
   // A sheet that never showed, as your PC counts it now, is said in its words.
   const v = makeBot();
@@ -311,7 +311,7 @@ test('turned away while booking, or in a late answer, pauses the same; a PC that
   const s = stateOf(t, phone);
   assert.equal(s.clubspark.quietUntil, t.clock.t + 2 * 60 * MIN);
   assert.match(t.tg.calls.find(c => /turned your PC away/.test(c.text)).text, /booking at Queens Park \(ClubSpark refused a request \(HTTP 403\), so your PC stopped there\)/);
-  assert.deepEqual([s.results[0].status, s.results[0].why], ['failed', 'It did not work: ClubSpark refused a request (HTTP 403), so your PC stopped there.']);
+  assert.deepEqual([s.results[0].status, s.results[0].why], ['failed', 'It didn’t work: ClubSpark refused a request (HTTP 403), so your PC stopped there.']);
   // A look whose answer came after the bot stopped waiting: being turned away in it still counts.
   const u = makeBot(NOON, { lookWaitMs: 30 });
   const phoneU = await linkPhone(u);
@@ -319,7 +319,7 @@ test('turned away while booking, or in a late answer, pauses the same; a PC that
   const ping = u.app.pingFromAgent(HOME, { wait: 5 });
   const looking = ask(u, phoneU, 'clubspark/look', { venue: 'maryhill', date: FRI });
   const order = await ping;
-  assert.deepEqual(await looking, refused(409, 'Your PC did not answer in time, so I could not read the free courts.'));
+  assert.deepEqual(await looking, refused(409, 'Your PC didn’t answer in time.'));
   assert.deepEqual(pcSays(u, 'look', { id: order.csLook.id, ok: false, kind: 'challenge', why: 'ClubSpark showed a "Just a moment" page' }), { ok: true, late: true });
   assert.equal(stateOf(u, phoneU).clubspark.quietUntil, u.clock.t + 2 * 60 * MIN);
   // The PC says it is still leaving ClubSpark alone (the bot has restarted since).
@@ -337,7 +337,7 @@ test('a look that cannot be made: the PC asleep or silent, another day being rea
   const a = makeBot();
   const phoneA = await linkPhone(a);
   assert.deepEqual(await ask(a, phoneA, 'clubspark/look', { venue: 'maryhill', date: FRI }),
-    refused(409, 'Your PC is not awake, and it is your PC that reads ClubSpark. Wake it and try again.'));
+    refused(409, 'Your PC isn’t awake. Wake it and try again.'));
   // Silent: the answer that comes later is still kept, and the next look is answered from it.
   const b = makeBot(NOON, { lookWaitMs: 30 });
   const phoneB = await linkPhone(b);
@@ -345,7 +345,7 @@ test('a look that cannot be made: the PC asleep or silent, another day being rea
   const ping = b.app.pingFromAgent(HOME, { wait: 5 });
   const looking = ask(b, phoneB, 'clubspark/look', { venue: 'maryhill', date: FRI });
   const order = await ping;
-  assert.deepEqual(await looking, refused(409, 'Your PC did not answer in time, so I could not read the free courts.'));
+  assert.deepEqual(await looking, refused(409, 'Your PC didn’t answer in time.'));
   assert.deepEqual(pcSays(b, 'look', { id: order.csLook.id, ok: true, sheet: sheetOf(FRI) }), { ok: true, late: true });
   const idle = b.app.pingFromAgent(HOME, { wait: 0.02 });
   assert.deepEqual((await ask(b, phoneB, 'clubspark/look', { venue: 'maryhill', date: FRI })).body.look.slots, SLOTS);
@@ -363,16 +363,16 @@ test('a look that cannot be made: the PC asleep or silent, another day being rea
   assert.equal(stateOf(c, phoneC).clubspark.reads.used, 1);
   // The PC would not read it (its own limits), or ClubSpark's page did not load: said in its words.
   assert.deepEqual(await lookAnswered(c, phoneC, { venue: 'garrowhill', date: FRI }, { ok: false, kind: 'busy', why: 'the nightly booking starts in 20 minutes' }),
-    refused(409, 'Your PC did not read it: the nightly booking starts in 20 minutes.'));
+    refused(409, 'Your PC didn’t read it: the nightly booking starts in 20 minutes.'));
   assert.deepEqual(await lookAnswered(c, phoneC, { venue: 'garrowhill', date: '2026-11-21' }, { ok: false, kind: 'timeout', why: 'the booking sheet did not show' }),
-    refused(409, 'ClubSpark\'s page did not load on your PC in time.'));
+    refused(409, 'ClubSpark didn’t load on your PC in time.'));
   assert.deepEqual(await lookAnswered(c, phoneC, { venue: 'garrowhill', date: '2026-11-22' }, { ok: true, sheet: { courts: COURTS, free: [['what is this', 1]] } }),
-    refused(409, 'ClubSpark\'s sheet could not be read (a sheet I can no longer read).'));
+    refused(409, 'Couldn’t read ClubSpark’s sheet (a sheet I can no longer read).'));
   // Days: today up to the last one open (the 24th opens at 22:00 tonight); a day gone, or not a day.
   for (const date of ['2026-11-16', '2026-11-31']) assert.deepEqual(await ask(c, phoneC, 'clubspark/look', { venue: 'maryhill', date }), refused(400, 'That day is no longer on offer. Pick again.'));
-  assert.deepEqual(await ask(c, phoneC, 'clubspark/look', { venue: 'maryhill', date: '2026-11-24' }), refused(400, 'That day is not open for booking yet: it opens on Tue 17 Nov at 22:00.'));
+  assert.deepEqual(await ask(c, phoneC, 'clubspark/look', { venue: 'maryhill', date: '2026-11-24' }), refused(400, 'Not open yet: opens Tue 17 Nov at 22:00.'));
   assert.deepEqual(await ask(c, phoneC, 'clubspark/look', { venue: 'kelvingrove', date: '2026-11-30' }),
-    refused(400, 'That day is not open for booking yet: it opens on Mon 23 Nov at 22:00. Add it to your list and your PC books it then.'));
+    refused(400, 'Not open yet: opens Mon 23 Nov at 22:00. Add it to your list and your PC books it then.'));
   assert.deepEqual(stateOf(c, phoneC).clubspark.days, { first: TUE, last: '2026-11-23' });
   c.clock.t = at(`${TUE}T22:30:00Z`);
   assert.deepEqual(stateOf(c, phoneC).clubspark.days, { first: TUE, last: '2026-11-24' });
@@ -400,8 +400,8 @@ test('Book now, end to end: asked, collected, each step, the go-ahead, booked; a
   assert.deepEqual(order, { ok: true, csBook: { id, venue: 'queenspark', date: FRI, start: 1080, hours: 1, court: 1 } });
   assert.deepEqual(await t.app.pingFromAgent(HOME), { ok: true });
   const book = () => stateOf(t, phone).clubspark.book;
-  assert.equal(book().line, 'Your PC has it and is starting Chrome…');
-  for (const [stage, line] of [['starting', 'Your PC is opening ClubSpark…'], ['signing-in', 'Your PC is signing in to ClubSpark…'], ['signed-in', 'Signed in. Looking for court 1 on the sheet…']]) {
+  assert.equal(book().line, 'Starting Chrome on your PC…');
+  for (const [stage, line] of [['starting', 'Opening ClubSpark…'], ['signing-in', 'Signing in to ClubSpark…'], ['signed-in', 'Signed in. Looking for court 1 on the sheet…']]) {
     assert.deepEqual(pcSays(t, 'book', { id, stage }), { ok: true });
     assert.deepEqual([book().stage, book().line], [stage, line]);
   }
@@ -470,16 +470,16 @@ test('when the court has gone your PC takes no other, and says so; a refusal, a 
     return { result: s.results[0], book: s.clubspark.book, card: t.tg.calls.find(c => c.method === 'photo'), note: s.notes[0] };
   };
   const gone = await outcome(['starting', 'signing-in', 'signed-in'], { stage: 'gone', why: 'not free at 18:00 any more' });
-  assert.deepEqual([gone.result.status, gone.result.why], ['failed', 'It did not work: court 1 was no longer free for that time (not free at 18:00 any more), and your PC takes no other court.']);
-  assert.equal(gone.card.text, '<b>Not booked · Queens Park · Fri 20 Nov · 18:00–19:00</b>\nIt did not work: court 1 was no longer free for that time (not free at 18:00 any more), and your PC takes no other court.\nBook by hand on ClubSpark if you still want it.');
+  assert.deepEqual([gone.result.status, gone.result.why], ['failed', 'It didn’t work: court 1 was no longer free for that time (not free at 18:00 any more), and your PC takes no other court.']);
+  assert.equal(gone.card.text, '<b>Not booked · Queens Park · Fri 20 Nov · 18:00–19:00</b>\nIt didn’t work: court 1 was no longer free for that time (not free at 18:00 any more), and your PC takes no other court.\nBook by hand on ClubSpark if you still want it.');
   assert.deepEqual([gone.note.kind, gone.note.title], ['missed', 'Not booked']);
   assert.deepEqual([gone.book.ended, gone.book.line], ['gone', 'Not booked: court 1 was no longer free for that time (not free at 18:00 any more), and your PC takes no other court.']);
   const said = async (steps, end) => (await outcome(steps, end)).result.why;
-  assert.equal(await said([], { stage: 'refused', why: 'the nightly booking starts in 20 minutes' }), 'It did not work: your PC did not start it: the nightly booking starts in 20 minutes.');
-  assert.equal(await said(['starting'], { stage: 'failed', why: 'Sign-in did not finish' }), 'It did not work: Sign-in did not finish.');
+  assert.equal(await said([], { stage: 'refused', why: 'the nightly booking starts in 20 minutes' }), 'It didn’t work: your PC did not start it: the nightly booking starts in 20 minutes.');
+  assert.equal(await said(['starting'], { stage: 'failed', why: 'Sign-in did not finish' }), 'It didn’t work: Sign-in did not finish.');
   assert.equal(await said(['starting', 'signing-in'], { stage: 'quit', why: 'the booking tool was still running after ten minutes, so it was stopped' }),
-    'It did not work: your PC\'s booking stopped before it booked anything (the booking tool was still running after ten minutes, so it was stopped).');
-  assert.equal(await said(['starting', 'signing-in', 'signed-in', 'booking'], { stage: 'quit' }), 'It did not work: your PC\'s booking stopped while it was booking court 1: check ClubSpark for it.');
+    'It didn’t work: your PC\'s booking stopped before it booked anything (the booking tool was still running after ten minutes, so it was stopped).');
+  assert.equal(await said(['starting', 'signing-in', 'signed-in', 'booking'], { stage: 'quit' }), 'It didn’t work: your PC\'s booking stopped while it was booking court 1: check ClubSpark for it.');
   // A quit after the tool's own word changes nothing.
   const t = makeBot();
   const phone = await linkPhone(t);
@@ -502,7 +502,7 @@ test('with nobody to carry it out: not collected, collected and never started, o
   a.clock.t += 1;
   await a.app.tick();
   await settle();
-  assert.deepEqual([stateOf(a, phoneA).clubspark.book.ended, stateOf(a, phoneA).results[0].why], ['nopickup', 'It did not work: your PC did not collect it in time, so nothing was booked.']);
+  assert.deepEqual([stateOf(a, phoneA).clubspark.book.ended, stateOf(a, phoneA).results[0].why], ['nopickup', 'It didn’t work: your PC did not collect it in time, so nothing was booked.']);
   assert.deepEqual(await a.app.pingFromAgent(HOME), { ok: true });                                   // not handed over late
   // Collected, then nothing for a minute and a half: it never started.
   const b = makeBot();
@@ -511,7 +511,7 @@ test('with nobody to carry it out: not collected, collected and never started, o
   b.clock.t += 90 * 1000;
   await b.app.tick();
   await settle();
-  assert.deepEqual([stateOf(b, phoneB).clubspark.book.ended, stateOf(b, phoneB).results[0].why], ['nostart', 'It did not work: your PC collected it but did not start on it, so nothing was booked.']);
+  assert.deepEqual([stateOf(b, phoneB).clubspark.book.ended, stateOf(b, phoneB).results[0].why], ['nostart', 'It didn’t work: your PC collected it but did not start on it, so nothing was booked.']);
   assert.deepEqual(pcSays(b, 'book', { id: bb.id, stage: 'booking' }), { ok: true, stop: true });     // it never gets the go-ahead after that
   // Started, then silent: over a minute, the state says so; four minutes, it is over.
   const c = makeBot();
@@ -521,12 +521,12 @@ test('with nobody to carry it out: not collected, collected and never started, o
   c.clock.t += 75 * 1000;
   await c.app.tick();
   assert.deepEqual([stateOf(c, phoneC).clubspark.book.live, stateOf(c, phoneC).clubspark.book.line], [true, 'No word from your PC for over a minute.']);
-  assert.match(stateOf(c, phoneC).pc.sleepWhy, /booking a court for you/);
+  assert.match(stateOf(c, phoneC).pc.sleepWhy, /Your PC is booking a court\. Wait for it to finish\./);
   c.clock.t += 165 * 1000;
   await c.app.tick();
   await settle();
   assert.deepEqual([stateOf(c, phoneC).clubspark.book.ended, stateOf(c, phoneC).results[0].why],
-    ['silent', 'It did not work: no word from your PC for four minutes, so I stopped following it. It books nothing without my go-ahead, so nothing was booked.']);
+    ['silent', 'It didn’t work: no word from your PC for four minutes, so I stopped following it. It books nothing without my go-ahead, so nothing was booked.']);
   assert.deepEqual(pcSays(c, 'book', { id: cc.id, stage: 'booking' }), { ok: true, stop: true });
   // Silent after the go-ahead: it may have booked. Its own word, when it comes, replaces mine.
   const d = makeBot();
@@ -536,7 +536,7 @@ test('with nobody to carry it out: not collected, collected and never started, o
   d.clock.t += 4 * MIN;
   await d.app.tick();
   await settle();
-  assert.equal(stateOf(d, phoneD).results[0].why, 'It did not work: no word from your PC while it was booking court 1: check ClubSpark for it.');
+  assert.equal(stateOf(d, phoneD).results[0].why, 'It didn’t work: no word from your PC while it was booking court 1: check ClubSpark for it.');
   assert.deepEqual(pcSays(d, 'book', { id: dd.id, stage: 'booked', court: '1', gate: '9911' }), { ok: true });
   await settle();
   const r = stateOf(d, phoneD).results[0];
@@ -578,14 +578,14 @@ test('never alongside a hold, the nightly run, or another booking; at most four 
   let s = stateOf(t, phone);
   // While it books: no second booking, no look, no hold, no sleep.
   assert.equal(s.clubspark.bookNo, 'Your PC is already booking a court.');
-  assert.equal(s.clubspark.lookNo, 'Your PC is booking a court just now. Look again when it has finished.');
-  assert.equal(s.indoor.holdNo, 'Your PC is booking a court at a park just now. Hold one when it has finished.');
+  assert.equal(s.clubspark.lookNo, 'Your PC is booking a court. Look again when it’s done.');
+  assert.equal(s.indoor.holdNo, 'Your PC is booking a park court. Hold one when it’s done.');
   await t.app.handleUpdate({ update_id: 1, callback_query: { id: 'q0', data: 'gh:g:20261120:1800:3', from: { id: OWNER }, message: { message_id: 7, chat: { id: OWNER, type: 'private' } } } });
   assert.equal(t.tg.answers[t.tg.answers.length - 1], 'Your PC is booking a court.');
   assert.equal(stateOf(t, phone).hold, null);
-  assert.deepEqual(await ask(t, phone, 'pc/sleep'), refused(409, 'Your PC is booking a court for you. Wait for it to finish.'));
+  assert.deepEqual(await ask(t, phone, 'pc/sleep'), refused(409, 'Your PC is booking a court. Wait for it to finish.'));
   await t.app.handleUpdate(say(OWNER, '/sleep'));
-  assert.equal(t.tg.last().text, 'Your PC is booking a court for you. Wait for it to finish.');
+  assert.equal(t.tg.last().text, 'Your PC is booking a court. Wait for it to finish.');
   pcSays(t, 'book', { id, stage: 'gone', why: 'not free at 18:00 any more' });
   await settle();
   s = stateOf(t, phone);
@@ -599,7 +599,7 @@ test('never alongside a hold, the nightly run, or another booking; at most four 
   await t.app.pingFromAgent(HOME);
   assert.equal((await lookAnswered(t, phone, { venue: 'garrowhill', date: FRI })).status, 200);
   assert.deepEqual(await ask(t, phone, 'clubspark/book', { venue: 'garrowhill', date: FRI, start: 1080, hours: 1, court: 1 }),
-    refused(409, 'That is 4 bookings within an hour, and each is a sign-in to ClubSpark. The next can start at 13:00.'));
+    refused(409, 'That’s 4 bookings in an hour. Next at 13:00.'));
   // A hold under way at Glasgow Club: no booking at a park.
   const h = makeBot();
   const phoneH = await linkPhone(h);
@@ -614,7 +614,7 @@ test('never alongside a hold, the nightly run, or another booking; at most four 
   await lookAnswered(z, phoneZ, { venue: 'queenspark', date: FRI });
   z.clock.t += 4 * MIN;
   assert.deepEqual(await ask(z, phoneZ, 'clubspark/book', { venue: 'queenspark', date: FRI, start: 1080, hours: 1, court: 1 }),
-    refused(409, 'Your PC is not awake, and it is your PC that signs in to ClubSpark and books. Wake it and try again.'));
+    refused(409, 'Your PC isn’t awake. Wake it and try again.'));
 });
 
 test('a booking asked for, then ClubSpark turning your PC away before it collects it: not handed over', async () => {
@@ -633,7 +633,7 @@ test('a booking asked for, then ClubSpark turning your PC away before it collect
   assert.deepEqual(await t.app.pingFromAgent(HOME), { ok: true });
   await settle();
   const s = stateOf(t, phone);
-  assert.deepEqual([s.clubspark.book.ended, s.results[0].why], ['notsent', 'It did not work: ClubSpark had turned your PC away, so it was not handed to your PC and nothing was booked.']);
+  assert.deepEqual([s.clubspark.book.ended, s.results[0].why], ['notsent', 'It didn’t work: ClubSpark had turned your PC away, so it was not handed to your PC and nothing was booked.']);
 });
 
 test('a late word from your PC about a booking a newer one replaced still counts, and a booking always beats an ending said before it', async () => {
@@ -680,11 +680,11 @@ test('once the go-ahead was given, a failure says to check ClubSpark (not a stop
     await settle();
     return stateOf(t, phone).results[0].why;
   };
-  assert.equal(await failedWith({ why: 'element click intercepted' }), 'It did not work: element click intercepted. It was booking when that happened: check ClubSpark for it.');
-  assert.equal(await failedWith({ why: 'element click intercepted' }, false), 'It did not work: element click intercepted.');
-  assert.equal(await failedWith({ why: 'ClubSpark asked for payment; nothing was booked or paid', kind: 'payment' }), 'It did not work: ClubSpark asked for payment; nothing was booked or paid.');
+  assert.equal(await failedWith({ why: 'element click intercepted' }), 'It didn’t work: element click intercepted. It was booking when that happened: check ClubSpark for it.');
+  assert.equal(await failedWith({ why: 'element click intercepted' }, false), 'It didn’t work: element click intercepted.');
+  assert.equal(await failedWith({ why: 'ClubSpark asked for payment; nothing was booked or paid', kind: 'payment' }), 'It didn’t work: ClubSpark asked for payment; nothing was booked or paid.');
   assert.equal(await failedWith({ why: 'after "Confirm", ClubSpark went on to a payment page, where your PC paid nothing: check ClubSpark for it' }),
-    'It did not work: after "Confirm", ClubSpark went on to a payment page, where your PC paid nothing: check ClubSpark for it.');
+    'It didn’t work: after "Confirm", ClubSpark went on to a payment page, where your PC paid nothing: check ClubSpark for it.');
 });
 
 test('still at it twelve minutes after it took the booking: said as that, not as silence', async () => {
@@ -703,8 +703,8 @@ test('still at it twelve minutes after it took the booking: said as that, not as
     const s = stateOf(t, phone);
     return [s.clubspark.book.ended, s.results[0].why];
   };
-  assert.deepEqual(await ended(false), ['timeout', 'It did not work: your PC was still at it twelve minutes after it took the booking, so I stopped following it. It books nothing without my go-ahead, so nothing was booked.']);
-  assert.deepEqual(await ended(true), ['timeout', 'It did not work: your PC was still at it twelve minutes after it took the booking, so I stopped following it: check ClubSpark for court 1.']);
+  assert.deepEqual(await ended(false), ['timeout', 'It didn’t work: your PC was still at it twelve minutes after it took the booking, so I stopped following it. It books nothing without my go-ahead, so nothing was booked.']);
+  assert.deepEqual(await ended(true), ['timeout', 'It didn’t work: your PC was still at it twelve minutes after it took the booking, so I stopped following it: check ClubSpark for court 1.']);
 });
 
 // ---------- the venues ----------

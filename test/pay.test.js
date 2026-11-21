@@ -325,24 +325,24 @@ test('a court in the basket that the PC can pay for: can.pay, and Telegram says 
   const h = t.hold();
   assert.deepEqual([h.stage, h.can], ['held', { release: true, done: true, pay: true }]);
   assert.deepEqual(h.lines, [
-    'In your basket: £23.00 to pay. Your PC signed in as you and put it there at 12:00. The payment page is open in Chrome on your PC.',
-    'Pay from the app: your PC pays £23.00 with the card it keeps (Visa ending 4242), once you confirm it there.',
-    'Or pay in the Chrome window on your PC, then tap I have paid.',
-    'Unpaid, your PC lets it go at 12:12.',
+    '£23.00 to pay. In your basket since 12:00.',
+    'Pay here, or in Chrome on your PC and tap I Have Paid.',
+    'Let go at 12:12 if unpaid.',
   ]);
-  // Its card in Telegram (a Hold tap there brings it): the same words, and no Pay button, nor an "Open my basket".
+  // Its card in Telegram (a Hold tap there brings it): the same words but for where to pay (Telegram's
+  // "here" is the app) and its own button's name; and no Pay button, nor an "Open my basket".
   const tap = { update_id: 1, callback_query: { id: 'q1', data: 'gh:g:20261120:1900:3', from: { id: OWNER }, message: { message_id: 8, chat: { id: OWNER, type: 'private' } } } };
   await t.app.handleUpdate(tap);
   await settle();
   const card = t.tg.last();
-  assert.deepEqual(card.text.split('\n').slice(1).map(A.plain), h.lines);
+  assert.deepEqual(card.text.split('\n').slice(1).map(A.plain), [h.lines[0], 'Pay in the app, or in Chrome on your PC and tap I have paid.', h.lines[2]]);
   assert.deepEqual(card.extra.reply_markup.inline_keyboard.flat().map(b => b.text), ['I have paid', 'Let it go']);
   // The PC cannot pay for it: why, and no can.pay.
   const off = await inBasket(NOON, { pay: 'off', payWhy: 'no card is kept on this PC' });
-  assert.deepEqual([off.hold().can.pay, off.hold().lines[1], off.hold().lines[2]], [false, 'Paying from the app is not on for this court: no card is kept on this PC.', 'Pay in the Chrome window on your PC, then tap I have paid.']);
+  assert.deepEqual([off.hold().can.pay, off.hold().lines[1], off.hold().lines[2]], [false, 'Can’t pay here: no card is kept on this PC.', 'Pay in Chrome on your PC and tap I Have Paid.']);
   // An older PC says nothing about paying: nothing is said of it, and Pay is not taken.
   const old = await inBasket(NOON, { pay: '' });
-  assert.deepEqual([old.hold().can.pay, old.hold().lines.length, old.hold().lines[1]], [false, 3, 'Pay in the Chrome window on your PC, then tap I have paid.']);
+  assert.deepEqual([old.hold().can.pay, old.hold().lines.length, old.hold().lines[1]], [false, 3, 'Pay in Chrome on your PC and tap I Have Paid.']);
   assert.deepEqual(await ask(old, old.phone, 'hold/order', PAY(old)), refused(409, 'Your PC has not said that it can pay for this court.'));
   // A card added while the court is held: the PC's next note says it can pay now.
   const late = await inBasket(NOON, { pay: 'off', payWhy: 'no card is kept on this PC' });
@@ -355,7 +355,7 @@ test('Pay from the app: handed to the PC with its next note, once, with the amou
   const cvc = sealedOf(40);
   const r = await ask(t, t.phone, 'hold/order', { id: t.id, what: 'pay', amount: '£23.00', sealed: cvc });
   assert.equal(r.status, 200);
-  assert.deepEqual([r.body.state.hold.stage, r.body.state.hold.lines, r.body.state.hold.can], ['held', ['In your basket: £23.00 to pay.', 'Telling your PC to pay £23.00, as you asked in the app…'], { release: false, done: false, pay: false }]);
+  assert.deepEqual([r.body.state.hold.stage, r.body.state.hold.lines, r.body.state.hold.can], ['held', ['£23.00 to pay.', 'Telling your PC to pay £23.00…'], { release: false, done: false, pay: false }]);
   assert.equal(t.app.sealedHeld(), 1);
   // The PC's next note takes the order; the code goes with it, and is not kept here.
   assert.deepEqual(t.beat(), { ok: true, order: 'pay', amount: '£23.00', sealed: cvc });
@@ -366,7 +366,7 @@ test('Pay from the app: handed to the PC with its next note, once, with the amou
   assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'done' }), refused(409, 'Your PC has been told to pay. Wait for its answer.'));
   // Paying: the PC says so before it types a key.
   assert.deepEqual(t.pc('paying', { price: '£23.00', left: 11 * 60000 }), { ok: true });
-  assert.deepEqual([t.hold().stage, t.hold().lines, t.hold().can], ['paying', ['Paying £23.00: your PC is typing in the card it keeps and pressing Pay…'], { release: false, done: false, pay: false }]);
+  assert.deepEqual([t.hold().stage, t.hold().lines, t.hold().can], ['paying', ['Paying £23.00 with the card your PC keeps…'], { release: false, done: false, pay: false }]);
   assert.deepEqual(await ask(t, t.phone, 'hold/order', PAY(t)), refused(409, 'Your PC is paying for it already.'));
   assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'release' }), refused(409, 'Your PC is paying for it. Wait for its answer.'));
   // Pressed.
@@ -389,7 +389,7 @@ test('Pay from the app: handed to the PC with its next note, once, with the amou
   assert.deepEqual(t.pc('booked', { words: 'Thank you. Your booking is confirmed', pressed: true }), { ok: true });
   const h = t.hold();
   assert.deepEqual([h.ended, h.live, h.stage, h.can], ['booked', false, 'approve', { release: false, done: false, pay: false }]);
-  assert.deepEqual(h.lines, ['Booked and paid. Your PC pressed Pay, and the court is on your Bookings page at Glasgow Club now; it was not before.', 'After the payment the page said: “Thank you. Your booking is confirmed”']);
+  assert.deepEqual(h.lines, ['Booked and paid. Now on your Glasgow Club Bookings page.', 'The page said: “Thank you. Your booking is confirmed”']);
   await settle();
   const note = stateOf(t, t.phone).notes[0];
   assert.deepEqual([note.kind, note.title], ['hold', 'Booked · Gorbals court 3']);
@@ -404,10 +404,10 @@ test('every refusal of Pay, in its own words, and a price that is not the one yo
   const s = sealedOf(40);
   const pay = (extra = {}) => ask(t, t.phone, 'hold/order', { id: t.id, what: 'pay', amount: '£23.00', sealed: s, ...extra });
   // The amount must be the price your PC read on the payment page: nothing else goes to the PC.
-  for (const amount of ['£25.00', '£23', '£2.30', '£0.00']) assert.deepEqual(await pay({ amount }), refused(409, `The price is £23.00, not ${amount}. Look at it again before you pay.`));
+  for (const amount of ['£25.00', '£23', '£2.30', '£0.00']) assert.deepEqual(await pay({ amount }), refused(409, `The price is £23.00, not ${amount}. Check it before you pay.`));
   assert.deepEqual(await pay({ amount: '23.00' }), refused(400, A.WHY.pay));
   assert.deepEqual(await pay({ sealed: 'x' }), refused(400, A.WHY.sealed));
-  assert.deepEqual(await pay({ id: 'ffffffffffff' }), refused(409, 'I am no longer following that hold. If your PC still has it, it lets it go by itself when its time is up.'));
+  assert.deepEqual(await pay({ id: 'ffffffffffff' }), refused(409, 'No longer following that hold. Your PC lets it go when its time is up.'));
   assert.deepEqual(t.beat(), { ok: true });                                                   // nothing went to the PC
   // The card: being replaced, being forgotten, or none.
   const sealedCard = sealedOf();
@@ -429,12 +429,12 @@ test('every refusal of Pay, in its own words, and a price that is not the one yo
   // The PC has gone quiet.
   t.clock.t += 75000;
   await t.app.tick();
-  assert.deepEqual(await pay(), refused(409, 'I have not heard from your PC for over a minute, so I am not asking it to pay.'));
+  assert.deepEqual(await pay(), refused(409, 'No word from your PC for over a minute, so it isn’t asked to pay.'));
   t.beat();
   // Too little time left on the hold.
   t.clock.t = t.hold().until - 29999;
   t.beat();
-  assert.deepEqual(await pay(), refused(409, 'Too little of the hold\'s time is left to pay for it from here. Pay at your PC, or let it go.'));
+  assert.deepEqual(await pay(), refused(409, 'Too little time left to pay from here. Pay at your PC, or let it go.'));
   assert.equal(t.hold().can.pay, false);
   // Before the basket, after Let it go, after I have paid, and over.
   const early = await withCard();
@@ -470,13 +470,13 @@ test('an order the PC never came for is dropped after half a minute, unsent: not
   await ask(t, t.phone, 'hold/order', PAY(t));
   t.clock.t += 30000;
   await t.app.tick();
-  assert.equal(t.hold().lines[1], 'Telling your PC to pay £23.00, as you asked in the app…');
+  assert.equal(t.hold().lines[1], 'Telling your PC to pay £23.00…');
   t.clock.t += 1;
   await t.app.tick();
   assert.equal(t.app.sealedHeld(), 0);
   assert.deepEqual(t.hold().lines.slice(1, 3), [
     'Not paid from the app: your PC did not come for it within half a minute. Your PC pressed nothing, so you can ask again there.',
-    'Pay from the app: your PC pays £23.00 with the card it keeps (Visa ending 4242), once you confirm it there.',
+    'Pay here, or in Chrome on your PC and tap I Have Paid.',
   ]);
   assert.deepEqual(t.beat(), { ok: true });                                                   // never handed over late
   // Asked again: it goes.
@@ -489,7 +489,7 @@ test('an order that did not reach the PC: its next notes are from the basket, no
   const t = await told();
   // One note from the basket may be an older one, slow on the way and overtaken by the one that took the order: nothing changes for it.
   assert.deepEqual(t.beat(), { ok: true });
-  assert.deepEqual([t.hold().can.pay, t.hold().lines[1]], [false, 'Telling your PC to pay £23.00, as you asked in the app…']);
+  assert.deepEqual([t.hold().can.pay, t.hold().lines[1]], [false, 'Telling your PC to pay £23.00…']);
   const slow = await told();
   slow.beat();
   slow.pc('paying', { price: '£23.00', left: 11 * 60000 });                                      // and then the PC says it is paying: it had the order all along
@@ -503,7 +503,7 @@ test('an order that did not reach the PC: its next notes are from the basket, no
   const q = await told();
   q.clock.t += 30001;
   await q.app.tick();
-  assert.deepEqual(q.hold().lines, ['In your basket: £23.00 to pay.', 'Your PC was told to pay and has not said how it went. Before you pay any other way, look at the Chrome window on your PC, under Bookings on Glasgow Club\'s site and in your banking app.']);
+  assert.deepEqual(q.hold().lines, ['£23.00 to pay.', 'Your PC was told to pay and has not said how it went. Before you pay any other way, look at the Chrome window on your PC, under Bookings on Glasgow Club\'s site and in your banking app.']);
 });
 
 test('the PC could not pay: it says why, nothing was pressed, and it does not try again; the court can still be let go', async () => {
@@ -513,10 +513,10 @@ test('the PC could not pay: it says why, nothing was pressed, and it does not tr
   assert.deepEqual([h.stage, h.can], ['held', { release: true, done: true, pay: false }]);
   assert.deepEqual(h.lines.slice(1), [
     'Your PC could not pay: the payment page says "Pay £25.00", not the £23.00 you confirmed. Your PC pressed nothing.',
-    'Pay in the Chrome window on your PC, then tap I have paid.',
-    'Unpaid, your PC lets it go at 12:12.',
+    'Pay in Chrome on your PC and tap I Have Paid.',
+    'Let go at 12:12 if unpaid.',
   ]);
-  assert.deepEqual(await ask(t, t.phone, 'hold/order', PAY(t)), refused(409, 'Your PC tried to pay for it once and could not, so it will not try again. Pay at your PC, or let it go.'));
+  assert.deepEqual(await ask(t, t.phone, 'hold/order', PAY(t)), refused(409, 'Your PC couldn’t pay for it and won’t try again. Pay at your PC, or let it go.'));
   assert.equal((await ask(t, t.phone, 'hold/order', { id: t.id, what: 'release' })).status, 200);
   assert.deepEqual(t.beat({ pay: 'failed', payWhy: 'x' }), { ok: true, order: 'release' });
   // It stopped after typing, before the press: the stage goes back to the basket, unpaid.
@@ -564,7 +564,7 @@ test('the PC dies in the middle of paying: what is known of the press is said wi
   assert.deepEqual(d.pc('paying', { beat: true, price: '£23.00', pressed: true, left: 0 }), { ok: true });
   // ...and its own word on how it ended, when it comes, replaces the bot's guess.
   d.pc('booked', { pressed: true, words: '' });
-  assert.equal(d.hold().lines[0], 'Booked and paid. Your PC pressed Pay, and the court is on your Bookings page at Glasgow Club now; it was not before.');
+  assert.equal(d.hold().lines[0], 'Booked and paid. Now on your Glasgow Club Bookings page.');
   // Told, and then silence: "unheard".
   const e = await told();
   e.clock.t += 20 * 60000;
@@ -660,7 +660,7 @@ test('the bot restarted while the PC paid: you are told in a message and a note,
   fresh.app.holdFromAgent({ id: 'a1b2c3d4e5f6', stage: 'gone' });
   await settle();
   assert.equal(fresh.tg.calls.length, 2);
-  assert.equal(fresh.tg.last().text.split('\n')[2], '<b>Booked and paid.</b> Your PC pressed Pay, and the court is on your Bookings page at Glasgow Club now; it was not before.');
+  assert.equal(fresh.tg.last().text.split('\n')[2], '<b>Booked and paid.</b> Now on your Glasgow Club Bookings page.');
   notes = stateOf(fresh, phone).notes;
   assert.deepEqual(notes.map(n => n.title), ['Booked · Gorbals court 3', 'Paying · Gorbals court 3']);
   // The PC could not pay, after a restart: said once, as a note too.

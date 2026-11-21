@@ -308,7 +308,7 @@ test('Scotstoun\'s outdoor courts: their own days, day, time and hold screens, b
   fits(days);
   const got = { at: at(`${TUE}T12:00:05Z`), ...read('2026-11-20', { 'Outdoor Tennis Court 1': [slot('2026-11-20', 8), slot('2026-11-20', 17)], 'Outdoor Tennis Court 2': [slot('2026-11-20', 17)] }, ctx.now) };
   const day = UI.indoorDay(ctx, 'o', '2026-11-20', got);
-  assert.equal(day.caption, '<b>Scotstoun outdoor · Fri 20 Nov</b>\nFree start times, as Glasgow Club showed it at 12:00. Each is one hour. Pick one.');
+  assert.equal(day.caption, '<b>Scotstoun outdoor · Fri 20 Nov</b>\nUpdated 12:00. One hour each.');
   assert.deepEqual(flat(day).map(b => [b.text, b.callback_data || b.url]), [
     ['08:00', 'gt:o:20261120:0800'], ['17:00', 'gt:o:20261120:1700'],
     ['Refresh', 'gr:o:20261120'], ['Open the sheet', 'https://glasgowclub.gladstonego.cloud/book/calendar/SA008?activityDate=2026-11-20T00:00:00.000Z'],
@@ -345,7 +345,7 @@ test('a day at a centre: its free start times as buttons, with the sheet one tap
     'Tennis Hall Court 3': [slot('2026-11-20', 18), slot('2026-11-20', 19)],
   }, ctx.now) };
   const s = UI.indoorDay(ctx, 'g', '2026-11-20', got);
-  assert.equal(s.caption, '<b>Gorbals · Fri 20 Nov</b>\nFree start times, as Glasgow Club showed it at 12:00. Each is one hour. Pick one.');
+  assert.equal(s.caption, '<b>Gorbals · Fri 20 Nov</b>\nUpdated 12:00. One hour each.');
   assert.deepEqual(flat(s).map(b => [b.text, b.callback_data || b.url]), [
     ['07:00', 'gt:g:20261120:0700'], ['18:00', 'gt:g:20261120:1800'], ['19:00', 'gt:g:20261120:1900'],
     ['Refresh', 'gr:g:20261120'], ['Open the sheet', 'https://glasgowclub.gladstonego.cloud/book/calendar/S0815?activityDate=2026-11-20T00:00:00.000Z'],
@@ -354,13 +354,13 @@ test('a day at a centre: its free start times as buttons, with the sheet one tap
   fits(s);
   // Courts on the sheet, none of them free.
   const none = UI.indoorDay(ctx, 's', '2026-11-20', { at: readAt, ...read('2026-11-20', { 'Tennis Court 1': [slot('2026-11-20', 18, { status: 'Unavailable' })] }, ctx.now) });
-  assert.equal(none.caption, '<b>Scotstoun · Fri 20 Nov</b>\nNo court is free that day, as Glasgow Club showed it at 12:00.');
+  assert.equal(none.caption, '<b>Scotstoun · Fri 20 Nov</b>\nUpdated 12:00.\nNo court free that day.');
   assert.deepEqual(flat(none).map(b => b.text), ['Refresh', 'Open the sheet', 'Back', 'Menu']);
   assert.match(flat(none)[1].url, /\/SA011\?/);
   fits(none);
   // No courts on the sheet at all: said as that.
   const bare = UI.indoorDay(ctx, 's', '2026-11-20', { at: readAt, slots: [], listed: 0 });
-  assert.equal(bare.caption, '<b>Scotstoun · Fri 20 Nov</b>\nGlasgow Club\'s sheet lists no courts at all that day, as Glasgow Club showed it at 12:00. Open the sheet to see for yourself.');
+  assert.equal(bare.caption, '<b>Scotstoun · Fri 20 Nov</b>\nUpdated 12:00.\nGlasgow Club lists no courts that day. Open the sheet to check.');
   // A full day of sixteen hours on six courts still fits.
   const full = {};
   for (let c = 1; c <= 6; c++) full[`Tennis Court ${c}`] = Array.from({ length: 16 }, (_, i) => slot('2026-11-20', 6 + i));
@@ -377,6 +377,7 @@ test('a day that has not opened says when it does, and offers no times to tap', 
   const s = UI.indoorDay(ctx, 's', '2026-11-27', { at: ctx.now, ...read('2026-11-27', full, ctx.now) });
   assert.equal(s.caption, [
     '<b>Scotstoun · Fri 27 Nov</b>',
+    'Updated 16:00.',
     'Not open for booking yet: Glasgow Club opens it at 00:00 on Fri 20 Nov (the midnight after Thu 19 Nov).',
     'Free as it stands: 06:00, 07:00, 08:00, 09:00, 10:00, 11:00, 12:00, 13:00, 14:00, 15:00, 16:00, 17:00, 18:00, 19:00, 20:00, 21:00.',
   ].join('\n'));
@@ -476,7 +477,7 @@ test('booking an indoor court by tapping: menu, where, Gorbals, day, time, and t
   const answered = tg.answers.length;
   await tap(app, 'gd:g:20261120', card);
   // The card says it is reading, then shows the times.
-  assert.deepEqual(tg.calls.map(second), ['Reading Glasgow Club\'s sheet…', 'Free start times, as Glasgow Club showed it at 12:00. Each is one hour. Pick one.']);
+  assert.deepEqual(tg.calls.map(second), ['Reading Glasgow Club\'s sheet…', 'Updated 12:00. One hour each.']);
   assert.deepEqual(tg.calls.map(c => [c.method, c.id]), [['caption', card], ['caption', card]]);
   assert.deepEqual(glasgow.asked, [`g:${FRI}`]);
   // The tap was answered once, without words, and before the wait for the site.
@@ -494,7 +495,7 @@ test('booking an indoor court by tapping: menu, where, Gorbals, day, time, and t
   tg.clear();
   await tap(app, find({ extra: { reply_markup: UI.indoorSlot({ now: at(`${TUE}T12:00:00Z`) }, 'g', FRI, 1080, { at: at(`${TUE}T12:00:00Z`), slots: friday() }).keyboard } }, 'Other times').callback_data, card);
   assert.equal(tg.calls.length, 1);
-  assert.match(tg.last().text, /Free start times/);
+  assert.match(tg.last().text, /Updated \d\d:\d\d\. One hour each\./);
 });
 
 test('Refresh reads the day afresh; a time that has gone says so and shows what is left', async () => {
@@ -506,11 +507,11 @@ test('Refresh reads the day afresh; a time that has gone says so and shows what 
   t.tg.clear();
   await tap(t.app, 'gr:g:20261120', card);
   assert.deepEqual(t.glasgow.asked, [`g:${FRI}`, `g:${FRI}:fresh`]);
-  assert.deepEqual(t.tg.calls.map(second), ['Reading Glasgow Club\'s sheet…', 'Free start times, as Glasgow Club showed it at 12:00. Each is one hour. Pick one.']);   // a refresh is a read, so it says so
+  assert.deepEqual(t.tg.calls.map(second), ['Reading Glasgow Club\'s sheet…', 'Updated 12:00. One hour each.']);   // a refresh is a read, so it says so
   // Someone takes the 19:00 court in the meantime.
   t.days[`g:${FRI}`] = friday().filter(s => s.start !== 1140);
   await tap(t.app, 'gt:g:20261120:1900', card);
-  assert.match(t.tg.last().text, /^<b>Gorbals · Fri 20 Nov<\/b>\nNo court is free at 19:00 any more\.\nFree start times/);
+  assert.match(t.tg.last().text, /^<b>Gorbals · Fri 20 Nov<\/b>\nNo court is free at 19:00 any more\.\nUpdated 12:00\. One hour each\./);
   assert.deepEqual(buttons(t.tg.last()).filter(b => (b.callback_data || '').startsWith('gt:')).map(b => b.text), ['18:00']);
 });
 
@@ -522,12 +523,12 @@ test('when Glasgow Club cannot be read the card says why and still carries the l
   const card = t.tg.last().id;
   await tap(t.app, 'gd:s:20261120', card);
   // The PC is not awake, and the site turns this server away: said as that, with the link.
-  assert.match(t.tg.last().text, /^<b>Scotstoun · Fri 20 Nov<\/b>\nGlasgow Club's site turns this server away, so your PC reads the free courts for me, and your PC is not awake\. Wake it and try again, or open the sheet\.\nThe sheet itself still opens from the button below\.$/);
+  assert.match(t.tg.last().text, /^<b>Scotstoun · Fri 20 Nov<\/b>\nYour PC reads Glasgow Club’s courts, and it isn’t awake\. Wake it and try again, or open the sheet\.\nThe sheet itself still opens from the button below\.$/);
   assert.equal(find(t.tg.last(), 'Open the sheet').url, `https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=${FRI}T00:00:00.000Z`);
   assert.deepEqual(buttons(t.tg.last()).map(b => b.text), ['Try again', 'Open the sheet', 'Back', 'Menu']);       // waking is not set up here, so no Wake button
   // A time tapped on an old card, with the site unreadable: the same card, no crash.
   await tap(t.app, 'gt:s:20261120:1800', card);
-  assert.match(t.tg.last().text, /your PC is not awake/);
+  assert.match(t.tg.last().text, /and it isn’t awake/);
   // /status says how the last look went.
   await t.app.handleUpdate(say(OWNER, '/status'));
   assert.match(t.tg.last().text, /\nIndoor courts \(Glasgow Club\): could not be read from this server at 12:00:00 \(its site was checking visitors\)\n/);
@@ -576,7 +577,7 @@ test('a card Telegram will not change: one new card takes over, and the times la
   assert.deepEqual(t.tg.calls.map(c => c.method), ['photo', 'caption']);              // one new card, then the same one changed
   assert.equal(t.tg.calls[1].id, t.tg.calls[0].id);
   assert.notEqual(t.tg.calls[0].id, old);
-  assert.deepEqual(t.tg.calls.map(second), ['Reading Glasgow Club\'s sheet…', 'Free start times, as Glasgow Club showed it at 12:00. Each is one hour. Pick one.']);
+  assert.deepEqual(t.tg.calls.map(second), ['Reading Glasgow Club\'s sheet…', 'Updated 12:00. One hour each.']);
 });
 
 test('a failure after the tap was answered is said in a message, not swallowed', async () => {
@@ -599,7 +600,7 @@ test('indoor buttons on a wide (text) card, and with the "new card" mark, behave
   t.tg.clear();
   await tap(t.app, 'gd:g:20261120', wide, { text: 'x' });
   assert.deepEqual(t.tg.calls.map(c => [c.method, c.id]), [['edit', wide], ['edit', wide]]);       // the text card is edited as text, both times
-  assert.match(t.tg.last().text, /Free start times/);
+  assert.match(t.tg.last().text, /Updated \d\d:\d\d\. One hour each\./);
   assert.equal(t.tg.last().extra.link_preview_options.url, 'https://bot.example.app/card/home-offline?v=hash-home-offline');
   // "n:" keeps the message that was tapped and opens a card for the answer.
   t.tg.clear();
@@ -637,7 +638,7 @@ test('Kelvingrove is one tap further on, and everything about it is as before', 
   await t.app.handleUpdate(say(OWNER, '/help'));
   assert.match(t.tg.last().text, /\/gorbals {2}and {2}\/scotstoun/);
   await t.app.handleUpdate(say(OWNER, '/status'));
-  assert.match(t.tg.last().text, /\(version 2\.10\.1\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
+  assert.match(t.tg.last().text, /\(version 2\.10\.3\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
 });
 
 test('the look at Glasgow Club on start-up is said in the log, whichever way it goes, and /status has it', async () => {
@@ -682,7 +683,7 @@ test('while your PC is awake it reads Glasgow Club for the bot: asked on its pin
   assert.match(order.look.id, /^[0-9a-f]{12}$/);
   assert.deepEqual(t.app.lookFromAgent({ id: order.look.id, ok: true, sheet: fridayFromPc() }), { ok: true });
   await tapped;
-  assert.deepEqual(t.tg.calls.map(second), ['Reading Glasgow Club\'s sheet…', 'Free start times, as Glasgow Club showed it at 12:00. Each is one hour. Pick one.']);
+  assert.deepEqual(t.tg.calls.map(second), ['Reading Glasgow Club\'s sheet…', 'Updated 12:00. One hour each.']);
   assert.deepEqual(buttons(t.tg.last()).filter(b => (b.callback_data || '').startsWith('gt:')).map(b => b.text), ['18:00', '19:00']);
   assert.equal(t.site.calls.length, 0);                                 // nothing was asked of the site from here
   // The time's screen comes from what the PC read; no second look within the minute.
@@ -762,14 +763,14 @@ test('close to a Kelvingrove booking nothing is asked of your PC', async () => {
   const held = t.app.pingFromAgent({}, { wait: 1 });
   await t.app.handleUpdate(say(OWNER, '/gorbals'));
   await tap(t.app, 'gd:g:20261120', t.tg.last().id);
-  assert.match(t.tg.last().text, /^<b>Gorbals · Fri 20 Nov<\/b>\nYour PC's nightly booking run is at 22:00, so I am asking nothing else of it until 22:10\.\nThe sheet itself still opens from the button below\.$/);
+  assert.match(t.tg.last().text, /^<b>Gorbals · Fri 20 Nov<\/b>\nNot available until 22:10, around the nightly booking\.\nThe sheet itself still opens from the button below\.$/);
   assert.deepEqual(await held, { ok: true });
   assert.equal(t.site.calls.length, 0);
   // The same on a night when no day opens: the run still starts at 21:55.
   const quietNight = makePcApp(`${TUE}T21:56:00Z`);
   await quietNight.app.pingFromAgent();
   await tap(quietNight.app, 'gd:g:20261120', 1);
-  assert.match(quietNight.tg.last().text, /nightly booking run is at 22:00/);
+  assert.match(quietNight.tg.last().text, /Not available until 22:10, around the nightly booking/);
   // Before and after that window it is asked as usual.
   for (const when of [`${TUE}T21:49:00Z`, `${TUE}T22:10:30Z`]) {
     const u = makePcApp(when, { state: { plan: { tue: { start: 960, hours: 2 } } } });
@@ -778,7 +779,7 @@ test('close to a Kelvingrove booking nothing is asked of your PC', async () => {
     const tapped = tap(u.app, 'gd:g:20261120', 1);
     u.app.lookFromAgent({ id: (await ping).look.id, ok: true, sheet: fridayFromPc() });
     await tapped;
-    assert.match(u.tg.last().text, /Free start times/, when);
+    assert.match(u.tg.last().text, /Updated \d\d:\d\d\. One hour each\./, when);
   }
 });
 
@@ -796,7 +797,7 @@ test('after a start, when this server is turned away, the way by your PC is trie
   assert.deepEqual(await t.app.pingFromAgent({}, { wait: 0.05 }), { ok: true });
   t.clock.t += 10 * 60 * 1000;                                          // the PC has been quiet: it counts as asleep
   await tap(t.app, 'gd:s:20261120', 1);                                  // so this look goes from here, and is turned away
-  assert.match(t.tg.last().text, /your PC is not awake/);
+  assert.match(t.tg.last().text, /and it isn’t awake/);
   assert.deepEqual(await t.app.pingFromAgent({}, { wait: 0.05 }), { ok: true });
   // And when the PC cannot either, that is said too.
   const u = makePcApp(`${TUE}T12:00:00Z`);
@@ -825,13 +826,13 @@ test('with your PC asleep the card offers to wake it, when waking is set up', as
   t.clock.t += 10 * 60 * 1000;                                          // and then quiet: asleep
   await t.app.handleUpdate(say(OWNER, '/gorbals'));
   await tap(t.app, 'gd:g:20261120', t.tg.last().id);
-  assert.match(t.tg.last().text, /your PC reads the free courts for me, and your PC is not awake\. Wake it and try again, or open the sheet\./);
+  assert.match(t.tg.last().text, /Your PC reads Glasgow Club’s courts, and it isn’t awake\. Wake it and try again, or open the sheet\./);
   assert.deepEqual(buttons(t.tg.last()).map(b => [b.text, b.callback_data || 'link']), [['Wake my PC', 'wk'], ['Try again', 'gr:g:20261120'], ['Open the sheet', 'link'], ['Back', 'g:g'], ['Menu', 'h']]);
   assert.equal(t.site.calls.length, 1);                                 // one try from here, turned away
   // Asked again within the hour: no second request from here.
   t.clock.t += 20 * 60 * 1000;
   await tap(t.app, 'gr:g:20261120', t.tg.last().id);
-  assert.match(t.tg.last().text, /your PC is not awake/);
+  assert.match(t.tg.last().text, /and it isn’t awake/);
   assert.equal(t.site.calls.length, 1);
   // A PC that still counts as awake but does not answer gets the same offer.
   const u = makePcApp(`${TUE}T12:00:00Z`, { env: { WAKE_MAC: 'AA:BB:CC:DD:EE:FF' }, pcLookMs: 30 });
