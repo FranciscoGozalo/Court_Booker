@@ -7,6 +7,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createApp } = require('../app');
 const UI = require('../lib/ui');
+const M = require('../lib/messages');
 const G = require('../lib/glasgowclub');
 const { at, fakeTelegram, memStore, say, PICTURES } = require('./helpers');
 
@@ -163,7 +164,7 @@ test('Hold: the PC collects it on its ping, the card follows each step, and Let 
   // The tap was answered at once, and the PC's ping came back with the one court.
   assert.deepEqual(t.tg.answers, ['Asking your PC']);
   assert.deepEqual(Object.keys(t.order).sort(), ['hold', 'ok']);
-  assert.deepEqual({ ...t.order.hold, id: 'x' }, { id: 'x', key: 'g', date: FRI, start: 1080, court: 3 });
+  assert.deepEqual({ ...t.order.hold, id: 'x' }, { id: 'x', key: 'g', date: FRI, start: 1080, court: 3, courts: [3] });      // `courts` (2.11): the one court
   assert.match(t.id, /^[0-9a-f]{12}$/);
   assert.equal(t.glasgow.asked, 0);                                          // a hold reads nothing itself
   // The card it was tapped on carries it from here; it is never a second card.
@@ -270,7 +271,7 @@ test('a hold paid for and booked is kept as a booking, under the midnight run\'s
   const shown = t.app.appState(phone).state.results.find(r => r.id === GORBALS_FRI);
   assert.deepEqual({ ...shown, at: 0 }, {
     id: GORBALS_FRI, venue: 'gorbals', status: 'booked', date: FRI, start: 1080, end: 1140, court: '3', gate: null, why: null, at: 0, past: false,
-    type: 'indoor', price: '£23.00', paid: true,
+    type: 'indoor', price: '£23.00', paid: true, courts: null,                                  // one court: kept as before 2.11
   });
   // Glasgow Club's courts are not part of the parks' weekly allowance.
   assert.deepEqual(t.app.appState(phone).state.allowance.map(w => w.sessions), [0, 0]);
@@ -361,6 +362,43 @@ test('a hold this bot is not following (it restarted) that ends booked is kept a
   assert.equal(Object.keys(fresh.app.state.results).length, 2);
 });
 
+// ---------- two courts at once (2.11) ----------
+
+test('a hold of two courts says "Courts 3 & 4" on its card, and so does a booking of two; one court reads as it always did', () => {
+  const ctx = ctxAt(`${TUE}T12:02:00Z`);
+  const two = over => UI.indoorHold(ctx, holdAt({ courts: [3, 4], price: '£46.00', ...over }));
+  assert.deepEqual(two().caption.split('\n').slice(0, 2), ['<b>Gorbals · Fri 20 Nov · 18:00–19:00 · Courts 3 &amp; 4</b>', '<b>£46.00 to pay.</b> In your basket since 12:01.']);
+  fits(two());
+  for (const one of [holdAt({ courts: [3] }), holdAt()]) assert.equal(UI.indoorHold(ctx, one).caption.split('\n')[0], TITLE);
+  assert.equal(wordsOf(two({ stage: 'adding' })), 'Putting courts 3 &amp; 4 in your basket…');
+  assert.equal(wordsOf(UI.indoorHold(ctx, holdAt({ stage: 'adding' }))), 'Putting court 3 in your basket…');
+  // Booked only when your PC sees both as new: any other ending says it could not.
+  assert.match(wordsOf(two({ end: 'unsure', checked: true, basket: 'still' })), /^You said you have paid, but I could not see both courts as new bookings on your Bookings page\.\n/);
+  assert.match(wordsOf(two({ end: 'left', checked: false, basket: 'gone' })), /^The payment page on your PC moved on, but I could not see both courts as new bookings on your Bookings page \(I could not read it\)\.\n/);
+  assert.match(wordsOf(UI.indoorHold(ctx, holdAt({ end: 'unsure', checked: true, basket: 'still' }))), /^You said you have paid, but I could not see the court as a new booking/);
+  // A hold the bot is not following (it restarted), whose PC names both courts.
+  const stray = UI.indoorHoldStray(ctx, { key: 'g', date: FRI, start: 1080, court: 3, courts: [3, 4], stage: 'held', pressed: true, end: 'booked', why: '', words: '', basket: '', removed: null, checked: true, bank: '', payFailed: '' });
+  assert.equal(stray.caption.split('\n')[0], '<b>Gorbals · Fri 20 Nov · 18:00–19:00 · Courts 3 &amp; 4</b>');
+  // A booking of two courts, from the midnight run: one card for the slot, the total paid.
+  const r = { id: GORBALS_FRI, venue: 'gorbals', type: 'indoor', date: FRI, start: 1080, end: 1140, status: 'booked', court: '3 & 4', courts: [3, 4], price: '£46.00', paid: true };
+  assert.equal(M.bookedCaption(r), '<b>Booked · Courts 3 &amp; 4</b>\nGorbals · Fri 20 Nov · 18:00–19:00\nPaid £46.00 with the card your PC keeps.');
+  assert.equal(M.bookedCaption({ ...r, court: '3', courts: undefined, price: '£23.00' }), '<b>Booked · Court 3</b>\nGorbals · Fri 20 Nov · 18:00–19:00\nPaid £23.00 with the card your PC keeps.');
+});
+
+test('a two-court hold this bot is not following (it restarted), paid for and booked: said with both courts, and kept as one booking for the slot', async () => {
+  const fresh = makeApp(`${TUE}T12:05:00Z`);
+  const beat = { id: 'a1b2c3d4e5f6', key: 'g', date: FRI, start: 1080, court: 3, courts: [3, 4], stage: 'paying', beat: true, price: '£46.00', pressed: true, left: 4 * 60000 };
+  assert.deepEqual(fresh.app.holdFromAgent(beat), { ok: true, unknown: true });
+  assert.deepEqual(fresh.app.holdFromAgent({ ...beat, stage: 'booked', beat: false, words: '' }), { ok: true, unknown: true });
+  await settle();
+  assert.deepEqual(keptAs(fresh, GORBALS_FRI), {
+    id: GORBALS_FRI, status: 'booked', date: FRI, start: 1080, end: 1140, venue: 'gorbals', type: 'indoor', price: '£46.00', paid: true, court: '3 & 4', courts: [3, 4],
+  });
+  assert.deepEqual(fresh.app.state.notes.map(n => n.title), ['Booked · Gorbals courts 3 & 4', 'Paying · Gorbals courts 3 & 4']);
+  const said = fresh.tg.calls.filter(c => c.method === 'send');
+  assert.deepEqual(said.map(c => c.text.split('\n')[0]), ['<b>Gorbals · Fri 20 Nov · 18:00–19:00 · Courts 3 &amp; 4</b>', '<b>Gorbals · Fri 20 Nov · 18:00–19:00 · Courts 3 &amp; 4</b>']);
+});
+
 test('the steps only go forwards, and a price that does not read as one is left out', async () => {
   const t = await started();
   note(t, 'held', { price: '<b>free</b>', left: -5 });
@@ -384,7 +422,7 @@ test('a hold that fails says why, with the PC\'s own words made safe for the car
   // Another can be started straight away.
   const ping = t.app.pingFromAgent({}, { wait: 5 });
   await tap(t.app, 'gh:s:20261121:0900:1', 7);
-  assert.deepEqual({ ...(await ping).hold, id: 'x' }, { id: 'x', key: 's', date: '2026-11-21', start: 540, court: 1 });
+  assert.deepEqual({ ...(await ping).hold, id: 'x' }, { id: 'x', key: 's', date: '2026-11-21', start: 540, court: 1, courts: [1] });
 });
 
 test('a failure after the payment page was yours never says "nothing was paid"', async () => {

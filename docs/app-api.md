@@ -19,7 +19,9 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.10.4 (`api: 3`; 2.10.4 added `ref` to each note, the result it is about, and the
+This file describes the API as built in version 2.11.0 (`api: 3`; 2.11.0 added two courts at once at Glasgow Club, by fields
+only: `courts` on `POST /app/hold` and in `hold` (with `courtNames` and `prices`), and `courts` on weekly bookings, one-off
+dates and results, and in the signature's words for two courts (see "Two courts at once (2.11)"); 2.10.4 added `ref` to each note, the result it is about, and the
 same as `data.ref` on its notification (see "Notes and notifications"); 2.10.3 changed no field's shape: a Glasgow Club court
 held and paid for now also shows in `results`, a hold's `pay` order may ask your PC to use the security code it keeps (see
 "The sealed box"), and many sentences are shorter: `pc.line`, the hold's `lines`, a look's `note`, and the `why` of many
@@ -101,7 +103,7 @@ week's 7 sessions and 14 hours, one card on its way to the PC at a time, and one
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.10.1", api: 3 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.11.0", api: 3 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -141,7 +143,7 @@ current etag the answer waits up to `wait` seconds for a change and then, if the
 
 ```
 state = {
-  now, bot: "2.10.1",
+  now, bot: "2.11.0",
   venue: { name: "Kelvingrove Park", short: "KP", first: 540, last: 1260, lengths: [1, 2],
            courts: [1,2,3,4,5,6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
   venues: [ { key, name, club: "clubspark" | "glasgow", types: ["outdoor"] | ["indoor"] | ["indoor", "outdoor"],
@@ -160,10 +162,10 @@ state = {
   later:   [ the same, for the releases after it (up to 3) ],
   open:    [ { id, date, start, end } ],             // one-off dates already open, which the PC books at its next run
   plan:    [ { day: "mon".."sun", start, hours } ],  // Kelvingrove's weekly bookings, one a day (api 2's view of weekly)
-  weekly:  [ { id, venue, type, day, start, hours, end, on, next, signed } ],     // weekly bookings at every venue (api 3)
-  once:    [ { id, venue, type, date, start, hours, end, opensAt, open, signed } ],   // one-off dates still ahead, at every venue
+  weekly:  [ { id, venue, type, day, start, hours, end, on, next, signed, courts } ],     // weekly bookings at every venue (api 3); courts (2.11): 1 or 2
+  once:    [ { id, venue, type, date, start, hours, end, opensAt, open, signed, courts } ],   // one-off dates still ahead, at every venue
   order:   [3, 6, 1, 2, 4, 5],
-  results: [ { id, venue, status: "booked" | "none" | "failed", date, start, end, court, gate, why, at, past, type, price, paid } ],   // soonest upcoming first, then past ones newest first
+  results: [ { id, venue, status: "booked" | "none" | "failed", date, start, end, court, gate, why, at, past, type, price, paid, courts } ],   // soonest upcoming first, then past ones newest first
   run:     null | { stage: "started" | "ready" | "trouble", at, why },    // tonight's run, as the PC reports it
   indoor:  { linked, days: 9, quietUntil, holdNo,                         // holdNo: why no hold can start now (plain text), or null
              centres: [ { key: "g", name: "Gorbals", site, label: "Gorbals", type: "indoor" },
@@ -176,7 +178,8 @@ state = {
 }
 
 hold = { id, startedBy: "app" | "telegram", centre, centreName, date, start, end, court, courtName,
-         stage, live, ended: null | "released" | "booked" | …, price, until, heardAt,
+         courts: [3] | [3, 4], courtNames: ["Court 3", …],                  // 2.11: every court held; court and courtName the first
+         stage, live, ended: null | "released" | "booked" | …, price, prices, until, heardAt,   // price: the total; prices (2.11): each court's, or null
          title, lines: [ … ],                // the Telegram card's own words, without markup
          can: { release, done, pay },
          links: { basket, site, sheet } }
@@ -355,13 +358,14 @@ Club). `end`: `start` plus the hours. `on`: an entry switched off is kept, and n
 `next`: `{ date, opensAt }`, the date it is booked for next and when that day opens (ms), or null
 when it is off. One venue, day and start once; several entries on a day are fine. The parks' count
 toward the weekly allowance; Glasgow Club's do not. `signed` (2.10.1): whether the bot keeps the
-app's signature for it (see "Signed bookings"); never the signature itself.
+app's signature for it (see "Signed bookings"); never the signature itself. `courts` (2.11): how many
+courts it books at once, 1, or 2 at Glasgow Club (always 1 at the parks); see "Two courts at once (2.11)".
 
 **`once`**: the one-off dates whose start is still ahead (one that has started is left out, though
 the bot keeps it until midnight), at every venue (api 3), by date, start and venue. `id` as above;
 `venue` and `type` as in `weekly` (`"kelvingrove"`, `"outdoor"` for Kelvingrove's); `end` is `start`
 plus the hours; `opensAt` is when that day opens for booking at that venue; `open` is whether it has.
-`signed` (2.10.1) as in `weekly`.
+`signed` (2.10.1) and `courts` (2.11) as in `weekly`.
 
 **`results`**: what the PC reported, kept for 60 days. First those dated today or later, soonest
 first; then the past ones, newest first. `past`: the date is before today (UK).
@@ -379,6 +383,13 @@ Bookings on Glasgow Club's site). The `why` of one not booked ends with what was
 `gate`: the gate code, a string (null if not booked, or if none was shown). `why`: null when
 booked; "No court free for the whole time." for `none`; "It didn’t work: <the PC's reason>."
 for `failed`. `at`: when the result came in.
+`courts` (2.11): the courts' numbers when the result names them, else null. Two courts at once at
+Glasgow Club are one result for the slot: `courts: [3, 4]` (lowest first), `court: "3 & 4"` (which an
+app older than 2.11 shows as it is), `price` the total paid for both (`"£46.00"`). A result of one
+court that names it in a list keeps that too (`courts: [3]`, `court: "3"`); one that does not, or a
+park's, has `courts: null`. A result that is not booked has none: its `why` says what happened ("It
+didn’t work: Only 1 of 2 courts was free, so none was taken. Nothing was paid.", in your PC's words).
+Its card in Telegram reads "Booked · Courts 3 & 4", and its note "Courts 3 & 4 booked".
 A Glasgow Club court held and then booked (2.10.3: paid from the app, by the PC with its card, or
 in Chrome on the PC and then "I have paid") is a result too, as the midnight run's would be for the
 same venue, date and start, and under the same id (`scotstoun/2026-11-25@18:00`): `venue`
@@ -389,6 +400,10 @@ not book that slot again, a later result for it does not count twice, and like e
 booking it counts toward no allowance. No card, note or notification comes with it: the hold's own
 (`"Booked · Scotstoun outdoor court 1"`) has said so. A booking already kept for that id stands; a
 "not booked" one is replaced. A hold that ends any other way keeps no result.
+A hold of two courts (2.11) is one result too, under the same id: `court: "3 & 4"`, `courts: [3, 4]`,
+`price` the total your PC read at the basket, `paid: true` (its note: `"Booked · Gorbals courts 3 & 4"`).
+The courts are the ones your PC's "booked" note names (its `courts`, or its `court` alone from a PC
+whose booker is older); a hold of one court is kept as before 2.11, with `courts: null`.
 
 **`run`**: how the PC's booking run stands, from half an hour before a release to an hour after
 it. Null outside that time (a run started earlier in the day is not tonight's), while paused, once
@@ -463,6 +478,10 @@ time, whoever started it.
   card in Telegram unless a Hold button is tapped there while it is going; then that card follows it.
 - `centre`: `"g"`, `"s"` or `"o"`; `centreName`: the centre's `label` ("Gorbals", "Scotstoun" or "Scotstoun outdoor"). `date`, `start`, `end`: the
   hour held (`end` is `start` + 60). `court`: its number; `courtName`: "Court 3".
+- `courts` (2.11): every court of the hold, lowest first: `[3]`, or `[3, 4]` for two at once (asked
+  for with `POST /app/hold`; Telegram's Hold button holds one). `courtNames`: "Court 3", "Court 4", in
+  the same order. `court` and `courtName` stay the first of them, for an app older than 2.11. A hold
+  of two is one hold: one at a time, both into the one basket, one payment, and it ends as one.
 - `stage`: how far it has got: `"asked"` → `"signing-in"` → `"signed-in"` → `"adding"` → `"held"`
   (in the basket) → `"paying"` (your PC took up Pay from the app: it is typing in the card and
   pressing Pay, or waiting for the answer) → `"approve"` (your bank wants you to approve the
@@ -480,19 +499,29 @@ time, whoever started it.
   (collected, then nothing for 90 seconds) and `"timeout"` (nothing more heard). After `timeout` or
   `nostart` the PC's own word may still replace it later.
 - `price`: such as `"£23.00"` (or `"£23"`), once it is in the basket: the amount on the payment
-  page's Pay button as the PC read it. Null before, or if it did not read as a price. `until`: when
+  page's Pay button as the PC read it. Null before, or if it did not read as a price. For two courts
+  (2.11) it is the total for both (`"£46.00"`), and Pay is for that. `prices` (2.11): each court's
+  price as your PC read it at the basket, in the order of `courts` (`["£23.00", "£23.00"]`); null
+  until it is in the basket, from a PC that gives none (one older than 2.11), or when they do not add
+  up to `price`. `until`: when
   the PC lets it go unpaid; null before it is in the basket. While it pays, `until` is when the PC
   stops waiting for the payment's answer (it moves on the PC's word: up to six minutes after the
   press, five after your bank asks for approval).
   `heardAt`: when the PC last said anything about it (at first, when it was asked for).
-- `title`: such as "Gorbals · Fri 20 Nov · 18:00–19:00 · Court 3". `lines`: what the card says
-  under it, one sentence or more per line, in the words of Telegram's card for that moment.
+- `title`: such as "Gorbals · Fri 20 Nov · 18:00–19:00 · Court 3", or "… · Courts 3 & 4" for two
+  (2.11). `lines`: what the card says under it, one sentence or more per line, in the words of
+  Telegram's card for that moment. For two courts they are the same but for "Putting courts 3 & 4 in
+  your basket…", and "I could not see both courts as new bookings on your Bookings page" in place of
+  "the court as a new booking" (`"left"`, `"unsure"`: your PC calls them booked only when it sees both).
 - `can.release`: Telegram would show Stop or Let it go. `can.done`: it would show I have paid
   (only once the court is in the basket). Both are false once one has been asked, once Pay has been
   asked for (while the order is on its way and while the PC pays), and once it is over.
 - `can.pay`: `POST /app/hold/order` with `what: "pay"` and the right amount would be taken now:
   the same check, so it is false exactly when that request would be refused (but for the amount),
-  and the refusal's sentence says why. Telegram has no Pay button.
+  and the refusal's sentence says why. Telegram has no Pay button. For two courts (2.11) it is also
+  false until your PC's note from the basket names both (its `courts`): a PC whose booker is older
+  than 2.11 holds the first court alone, and says only that one. The lines then say "Can’t pay here:
+  your PC didn’t say both courts are in your basket."
 - `lines` while paying (the card's words, as they stand):
   - in the basket (2.10.3: the app's own words, which differ from Telegram's only in where to pay):
     "£23.00 to pay. In your basket since 12:00." then, the PC able to pay, "Pay here, or in Chrome on
@@ -544,12 +573,12 @@ is fine, and things as they stand refuse it (the same request may work later).
 
 | Request | The same as | Body |
 | --- | --- | --- |
-| `POST /app/once` | `/book` | `{ venue?, type?, date, start, hours, auth? }`; `already: true` in the answer if it was there |
+| `POST /app/once` | `/book` | `{ venue?, type?, date, start, hours, courts?, auth? }`; `already: true` in the answer if it was there |
 | `POST /app/once/remove` | `/cancel` | `{ date, start }` |
 | `POST /app/plan` | `/set` | `{ day, start, hours }` (Kelvingrove's) |
 | `POST /app/plan/remove` | `/off` | `{ day }` (Kelvingrove's) |
-| `POST /app/weekly` | (app only, api 3) | `{ venue, type, day, start, hours, on, auth? }`: a weekly booking at any venue |
-| `POST /app/weekly/change` | (app only, api 3) | `{ id, venue?, type?, day?, start?, hours?, auth? }` |
+| `POST /app/weekly` | (app only, api 3) | `{ venue, type, day, start, hours, on, courts?, auth? }`: a weekly booking at any venue |
+| `POST /app/weekly/change` | (app only, api 3) | `{ id, venue?, type?, day?, start?, hours?, courts?, auth? }` |
 | `POST /app/weekly/on` | (app only, api 3) | `{ id, on }` |
 | `POST /app/weekly/remove` | (app only, api 3) | `{ id }` |
 | `POST /app/weekly/auth` | (app only, 2.10.1) | `{ items: [{ id, auth }] }`: signatures made afresh, for weekly bookings and one-off dates |
@@ -558,7 +587,7 @@ is fine, and things as they stand refuse it (the same request may work later).
 | `POST /app/pc/sleep` | Sleep my PC | `{}` |
 | `POST /app/pc/wake` | Wake my PC | `{}` |
 | `POST /app/indoor/look` | free courts at Glasgow Club for a day | `{ centre: "g" | "s" | "o", date, fresh }` → `{ ok: true, look }` |
-| `POST /app/hold` | Hold | `{ centre, date, start, court }` |
+| `POST /app/hold` | Hold | `{ centre, date, start, court, courts? }` (`courts`, 2.11: two at once, app only) |
 | `POST /app/hold/order` | Let it go / I have paid; Pay (app only) | `{ id, what: "release" | "done" }`, or `{ id, what: "pay", amount, sealed }` |
 | `POST /app/card` | (app only) | `{ sealed }`: a card, sealed for `pc.cardKey` |
 | `POST /app/card/forget` | (app only) | `{}` |
@@ -720,7 +749,15 @@ would pass the week's allowance (see `allowance`; the parks only) is refused too
 `auth` (2.10.1, optional): the app's signature for it (see "Signed bookings"), kept with it. Sent
 again with a one-off already on the list, it takes the place of the one that had.
 
+`courts` (2.11, optional): 1 or 2, how many courts to book at once; 1 when left out. 2 is for
+Glasgow Club only. Sent again with a one-off already on the list and another number of courts, the
+one-off takes that number (its hours still stay as they were), and with it the `auth` sent along,
+which covers it; with no `auth`, it is left unsigned, since the signature it had was for the courts it
+had. The same number again changes nothing but a signature, as before.
+
 - 400 "A one-off booking needs a date (YYYY-MM-DD), a start in minutes after midnight, and hours (1 or 2)."
+- 400 "courts, when sent, must be 1 or 2."
+- 400 "Two courts at once are for Glasgow Club only." (`courts: 2` at a park, Kelvingrove included)
 - 400 "auth, when sent, must be the 32 lowercase hex characters the app makes with the card's pay key."
 - 400 "There is no such venue: send one of the keys in state.venues."
 - 400 "Gorbals has indoor courts only." (or "<Park> has outdoor courts only.")
@@ -754,21 +791,26 @@ to a week whose release for that day has gone by.
 **`POST /app/plan/remove`** `{ day }`. `day` may be `"all"`, as `/off all`. Kelvingrove's entries that
 day (or every day) go; the other venues' stay. A day that was not set is no error.
 
-**`POST /app/weekly`** `{ venue, type, day, start, hours, on, auth }` (api 3): a weekly booking at any venue.
-`type` as for `POST /app/once`; `on` true when left out; `auth` (2.10.1, optional) its signature. The
-answer's `state.weekly` has it, with its id.
+**`POST /app/weekly`** `{ venue, type, day, start, hours, on, courts, auth }` (api 3): a weekly booking at any venue.
+`type` as for `POST /app/once`; `on` true when left out; `courts` (2.11, optional) 1 or 2, as for
+`POST /app/once` (2 at Glasgow Club only), 1 when left out; `auth` (2.10.1, optional) its signature,
+over the v2 words when `courts` is 2 (see "Signed bookings"). The answer's `state.weekly` has it,
+with its id.
 
 - 400 "A weekly booking needs a venue, a day (mon to sun), a start in minutes after midnight, and hours (1 or 2)."
-- 400 the venue, type, slot and `auth` sentences of `POST /app/once`
+- 400 the venue, type, slot, `courts` and `auth` sentences of `POST /app/once`
 - 409 "There is already a weekly booking at Gorbals on Wednesdays at 18:00." (that venue, day and time)
 - 409 "Your list already has 30 weekly bookings, which is as many as I keep. Remove one first."
 - 409 "That would be 8 sessions in the week of Mon 23 Nov; the limit is 7." (or 14 hours; the parks only)
 
-**`POST /app/weekly/change`** `{ id, venue?, type?, day?, start?, hours?, auth? }`: the entry as it will be is
+**`POST /app/weekly/change`** `{ id, venue?, type?, day?, start?, hours?, courts?, auth? }`: the entry as it will be is
 read whole, as a new one is (a venue changed without a type takes that venue's own, or must say
 which), and checked against the others and the allowance; it keeps its id and whether it is on. Its
-signature (2.10.1): the `auth` sent; else the one it had, as long as its venue, type, day, start and
-hours stay as they were; a change of any of them without a new `auth` leaves it unsigned.
+`courts` (2.11) stay as they were unless sent: an entry of two courts moved to a park must send
+`courts: 1`, or is refused as a new one would be. Its signature (2.10.1): the `auth` sent; else the
+one it had, as long as its venue, type, day, start, hours and (2.11) courts stay as they were; a
+change of any of them without a new `auth` leaves it unsigned. The bot cannot make a signature: a
+change of courts is signed afresh by the app (Face ID).
 
 - 400 "To change or remove a weekly booking, send its id."
 - 400 any sentence of `POST /app/weekly` about the entry itself
@@ -858,21 +900,29 @@ for a court in a look's `slots` (see `POST /app/hold`).
   not read that sheet; for `"o"` it goes on " A PC not yet updated for Scotstoun's outdoor courts
   answers so: update the booker on your PC.")
 
-**`POST /app/hold`** `{ centre, date, start, court }`. Your PC signs in to Glasgow Club, puts that
+**`POST /app/hold`** `{ centre, date, start, court, courts }`. Your PC signs in to Glasgow Club, puts that
 court in the basket and stops at the payment page; paying is the owner's. The answer's `state.hold`
 is the new hold, at stage `"asked"`. The guards are the Hold button's own.
 
+`courts` (2.11, optional): two courts at once at the same start: `[3, 4]`, 1 or 2 different court
+numbers, lowest first, the first of them `court` (`courts: [3]` is the same as leaving it out, as an
+app older than 2.11 does: `court` alone). Your PC puts every one of them into the basket, reads the
+price of each, and takes all or none: if any has gone, it takes out what it put in and says which
+court went (`"failed"`). Then one payment covers the total (`hold.price`).
+
 Telegram only offers Hold under a court that a sheet showed free. The app's equal: the centre,
-date, start and court must be ones that a `POST /app/indoor/look` answered to the app (any linked
-phone) in the last 15 minutes showed in its `slots`. What was shown is kept in memory only, so
+date, start and court (each of `courts`) must be ones that a `POST /app/indoor/look` answered to the
+app (any linked phone) in the last 15 minutes showed in its `slots`. What was shown is kept in memory only, so
 after a restart of the bot the app must look again. `indoor.holdNo` does not cover this (it cannot
 know which court will be asked for). The checks come in this order: the shape of the request, then
 whether that time is on offer at all, then this, then the guards.
 
 - 400 "A hold needs a centre (g, s or o), a date (YYYY-MM-DD), a start in minutes after midnight, and a court number."
 - 400 "There is no such centre: send g for Gorbals, s for Scotstoun (indoor) or o for Scotstoun outdoor."
+- 400 "At most 2 courts at once." (2.11: three or more in `courts`)
+- 400 "courts, when sent, must list court numbers, each once and lowest first, starting with court." (2.11: not a list of whole numbers, a court twice, not lowest first, or a first that is not `court`)
 - 400 "That time is no longer on offer. Pick again." (a time that has passed, a day not among the nine, a court not from 1 to 20, a start that is not a five-minute step)
-- 409 "That list is old. Read the day again, then hold a court." (no look in the last 15 minutes showed the app that court free then)
+- 409 "That list is old. Read the day again, then hold a court." (no look in the last 15 minutes showed the app that court, or each of `courts`, free then)
 - 409, one of the `indoor.holdNo` sentences:
   - "Your PC is already holding a court."
   - "Your PC is booking a park court. Hold one when it’s done." (Book now, under way)
@@ -947,9 +997,14 @@ box to its log or to disk, and drops it once it is handed to the PC (or dropped 
   `cvc`: 3 or 4 digits, as a string. `id`: the hold's `id`. `amount`: the amount the owner
   confirmed, exactly as in the order (`"£23.00"`). `payKey`: the pay key sent with the card the PC
   keeps. `centre`, `date`, `start`, `court`: the hold's own, as in `state.hold` (`"g"`, `"s"` or `"o"`; say `"g"`,
-  `"2026-11-20"`, `1080`, `3`).
+  `"2026-11-20"`, `1080`, `3`). For a hold of two courts (2.11) it also has `courts`, the hold's own
+  (`[3, 4]`), `court` is the first of them and `amount` the total (`"£46.00"`); for one court it is as
+  before, without `courts`. Your PC binds the box to its hold's courts: with two, `courts` must be
+  exactly the same list, in the same order, and `court` its first; with one, `courts` must be absent or
+  `[court]`. Anything else is "the security code was sealed for another payment".
 - Or, since the PC's booker 2.10.2, the same without `cvc` and with `use: "kept"`:
-  `{ use: "kept", id, amount, payKey, centre, date, start, court }`, sealed the same way. It asks
+  `{ use: "kept", id, amount, payKey, centre, date, start, court }` (and `courts`, as above, for two),
+  sealed the same way. It asks
   your PC to pay with the security code it keeps for automatic payments (`card.auto`), so the owner
   types no code in the app. The bot cannot tell the two apart and passes either on unopened, as it
   came; the checks above (the pay key, the binding to this hold, court and amount, one order per
@@ -993,7 +1048,8 @@ at once, unseen by the PC; if the PC keeps no other card, that is all there is t
 - 409 "Your PC is paying for a court just now. Try again once that is over."
 
 **`POST /app/hold/order`** `{ id, what: "pay", amount, sealed }`: pay for the held court with the card
-your PC keeps. `amount`: the price the owner confirmed, which must be `hold.price` exactly. `sealed`:
+your PC keeps. `amount`: the price the owner confirmed, which must be `hold.price` exactly (for two
+courts, 2.11, the total for both: the PC's order is for that amount, one payment). `sealed`:
 the security code, sealed as above. The answer is the state: the hold's lines say the PC is being
 told. The order waits for the PC's next note about the hold (one comes every few seconds), half a
 minute at most, and goes with the answer to it, once; the sealed code is not kept after that. The PC
@@ -1021,10 +1077,11 @@ not reach it: nothing was pressed, and Pay may be asked for again. The checks co
   and an order to pay is only taken from a bot reached over https", and the PC's own note of
   payments made being unreadable.
 - 409 "Your PC has not said that it can pay for this court." (its booker is older than 2.9)
+- 409 "Your PC didn’t say both courts are in your basket, so it isn’t asked to pay." (2.11: a hold of two courts whose note from the basket did not name both; a PC whose booker is older than 2.11 holds the first alone, at that court's price)
 - 409 "Your PC could not read the price, so it cannot pay for this court."
 - 409 "No word from your PC for over a minute, so it isn’t asked to pay."
 - 409 "Too little time left to pay from here. Pay at your PC, or let it go." (under 30 seconds of `until`)
-- 409 "The price is £23.00, not £25.00. Check it before you pay." (`amount` is not `hold.price`)
+- 409 "The price is £23.00, not £25.00. Check it before you pay." (`amount` is not `hold.price`; for two courts "The price is £46.00, not £23.00. …")
 
 ### What the PC does
 
@@ -1037,7 +1094,9 @@ not reach it: nothing was pressed, and Pay may be asked for again. The checks co
    (£23.00)", 'the payment page says "Pay £25.00", not the £23.00 you confirmed', "the security code
    did not come from the app the card was given in, so it was not used", "the security code was
    sealed for another payment", "an order to pay for this hold came before, and a hold is paid for
-   once at most", "the card kept on this PC has expired", or the daily limit's.
+   once at most", "the card kept on this PC has expired", or the daily limit's. For two courts (2.11)
+   the amount is the total, and the page must also show exactly the two courts it put in (see "Two
+   courts at once (2.11)").
 2. `"paying"`: it types the card and the code into the three boxes and reads each back, notes the
    payment for its daily limit (`GLASGOW_PAY_PER_DAY` on the PC, two unless set), and presses Pay,
    once. Stopped before the press, it goes back to `"held"`, having pressed nothing.
@@ -1083,6 +1142,16 @@ not pass, a price over the cap) is taken out of the basket again; after a press 
 Each booking is paid for once at most, whatever happens (a run that starts again pays nothing twice):
 since 2.10.1 by what it is (venue, court type, date, start and length), whatever id it is handed with.
 None of it counts toward the allowance.
+
+A Glasgow Club job carries `courts` (2.11): 1, or 2 for a weekly booking or one-off date of two courts
+at once (`{ id, date, start, end, hours, releaseAt, venue, type, centre, from, auth?, courts, open? }`;
+the parks' jobs are as they were, without it). For two, your PC takes the two lowest-numbered courts
+free for the whole slot, or none: if fewer than two are free by the end of its look, it takes none, and
+the result is `"failed"`, `paid: false`, with a why such as "Only 1 of 2 courts was free, so none was
+taken". Each court's price must be its slot's own and at most `GLASGOW_AUTO_PAY_MAX`; it pays the total
+once (one payment toward `GLASGOW_PAY_PER_DAY`), and calls it booked only when the Bookings page lists
+both. The result is one for the slot: `court: "3 & 4"`, `courts: [3, 4]`, `price` the total (see
+`results`). It is paid once at most, by what it is, as above: one payment for the slot.
 
 Since 2.10.1 your PC also takes no court for a Glasgow Club job:
 - that the app has not signed with the card your PC keeps ("this booking was not signed in the app
@@ -1159,19 +1228,85 @@ anything you did not save in your app.
   date `court-broker/once/v1|<venue>|<type>|<date>|<start>|<hours>`. `venue` a `venues` key, `type`
   `indoor` or `outdoor`, `day` `mon` to `sun`, `date` YYYY-MM-DD, `start` minutes after midnight and
   `hours` a whole number, both written as plain numbers.
+- Two courts at once (2.11, `courts: 2`): the v2 words, with the number of courts on the end:
+  `court-broker/weekly/v2|<venue>|<type>|<day>|<start>|<hours>|<courts>` and
+  `court-broker/once/v2|<venue>|<type>|<date>|<start>|<hours>|<courts>`. One court (`courts: 1`, or
+  none said) keeps the v1 words exactly, so every signature made before 2.11 stays good. Your PC
+  checks a job with the words its `courts` calls for, so a signature made for one court is no good for
+  two, nor the other way. A change of `courts` needs a new signature, which the app makes (with Face
+  ID); the bot cannot make one, and keeps none that no longer fits (see `POST /app/weekly/change` and
+  `POST /app/once`).
 - Worked example: pay key 32 bytes of 0x5a (`WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=`);
   `court-broker/weekly/v1|gorbals|indoor|wed|1080|1` → `c019d5fd3bab087b5a29d9b76c6c69a7`;
-  `court-broker/once/v1|gorbals|indoor|2026-11-25|1080|1` → `7e8fea3af1d796d60bf594483ef7a054`.
+  `court-broker/once/v1|gorbals|indoor|2026-11-25|1080|1` → `7e8fea3af1d796d60bf594483ef7a054`;
+  and for two courts `court-broker/weekly/v2|gorbals|indoor|wed|1080|1|2` → `775461b248015a591db102a1d095807d`;
+  `court-broker/once/v2|gorbals|indoor|2026-11-25|1080|1|2` → `f12b7ca19d33d2b217aa219c5be3fa95`.
 - The app sends it with `POST /app/weekly`, `/app/weekly/change` and `/app/once` (`auth`), and signs
   everything afresh with `POST /app/weekly/auth` when the card changes (the signatures go with the old
   pay key) or automatic payments are switched on. The state says `signed` for each; Kelvingrove's and
   the other parks' are kept too, though nothing is paid there. The one-line `/backup` leaves them out, as it does the
   linked phones: after a start from it, `signed` is false until the app signs again.
 - The PC checks it before it takes a court, with the pay key of the card it keeps, over the job's own
-  venue, type, start and hours, and the weekday of its date (`from: "weekly"`) or its date
+  venue, type, start and hours (and, 2.11, `courts`: v1 or v2 by it), and the weekday of its date (`from: "weekly"`) or its date
   (`from: "once"`). A job at its midnight goes with its weekly booking's signature when there is one,
   else its one-off's; an `open` one-off with its own alone (a weekly signature names a weekday, not a
-  date), and the PC takes an open job only so.
+  date), and the PC takes an open job only so. A Glasgow Club job's `courts` (2.11) is always that of
+  the entry whose signature it goes with (or, unsigned, of the entry it comes from).
+
+## Two courts at once (2.11)
+
+For eight players: two courts at Glasgow Club (Gorbals, Scotstoun indoor or Scotstoun outdoor) for
+the same hour, held or booked together. The parks book one court, as before. At most two
+(`MAX_COURTS`, in `lib/venues.js` here and in the PC's booker). Both go into the one basket, so both
+are held the moment they are taken, and one payment covers the total. All or nothing: if either
+cannot be taken, neither is kept (Glasgow Club's bookings cannot be cancelled, so half a booking would
+waste money), and the reason names the court. Fields are only added: `api` stays 3.
+
+The shapes, side by side:
+
+| Who to whom | What | One court | Two courts |
+| --- | --- | --- | --- |
+| app → bot | `POST /app/hold` | `{ centre, date, start, court }` (or `courts: [3]`) | `{ centre, date, start, court: 3, courts: [3, 4] }` |
+| bot → app | `state.hold` | `court: 3, courtName: "Court 3", courts: [3], courtNames: ["Court 3"]`, `price` | `court: 3, courtName: "Court 3", courts: [3, 4], courtNames: ["Court 3", "Court 4"]`, `price: "£46.00"`, `prices: ["£23.00", "£23.00"]` |
+| bot → PC | the ping's answer | `{ hold: { id, key, date, start, court: 3, courts: [3] } }` | `{ hold: { id, key, date, start, court: 3, courts: [3, 4] } }` |
+| PC → bot | `POST /agent/hold` notes | `court: 3` (and `courts: [3]` from a 2.11 booker) | `court: 3, courts: [3, 4]`, `price` the total, `prices` each court's |
+| app → PC | the sealed code (Pay) | `{ cvc, id, amount, payKey, centre, date, start, court }`, as before | the same with `courts: [3, 4]`, `amount` the total; or `{ use: "kept", … }` with `courts` too |
+| app → bot | `POST /app/hold/order` (pay) | `amount: hold.price` | `amount: hold.price`, the total |
+| bot → app | `state.results[]` | `court: "3"`, `courts: null` (or `[3]` when the PC names it so) | one result for the slot: `court: "3 & 4"`, `courts: [3, 4]`, `price` the total, `paid` |
+| app → bot | `POST /app/weekly`, `/change`, `/app/once` | `courts` left out, or `1` | `courts: 2`, signed with the v2 words |
+| bot → app | `state.weekly[]`, `state.once[]` | `courts: 1` | `courts: 2` |
+| bot → PC | `GET /agent/jobs` (Glasgow Club's) | `courts: 1` | `courts: 2`, `auth` over the v2 words |
+| PC → bot | `POST /agent/result` | `court`, as before | `court: "3 & 4"` (or `3`), `courts: [3, 4]`, `price` the total |
+| PC → bot | `POST /agent/progress` (`stage: "bank"`) | `court` | `court: 3, courts: [3, 4]`, `price` the total |
+
+What the bot checks of two courts: the shape of `courts` (400, as above); that a look showed the app
+both courts free at that start (409 "That list is old…"); and, before it takes Pay from the app, that
+your PC's note from the basket names both (else 409 "Your PC didn’t say both courts are in your
+basket, so it isn’t asked to pay."). Your PC checks the rest: both in the basket, the basket's badge
+reading exactly the number of courts it put in, the confirmed amount equal to the total, every amount
+on the payment page either the total or one court's price as read at the basket (anything else and
+nothing is typed or pressed), the Pay button saying exactly the total ("Pay £46.00"), the sealed code
+bound to these courts, and, before "booked", every court new on the Bookings page. If only one shows
+there, the ending is `"unsure"` or `"left"`, never `"booked"`, and the hold's lines say "I could not
+see both courts as new bookings on your Bookings page".
+
+Telegram: a hold of two courts can only be asked for from the app (Telegram's Hold button holds one);
+once it is going, its card in Telegram (a Hold tap there brings it) reads "… · Courts 3 & 4", as do
+the notes ("Booked · Gorbals courts 3 & 4") and the card of a booking of two from the midnight run
+("Booked · Courts 3 & 4"). `/plan` names an entry of two "· 2 courts".
+
+**Every side keeps the old single-court shapes.** A request, note, job or result without `courts` is
+for one court, `court`, exactly as before 2.11; a weekly booking or one-off date of one court is kept,
+backed up and signed exactly as before. Deploy in this order:
+
+1. **The PC's booker** (2.11), first. It takes the bot's old messages (no `courts`) as before, and a
+   job's `courts` when it comes.
+2. **The bot** (this, 2.11). Until it is deployed the app cannot ask for two courts. A PC whose booker
+   is older than 2.11 is safe with it: handed a hold of two, it holds the first court alone and its
+   notes name that one, so the bot does not take Pay from the app for it (above); handed a job of two
+   courts, it checks the v2 signature as v1 words, which fails, so it takes no court.
+3. **The app** (an over-the-air update), last. An app older than 2.11 never sends `courts`, shows a
+   result's `court: "3 & 4"` as it is, and ignores the fields it does not know.
 
 ## Notes and notifications
 
@@ -1203,14 +1338,14 @@ goes for every sentence in the state.
 
 | `kind` | When | `title` | `body` |
 | --- | --- | --- | --- |
-| `booked` | the PC booked a court (at its nightly run, or with Book now) | "Court 3 booked" | "Thu 26 Nov · 19:00–21:00 · gate 2433" (or "… · gate code not shown"); at a park other than Kelvingrove the park comes first: "Queens Park · Fri 20 Nov · 18:00–19:00 · gate 4821" |
+| `booked` | the PC booked a court (at its nightly run, or with Book now) | "Court 3 booked" ("Courts 3 & 4 booked" for two at once, 2.11) | "Thu 26 Nov · 19:00–21:00 · gate 2433" (or "… · gate code not shown"); at a park other than Kelvingrove the park comes first: "Queens Park · Fri 20 Nov · 18:00–19:00 · gate 4821"; at Glasgow Club "Gorbals · Wed 25 Nov · 18:00–19:00 · paid £46.00" |
 | `missed` | it could not, or the weekly allowance kept a job from the nightly run | "Not booked" | "Tue 24 Nov · 19:00–21:00. No court free for the whole time." or "… It didn’t work: <reason>." (the park first, as above) |
 | `warn` | ClubSpark turned your PC away, reading or booking a park | "ClubSpark turned your PC away" | "ClubSpark turned your PC away at 12:05, reading Maryhill Park's courts (ClubSpark showed a "Just a moment" page), which is how it treats a connection it is checking. Nothing more is read or booked at ClubSpark from the app until 14:05. Your nightly booking run uses the same connection: if ClubSpark still turns it away at 22:00, that run may not get through." (once for each pause; also sent in Telegram) |
 | `warn` | trouble before a booking | "Trouble before the booking" | "<reason>. Trying again (2 of 3)." |
 | `warn` | 20 minutes before, the PC does not answer | "Your PC is not answering" | "I sent it a wake-up at 21:40, ahead of tonight's booking, and it has not replied. Booking opens at 22:00 for Tue 24 Nov · 16:00–18:00." With no way to wake it from the bot: "It has not been in touch for over a day. Booking opens …", or, if the PC has never been in touch at all, "It has not been in touch yet. Booking opens …" |
 | `warn` | 2 minutes before, the run has not started | "The booking run has not started" or "Your PC has not checked in" | the two lines of Telegram's warning |
 | `warn` | 8 minutes after, no result | "No word from your PC" | "It started on Tue 24 Nov · 16:00–18:00 but has not said how it went. Check ClubSpark, and book by hand if it is not there." |
-| `hold` | a hold ended, whoever started it | "Hold ended · Gorbals court 3", or "Booked · Gorbals court 3" | "Fri 20 Nov · 18:00–19:00. " and then the hold's last `lines` |
+| `hold` | a hold ended, whoever started it | "Hold ended · Gorbals court 3", or "Booked · Gorbals court 3" ("… · Gorbals courts 3 & 4" for two, 2.11) | "Fri 20 Nov · 18:00–19:00. " and then the hold's last `lines` |
 | `hold` | after a restart of the bot, the PC says of a hold the bot no longer follows that Pay was pressed (or may have been), or that it could not pay: once while it goes on, once when it ends | "Paying · Gorbals court 3", "Not paid by your PC · Gorbals court 3", then "Booked · …" or "Hold ended · …" ("… · a court your PC was holding" when the PC's note does not say which) | "Fri 20 Nov · 18:00–19:00. I am not following this hold any more (I was restarted while your PC had it), so its card does not change. This is what your PC says: …" |
 | `info` | the PC started tonight's run | "Booking at 22:00" | "Tue 24 Nov · 16:00–18:00. Your PC is awake and signing in." |
 | `info` | the PC would not go to sleep | "Your PC stayed awake" | "It did not go to sleep: <reason>." |

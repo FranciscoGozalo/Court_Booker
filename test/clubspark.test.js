@@ -419,7 +419,7 @@ test('Book now, end to end: asked, collected, each step, the go-ahead, booked; a
   const card = t.tg.calls.find(c => c.method === 'photo');
   assert.equal(card.text, '<b>Booked · Court 1</b>\nQueens Park · Fri 20 Nov · 18:00–19:00\nGate code: <code>4821</code>  (tap to copy)');
   const s = stateOf(t, phone);
-  assert.deepEqual(s.results[0], { id: 'queenspark/2026-11-20@18:00', venue: 'queenspark', status: 'booked', date: FRI, start: 1080, end: 1140, court: '1', gate: '4821', type: 'outdoor', price: null, paid: null, why: null, at: t.clock.t, past: false });
+  assert.deepEqual(s.results[0], { id: 'queenspark/2026-11-20@18:00', venue: 'queenspark', status: 'booked', date: FRI, start: 1080, end: 1140, court: '1', gate: '4821', type: 'outdoor', price: null, paid: null, why: null, at: t.clock.t, past: false, courts: null });
   assert.deepEqual([s.notes[0].kind, s.notes[0].title, s.notes[0].body], ['booked', 'Court 1 booked', 'Queens Park · Fri 20 Nov · 18:00–19:00 · gate 4821']);
   assert.deepEqual(t.pushes.map(p => p.title), ['Court 1 booked']);
   assert.deepEqual([s.clubspark.book.live, s.clubspark.book.ended, s.clubspark.book.gate, s.clubspark.book.line], [false, 'booked', '4821', 'Booked: court 1. Gate code 4821.']);

@@ -16,7 +16,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { iso, label, hhmm, todayCivil, addDays, londonInstant, londonWall, civil, dayKey, DAY_KEYS, DAY_LONG } = require('./lib/time');
 const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, cleanOnceAway, cleanWeekly, weeklyFromPlan, planOf, newWeeklyId, slotText, slotEnd,
-  MAX_WEEKLY } = require('./lib/plan');
+  MAX_WEEKLY, courtsOf } = require('./lib/plan');
 const { jobsFor, jobId, missingFor, msToNextCheck, opensAt, opensAtFor, civilOf, upcoming, releaseAround, isClub, MISSING_MS, SEEN_FRESH_MS } = require('./lib/schedule');
 const M = require('./lib/messages');
 const UI = require('./lib/ui');
@@ -28,7 +28,7 @@ const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 
-const VERSION = '2.10.4';
+const VERSION = '2.11.0';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -83,6 +83,9 @@ function intIn(v, lo, hi) {
 // as `venue` (lib/venues.js, resultId). Glasgow Club's (2.10) also carry `type`, the `price`
 // paid or asked ("£23.00") and whether it was `paid`: true, false or 'maybe' (Pay was pressed and
 // whether the payment went through is not known).
+// Two courts at once at Glasgow Club (2.11): one result for the slot, its `courts` the numbers
+// ([3, 4], lowest first), its `court` the two of them ("3 & 4", which an older app shows as it is)
+// and its `price` the total. A result that names its one court in `courts` ([3]) keeps that too.
 function cleanResult(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const id = String(raw.id || '');
@@ -98,8 +101,11 @@ function cleanResult(raw) {
     r.paid = raw.paid === true ? true : raw.paid === 'maybe' ? 'maybe' : false;
   }
   if (raw.status === 'booked') {
-    r.court = String(raw.court ?? '').replace(/[^\w ]/g, '').slice(0, 20);
+    const courts = V.clubOf(m[1]) ? A.courtList(raw.courts) : null;
+    const named = String(raw.court ?? '').replace(/[^\w ]/g, '').slice(0, 20);
+    r.court = courts && (courts.length > 1 || !named) ? courts.join(' & ') : named;
     if (!r.court) return null;
+    if (courts && r.court === courts.join(' & ')) r.courts = courts;
     if (raw.gate) r.gate = String(raw.gate).replace(/[^\w#*-]/g, '').slice(0, 20) || undefined;
   } else if (raw.why) {
     r.why = String(raw.why).slice(0, 300);
@@ -393,9 +399,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return { toast: 'Sleep sent', screen: UI.home(ctx()), view: 'h', sent: true };
   }
   // What the PC should do now, collected by its ping: { look } (read a day of Glasgow Club's
-  // sheet: someone is waiting for it, so it goes first), { hold } (put a court in your basket),
-  // { card } or { forgetCard } (keep a card from the app, or forget the one kept: see "your
-  // card") or { sleep: true }, each once, or nothing.
+  // sheet: someone is waiting for it, so it goes first), { hold } (put a court in your basket, or
+  // two: `courts`, 2.11), { card } or { forgetCard } (keep a card from the app, or forget the one
+  // kept: see "your card") or { sleep: true }, each once, or nothing.
   function takeOrder(t) {
     if (lookAsk && !lookAsk.taken) {
       lookAsk.taken = true;
@@ -408,7 +414,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       hold.heard = hold.takenAt = t;
       log('Your PC collected the court to hold.');
       drawHold(hold);
-      return { hold: { id: hold.id, key: hold.key, date: hold.date, start: hold.start, court: hold.court } };
+      // `court` is the first of `courts` (2.11), for a PC whose booker is older: it holds that one alone.
+      return { hold: { id: hold.id, key: hold.key, date: hold.date, start: hold.start, court: hold.court, courts: hold.courts.slice() } };
     }
     const card = takeCard(t);
     if (card) return card;
@@ -529,7 +536,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // Once the PC says Pay was pressed (`pressed`), or may have been ('maybe': Chrome gave it no
   // answer to the press), that is said with however the hold ends, whoever ends it, and such a
   // hold is never told to let go.
-  // One court at a time, never around the PC's nightly booking run, at most HOLD_PER_HOUR an hour.
+  // One hold at a time, never around the PC's nightly booking run, at most HOLD_PER_HOUR an hour.
+  // Two courts at once (2.11, from the app): both at the same start, into the one basket, and one
+  // payment for the total. Your PC takes both or neither, so the hold is followed as one: its
+  // `court` is the first of its `courts`, and its `price` the total your PC read at the basket.
   const HOLD_STAGES = ['signing-in', 'signed-in', 'adding', 'held', 'paying', 'approve'];
   const HOLD_ENDS = ['failed', 'refused', 'released', 'booked', 'left', 'unsure', 'closed', 'slept', 'gone'];
   const HOLD_OURS = ['timeout', 'nostart'];           // endings this bot decided on itself: the PC's own word replaces them
@@ -556,7 +566,20 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   let holdQuiet = 0;
   const clock = ms => { const w = londonWall(ms); return hhmm(w.hh * 60 + w.mm); };
   const holdLive = (t = now()) => !!hold && !hold.end && t - hold.heard < HOLD_LOST_MS;
-  const holdName = h => `${G.CENTRES[h.key].label} ${h.date} ${hhmm(h.start)} court ${h.court}`;
+  const holdName = h => `${G.CENTRES[h.key].label} ${h.date} ${hhmm(h.start)} ${M.courtWordsIn(h)}`;
+  // The courts a note from the PC names (2.11): its `courts`, lowest first, each once, the first of
+  // them its `court`; or its `court` alone, as a PC whose booker is older names it. Null if none.
+  const courtsOfNote = raw => {
+    const one = Number.isInteger(raw.court) && raw.court >= 1 && raw.court <= 20 ? raw.court : null;
+    const list = A.courtList(raw.courts);
+    return list && (one === null || list[0] === one) ? list : one === null ? null : [one];
+  };
+  const sameCourts = (a, b) => !!a && !!b && a.length === b.length && a.every((n, i) => n === b[i]);
+  // Each court's price as your PC read them at the basket (2.11): `n` prices that add up to the
+  // `total` it read, or null.
+  const pence = p => Math.round(Number(p.slice(1)) * 100);
+  const pricesOf = (list, n, total) => (Array.isArray(list) && list.length === n && list.every(p => A.readAmount(p) !== null)
+    && list.reduce((sum, p) => sum + pence(p), 0) === pence(total) ? list.slice() : null);
   const nearHoldGuard = t => [-1, 0, 1].some(d => {
     const rel = londonInstant(addDays(todayCivil(t), d), releaseMin);
     return t >= rel - HOLD_BEFORE_MS && t <= rel + HOLD_AFTER_MS;
@@ -602,7 +625,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const [, ...lines] = UI.indoorHold(ctx(), h).caption.split('\n').map(A.plain);
       // Booked, it is a booking (holdBooked): the note opens it.
       const centre = G.CENTRES[h.key];
-      note('hold', `${h.end === 'booked' ? 'Booked' : 'Hold ended'} · ${centre.label} court ${h.court}`,
+      note('hold', `${h.end === 'booked' ? 'Booked' : 'Hold ended'} · ${centre.label} ${M.courtWordsIn(h)}`,
         `${label(civilOf(h.date))} · ${hhmm(h.start)}–${hhmm(h.start + 60)}. ${lines.join(' ')}`, h.end === 'booked' ? V.resultId(centre.venue, h.date, h.start) : null);
     } catch (e) {
       log(`Could not keep a note about the hold: ${e.message}`);
@@ -612,13 +635,16 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // same venue, date and start, and under the same id (lib/venues.js, resultId). So a weekly
   // booking or a one-off for that slot is not booked again, and a later result for it does not
   // count twice. Like every Glasgow Club booking it counts toward no allowance. Its card and its
-  // note have told of it already: nothing more is said. `c`: { key, date, start, court } (a hold,
-  // or a note about one); `price`: as your PC read it.
+  // note have told of it already: nothing more is said. `c`: { key, date, start, court, courts }
+  // (a hold, or a note about one); `price`: as your PC read it, the total for two courts. Two
+  // courts (2.11) are one result for the slot: `court` "3 & 4", `courts` [3, 4]. One is kept as
+  // before 2.11, `court` alone.
   function holdBooked(c, price) {
     const centre = G.CENTRES[c.key];
     if (!centre) return;
-    resultFromAgent({ id: V.resultId(centre.venue, c.date, c.start), status: 'booked', type: centre.type, end: c.start + 60, court: String(c.court),
-      price: typeof price === 'string' ? price : null, paid: true }, { quiet: true })
+    const courts = A.courtList(c.courts) || [c.court];
+    resultFromAgent({ id: V.resultId(centre.venue, c.date, c.start), status: 'booked', type: centre.type, end: c.start + 60, court: courts.join(' & '),
+      ...(courts.length > 1 ? { courts } : {}), price: typeof price === 'string' ? price : null, paid: true }, { quiet: true })
       .catch(e => log(`Could not keep the hold as a booking: ${e.message}`));
   }
   // Until when Glasgow Club's site is to be left alone by your PC: it met a "checking your
@@ -668,13 +694,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return h.draws;
   }
   // The checks behind the Hold button, and the start of a hold when nothing stands in the way.
-  // The app goes through here as well. `where` says who asked and where the hold's card is:
+  // The app goes through here as well. `courts`: the courts to hold, lowest first (Telegram's
+  // button holds one; the app one or two, 2.11). `where` says who asked and where the hold's card is:
   // { by: 'telegram' | 'app', chat, card, wide, cardless, stale }. Returns { bad: true } (not a
   // time on offer), { old: true } (`stale`: asked by the app for a court no recent look showed it
   // free), { no } (what holdBlocker said) or { h } (the hold, now waiting for the PC's ping).
-  function holdStart(key, dateIso, start, court, where) {
+  function holdStart(key, dateIso, start, courts, where) {
     const t = now(), date = civilOf(dateIso), today = todayCivil(t);
-    if (iso(date) !== dateIso || date < today || date > addDays(today, UI.INDOOR_DAYS - 1) || !(court >= 1 && court <= 20)
+    if (iso(date) !== dateIso || date < today || date > addDays(today, UI.INDOOR_DAYS - 1) || !A.courtList(courts)
       || !(start >= 0 && start <= 23 * 60 && start % 5 === 0) || londonInstant(date, start) <= t) return { bad: true };
     if (where.stale) return { old: true };                               // from the app, for a court no recent look showed it free
     const no = holdBlocker(t);
@@ -689,9 +716,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       former.set(hold.id, hold);
       if (former.size > 3) former.delete(former.keys().next().value);
     }
+    // `courts`: what was asked for, and `court` the first of them. Once in the basket (2.11):
+    // `price` the total your PC read there, `prices` each court's as it read them (or null), and
+    // `allHeld` whether its note named every court asked for (a PC whose booker is older names
+    // only `court`, having held that one alone): for two courts, Pay from the app needs it.
     const h = { id: crypto.randomBytes(6).toString('hex'), by: where.by, chat: where.chat, card: where.card, wide: where.wide, cardless: !!where.cardless,
-      key, date: dateIso, start, court, at: t, heard: t,
-      taken: false, takenAt: null, stage: 'asked', end: null, order: null, price: '', heldAt: null, until: null, why: '', basket: '', removed: null, words: '', checked: false, silent: false, draws: null, redrawAt: null,
+      key, date: dateIso, start, court: courts[0], courts: courts.slice(), at: t, heard: t,
+      taken: false, takenAt: null, stage: 'asked', end: null, order: null, price: '', prices: null, allHeld: null, heldAt: null, until: null, why: '', basket: '', removed: null, words: '', checked: false, silent: false, draws: null, redrawAt: null,
       // Paying from the app. `pay`: what the PC says with each of its notes in the basket:
       // 'ready' (it can pay for this one), 'off' or 'failed' (it cannot, or it tried and could
       // not: `payWhy`), or '' (it said nothing: an older PC). `payState`: null; 'asked' (the app
@@ -720,7 +751,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const dateIso = UI.fromD8(d), start = UI.fromHm(hmText), court = Number(courtText);
     const wide = typeof q.message.text === 'string' && !newCard;
     const card = newCard ? null : q.message.message_id;
-    const r = holdStart(key, dateIso, start, court, { by: 'telegram', chat, card, wide });
+    const r = holdStart(key, dateIso, start, [court], { by: 'telegram', chat, card, wide });           // one court: two at once are the app's (2.11)
     if (r.bad) {
       await answer(TIME_GONE);
       await show(chat, UI.indoorDays(ctx(), key), card, { wide });
@@ -782,14 +813,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (cardAsk) return 'Your new card has not reached your PC yet. Try again in a moment.';
     if (!pcCard) return 'There is no card on your PC. Add one in the app first.';
     if (h.pay !== 'ready') return h.pay && h.payWhy ? `Your PC cannot pay for this court: ${h.payWhy}.` : 'Your PC has not said that it can pay for this court.';
+    // Two courts (2.11): only once your PC has said both are in the basket. One whose booker is
+    // older holds the first alone, and its price is that court's: it is not asked to pay for two.
+    if (h.courts.length > 1 && !h.allHeld) return 'Your PC didn’t say both courts are in your basket, so it isn’t asked to pay.';
     if (!h.price) return 'Your PC could not read the price, so it cannot pay for this court.';
     if (h.silent || t - h.heard >= HOLD_SILENT_MS) return 'No word from your PC for over a minute, so it isn’t asked to pay.';
     if (h.until && h.until - t < PAY_ROOM_MS) return 'Too little time left to pay from here. Pay at your PC, or let it go.';
     return null;
   }
   // Pay, from the app: the hold's id, the amount you confirmed there, and the card's security
-  // code sealed for your PC. Taken only as payNo allows, and only for the price your PC read.
-  // The order then waits for the PC's next note (a few seconds), PAY_ORDER_MS at most.
+  // code sealed for your PC. Taken only as payNo allows, and only for the price your PC read
+  // (for two courts, the total: 2.11). The order then waits for the PC's next note (a few
+  // seconds), PAY_ORDER_MS at most.
   function holdPay(id, amount, sealed) {
     const t = now(), h = hold;
     if (!h || h.id !== id) return { toast: 'No longer following that hold. Your PC lets it go when its time is up.' };
@@ -851,10 +886,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // What a note says of a press: on its way to paying ('paying', 'approve') and with an ending, in its `pressed`.
   const pressOf = (raw, stage) => (PAYING.includes(stage) || HOLD_ENDS.includes(stage) ? pressedSaid(raw.pressed) : null);
   const strangers = new Map();          // id -> { going, ended, failed: what has been said; pressed; court: which court, once a note has said }
-  // The court a note from the PC names: { key, date, start, court }, or null.
+  // The court a note from the PC names: { key, date, start, court, courts }, or null. `courts`
+  // (2.11): the note's own list, or its one court.
   const courtOfNote = raw => (Object.prototype.hasOwnProperty.call(G.CENTRES, raw.key) && typeof raw.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.date)
     && !Number.isNaN(Date.parse(`${raw.date}T12:00:00Z`)) && Number.isInteger(raw.start) && raw.start >= 0 && raw.start <= 23 * 60 && Number.isInteger(raw.court) && raw.court >= 1 && raw.court <= 20
-    ? { key: raw.key, date: raw.date, start: raw.start, court: raw.court } : null);
+    ? { key: raw.key, date: raw.date, start: raw.start, court: raw.court, courts: courtsOfNote(raw) } : null);
   function strangerNote(raw, id, stage) {
     const t = now();
     const ending = HOLD_ENDS.includes(stage);
@@ -877,7 +913,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       : `A hold I am not following ${ending ? `ended (${stage})` : 'is going on'}, and your PC says Pay ${s.pressed === 'maybe' ? 'may have been' : 'was'} pressed for it: told you so.`);
     // The same words as a note for the app, which has no hold to show them on either.
     const [, ...lines] = scr.caption.split('\n').map(A.plain);
-    const where = s.court ? `${G.CENTRES[s.court.key].label} court ${s.court.court}` : 'a court your PC was holding';
+    const where = s.court ? `${G.CENTRES[s.court.key].label} ${M.courtWordsIn(s.court)}` : 'a court your PC was holding';
     const booked = ending && stage === 'booked' && s.court ? V.resultId(G.CENTRES[s.court.key].venue, s.court.date, s.court.start) : null;
     note('hold', `${ending ? (stage === 'booked' ? 'Booked' : 'Hold ended') : couldNot ? 'Not paid by your PC' : 'Paying'} · ${where}`,
       `${s.court ? `${label(civilOf(s.court.date))} · ${hhmm(s.court.start)}–${hhmm(s.court.start + 60)}. ` : ''}${lines.join(' ')}`, booked);
@@ -945,7 +981,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       log(`Hold ${stage}: ${holdName(h)}${h.why ? ` (${h.why})` : ''}${h.pressed ? `; Pay ${h.pressed === true ? 'was' : h.pressed === 'maybe' ? 'may have been' : 'was ordered and may have been'} pressed` : ''}.`);
       drawHold(h);
       holdEnded(h);
-      if (stage === 'booked') holdBooked(h, h.price);
+      // The courts your PC found booked, as its note names them (2.11); a note that names none: the hold's.
+      if (stage === 'booked') holdBooked({ ...h, courts: courtsOfNote(raw) || h.courts }, h.price);
       return { ok: true };
     }
     const left = Number(raw.left);
@@ -989,9 +1026,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       redraw = true;
       if (stage === 'held') {
         h.price = typeof raw.price === 'string' && /^£\d{1,4}(\.\d\d)?$/.test(raw.price) ? raw.price : '';
+        // Two courts (2.11): the courts your PC says are in the basket, the total (`price`) and,
+        // when they add up to it, each court's price (`prices`).
+        const named = courtsOfNote(raw);
+        h.allHeld = h.courts.length < 2 || sameCourts(named, h.courts);
+        h.prices = h.price && named ? pricesOf(raw.prices, named.length, h.price) : null;
         h.heldAt = t;
         h.until = newUntil || t + 12 * 60 * 1000;
-        log(`Hold: ${holdName(h)} is in the basket${h.price ? ` (${h.price})` : ''}.`);
+        log(`Hold: ${holdName(h)} ${h.courts.length > 1 ? 'are' : 'is'} in the basket${h.price ? ` (${h.price})` : ''}.${h.allHeld ? ''
+          : ` Your PC's note named ${named ? M.courtWordsIn({ court: named[0], courts: named }) : 'no court'}, so it is not asked to pay for both (its booker may be older than 2.11).`}`);
       }
     } else if (stage === 'held' && PAYING.includes(h.stage) && !pressedNow(h) && raw.pay === 'failed') {
       // The PC stopped before it pressed Pay: back in the basket, as it was.
@@ -1413,21 +1456,28 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // its own list, as they always have (`once`); every other venue's on theirs (`onceAway`, 2.10).
   // `auth` (2.10.1): the app's signature for it, kept to hand to your PC (never shown or logged).
   // A one-off already on the list keeps its hours; a signature sent with it again takes the place
-  // of the one it had.
-  function addOnce(dateIso, start, hours, t, venue = V.SCHEDULED, type = 'outdoor', auth = null) {
+  // of the one it had. `courts` (2.11): 1, or 2 at Glasgow Club (lib/appapi.js has checked it).
+  // Sent again with another number of courts, a one-off takes it, with the signature sent along
+  // (which covers it), or with none: the one it had was for the courts it had.
+  function addOnce(dateIso, start, hours, t, venue = V.SCHEDULED, type = 'outdoor', auth = null, courts = 1) {
     const date = civilOf(dateIso), today = todayCivil(t);
     if (date < today || londonInstant(date, start) <= t) return { no: `${label(date)} at ${hhmm(start)} has already passed.` };
     if (date > addDays(today, MAX_AHEAD_DAYS)) return { no: `That is more than ${MAX_AHEAD_DAYS} days away. Try a nearer date.` };
     const home = venue === V.SCHEDULED;
     const had = (home ? state.once : state.onceAway.filter(o => o.venue === venue)).find(o => o.date === dateIso && o.start === start);
     if (had) {
-      if (auth && had.auth !== auth) { had.auth = auth; save(); }
+      if (courtsOf(had) !== courts) {
+        if (courts > 1) had.courts = courts; else delete had.courts;
+        if (auth) had.auth = auth; else delete had.auth;
+        save();
+        log(`A one-off date from the app is now for ${courts === 1 ? 'one court' : `${courts} courts`}: ${V.placeName(venue, had.type)} ${dateIso} ${hhmm(start)}.`);
+      } else if (auth && had.auth !== auth) { had.auth = auth; save(); }
       return { already: true };
     }
     if (state.once.length + state.onceAway.length >= MAX_ONCE) return { no: `Your list already has ${MAX_ONCE} one-off dates, which is as many as I keep. Remove one first.`, full: true };
     const signed = auth ? { auth } : {};
     const once = home ? cleanOnce([...state.once, { date: dateIso, start, hours, ...signed }]) : state.once;
-    const away = home ? state.onceAway : cleanOnceAway([...state.onceAway, { date: dateIso, start, hours, venue, type, at: t, ...signed }]);
+    const away = home ? state.onceAway : cleanOnceAway([...state.onceAway, { date: dateIso, start, hours, venue, type, at: t, ...(courts > 1 ? { courts } : {}), ...signed }]);
     const over = W.overIfPlanned(cfg(), { ...cfg(), once, away }, state.results, t);
     if (over) return { no: over, allowance: true };
     state.once = once; state.onceAway = away; save();
@@ -1485,8 +1535,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     return { list };
   }
+  // `courts` (2.11): 2 for two courts at once at Glasgow Club, kept only then (lib/plan.js).
+  const courtsField = v => (v.courts > 1 ? { courts: v.courts } : {});
   function addWeekly(v) {
-    const entry = { id: newWeeklyId(state.weekly), venue: v.venue, type: v.type, day: v.day, start: v.start, hours: v.hours, on: v.on !== false, ...(v.auth ? { auth: v.auth } : {}) };
+    const entry = { id: newWeeklyId(state.weekly), venue: v.venue, type: v.type, day: v.day, start: v.start, hours: v.hours, ...courtsField(v), on: v.on !== false, ...(v.auth ? { auth: v.auth } : {}) };
     const r = weeklyCheck(entry);
     if (r.no) return r;
     setWeeklyList(r.list); save();
@@ -1497,16 +1549,17 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const was = state.weekly.find(w => w.id === id);
     if (!was) return { status: 409, no: WEEKLY_GONE };
     // The entry as it will be, read whole as a new one would be (a venue changed without a type
-    // takes that venue's own type, or must say which).
-    const merged = { venue: was.venue, day: was.day, start: was.start, hours: was.hours, ...fields };
+    // takes that venue's own type, or must say which). Its courts (2.11) stay as they were unless
+    // sent: two at a park are refused, as for a new one.
+    const merged = { venue: was.venue, day: was.day, start: was.start, hours: was.hours, ...courtsField(was), ...fields };
     if (fields.venue !== undefined && fields.type === undefined) delete merged.type; else merged.type = fields.type !== undefined ? fields.type : was.type;
     const v = A.readWeekly({ ...merged, on: was.on });
     if (v.why) return { status: 400, no: v.why };
     // Its signature (2.10.1): a new one if sent; else the old one, while what it signs stays the
-    // same (a change of venue, type, day, start or hours makes it no longer the app's word).
-    const same = ['venue', 'type', 'day', 'start', 'hours'].every(k => v[k] === was[k]);
+    // same (a change of venue, type, day, start, hours or, 2.11, courts makes it no longer the app's word).
+    const same = ['venue', 'type', 'day', 'start', 'hours'].every(k => v[k] === was[k]) && courtsOf(v) === courtsOf(was);
     const sign = auth || (same ? was.auth : null);
-    const entry = { id, venue: v.venue, type: v.type, day: v.day, start: v.start, hours: v.hours, on: was.on, ...(sign ? { auth: sign } : {}) };
+    const entry = { id, venue: v.venue, type: v.type, day: v.day, start: v.start, hours: v.hours, ...courtsField(v), on: was.on, ...(sign ? { auth: sign } : {}) };
     const r = weeklyCheck(entry, was);
     if (r.no) return r;
     setWeeklyList(r.list); save();
@@ -1766,14 +1819,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // A weekly booking's signature is taken first, then the one-off's; with neither, the job goes
   // unsigned, and your PC takes no court for it. An open one-off goes with its own signature alone
   // (a weekly booking's names a weekday, not a date): your PC takes an open job only so.
+  // `courts` (2.11): how many courts to take, 1 or 2, as the entry it goes with says; that entry's
+  // signature covers it (docs/app-api.md, "Signed bookings": v1 for one court, v2 for two).
   function signOfJob(j) {
     if (!j.venue || !V.clubOf(j.venue)) return {};
     const day = dayKey(civilOf(j.date));
-    const same = e => e.venue === j.venue && e.type === j.type && e.start === j.start && e.hours === j.hours && !!e.auth;
-    const w = state.weekly.find(e => e.on !== false && e.day === day && same(e));
-    const o = state.onceAway.find(e => e.date === j.date && same(e));
-    const sign = w && !j.open ? { from: 'weekly', auth: w.auth } : o ? { from: 'once', auth: o.auth } : { from: j.open || j.kind === 'once' ? 'once' : 'weekly' };
-    return { ...sign, ...(j.open ? { open: true } : {}) };
+    const fits = e => e.venue === j.venue && e.type === j.type && e.start === j.start && e.hours === j.hours;
+    const week = state.weekly.find(e => e.on !== false && e.day === day && fits(e));
+    const once = state.onceAway.find(e => e.date === j.date && fits(e));
+    const w = week && week.auth ? week : null, o = once && once.auth ? once : null;
+    const from = w && !j.open ? 'weekly' : o ? 'once' : j.open || j.kind === 'once' ? 'once' : 'weekly';
+    const signed = from === 'weekly' ? w : o;
+    return { from, ...(signed ? { auth: signed.auth } : {}), courts: courtsOf(from === 'weekly' ? week : once), ...(j.open ? { open: true } : {}) };
   }
 
   // A job the weekly allowance keeps from the nightly run: said once, in its result.
@@ -1862,7 +1919,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
 
   // Your PC is paying for one of the nightly run's Glasgow Club bookings, and your bank wants you
   // to approve the payment in its app: said at once, in Telegram and as a note (so a notification
-  // on your phone). `raw`: { stage: 'bank', id, price, court, type }. Said once for each booking.
+  // on your phone). `raw`: { stage: 'bank', id, price, court, courts, type } (`courts` and the
+  // total `price` for two courts at once, 2.11). Said once for each booking.
   const bankSaid = new Set();
   async function bankNote(raw) {
     const r = cleanResult({ id: raw && raw.id, status: 'failed', type: raw && raw.type });
@@ -1873,9 +1931,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     bankSaid.add(r.id);
     if (bankSaid.size > 20) bankSaid.delete(bankSaid.values().next().value);
     const price = typeof raw.price === 'string' && /^£\d{1,4}(\.\d\d)?$/.test(raw.price) ? raw.price : null;
-    const court = intIn(raw.court, 1, 20);
+    const court = intIn(raw.court, 1, 20), courts = A.courtList(raw.courts);
+    const which = courts && courts.length > 1 ? M.courtWordsIn({ courts }) : court ? `court ${court}` : '';
     const title = 'Approve the payment in your bank\'s app';
-    const body = `Your PC is paying ${price ? `${price} ` : ''}for ${M.slotOf({ ...r, end: r.start + 60 })}${court ? `, court ${court}` : ''}. Approve it in your bank’s app within five minutes.`;
+    const body = `Your PC is paying ${price ? `${price} ` : ''}for ${M.slotOf({ ...r, end: r.start + 60 })}${which ? `, ${which}` : ''}. Approve it in your bank’s app within five minutes.`;
     log(`Your bank wants the payment for ${r.id} approved: told you so.`);
     note('warn', title, body);
     const chat = owner();
@@ -1901,11 +1960,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     state.results[r.id] = { ...r, at: now() };
     for (const k of Object.keys(state.results)) if (now() - state.results[k].at > RESULTS_KEEP_MS) delete state.results[k];
     save();
-    log(`${quiet ? 'Kept as a booking' : 'Result from the PC'}: ${r.id} ${r.status}${r.court ? ` (Court ${r.court})` : ''}`);
+    log(`${quiet ? 'Kept as a booking' : 'Result from the PC'}: ${r.id} ${r.status}${r.court ? ` (${M.courtWords(r)})` : ''}`);
     if (!same && chat !== null) {                     // what the card said, as a note for the app
       const after = V.clubOf(r.venue) ? (r.paid === true ? `paid ${r.price || ''}`.trim() : r.paid === 'maybe' ? 'Pay was pressed' : 'not paid')
         : r.gate ? `gate ${r.gate}` : 'gate code not shown';
-      if (r.status === 'booked') note('booked', `Court ${r.court} booked`, `${M.slotOf(r)} · ${after}`, r.id);
+      if (r.status === 'booked') note('booked', `${M.courtWords(r)} booked`, `${M.slotOf(r)} · ${after}`, r.id);       // "Courts 3 & 4 booked" for two (2.11)
       else note('missed', 'Not booked', `${M.slotOf(r)}. ${A.plain(M.failedWhy(r))}`, r.id);
     }
     return { ok: true };
@@ -2297,6 +2356,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // The hold being followed, or the last one, as the app sees it: the card's own words, and
   // which of its buttons Telegram would show now; and whether Pay from the app would be taken
   // now (payNo, the very check an order to pay goes through). Null if there has been none since the start.
+  // Two courts (2.11): `courts` and `courtNames` all of them, `court` and `courtName` the first
+  // (for an older app), `price` the total and `prices` each court's (null when not read).
   function holdView(x) {
     const h = hold;
     if (!h) return null;
@@ -2306,8 +2367,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const keys = scr.keyboard.inline_keyboard.flat().map(b => b.callback_data);
     return {
       id: h.id, startedBy: h.by, centre: h.key, centreName: centre.label, date: h.date, start: h.start, end: h.start + 60,
-      court: h.court, courtName: `Court ${h.court}`, stage: h.stage, live: !h.end, ended: h.end,
-      price: h.price || null, until: h.until, heardAt: h.heard, title, lines,
+      court: h.court, courtName: `Court ${h.court}`, courts: h.courts.slice(), courtNames: h.courts.map(n => `Court ${n}`),
+      stage: h.stage, live: !h.end, ended: h.end,
+      price: h.price || null, prices: h.prices ? h.prices.slice() : null, until: h.until, heardAt: h.heard, title, lines,
       can: { release: keys.includes(`gx:${h.id}`), done: keys.includes(`gp:${h.id}`), pay: payNo(h, x.now) === null },
       links: { basket: G.basketUrl, site: G.siteUrl, sheet: G.sheetUrl(centre, h.date) },
     };
@@ -2340,6 +2402,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       id: r.id, venue: r.venue || V.SCHEDULED, status: r.status, date: r.date, start: r.start, end: r.end, court: r.court ?? null, gate: r.gate ?? null,
       why: r.status === 'booked' ? null : A.plain(M.failedWhy(r)), at: r.at, past: civilOf(r.date) < today,
       type: r.type || 'outdoor', price: r.price ?? null, paid: V.clubOf(r.venue) ? (r.paid ?? false) : null,
+      courts: r.courts ? r.courts.slice() : null,                       // 2.11: the courts' numbers, when the result names them ([3, 4] for two at once)
     })).sort((a, b) => (a.past !== b.past ? (a.past ? 1 : -1) : a.past ? byDay(b, a) : byDay(a, b)));
     const noWake = wakeBlocker(t), noSleep = sleepNo(t), noHold = holdBlocker(t), line = UI.pcLine(x);
     return {
@@ -2359,13 +2422,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       later: releases.slice(1).map(releaseOf),
       open: open.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end })),
       plan: [1, 2, 3, 4, 5, 6, 0].map(i => DAY_KEYS[i]).filter(k => state.plan[k]).map(k => ({ day: k, start: state.plan[k].start, hours: state.plan[k].hours })),
-      weekly: state.weekly.map(w => ({ id: w.id, venue: w.venue, type: w.type, day: w.day, start: w.start, hours: w.hours, end: slotEnd(w.start, w.hours), on: w.on, next: w.on ? nextOf(w, t) : null, signed: !!w.auth })),
+      weekly: state.weekly.map(w => ({ id: w.id, venue: w.venue, type: w.type, day: w.day, start: w.start, hours: w.hours, end: slotEnd(w.start, w.hours), on: w.on, next: w.on ? nextOf(w, t) : null, signed: !!w.auth,
+        courts: courtsOf(w) })),                                       // 2.11: 1, or 2 at Glasgow Club
       once: [...state.once.map(o => ({ ...o, venue: V.SCHEDULED, type: 'outdoor' })), ...state.onceAway]
         .filter(o => londonInstant(civilOf(o.date), o.start) > t)
         .sort((a, b) => (a.date === b.date ? a.start - b.start || V.VENUE_KEYS.indexOf(a.venue) - V.VENUE_KEYS.indexOf(b.venue) : a.date < b.date ? -1 : 1))
         .map(o => {
           const opens = opensAtFor(o.venue, civilOf(o.date), c);
-          return { id: V.resultId(o.venue, o.date, o.start), venue: o.venue, type: o.type, date: o.date, start: o.start, hours: o.hours, end: slotEnd(o.start, o.hours), opensAt: opens, open: opens <= t, signed: !!o.auth };
+          return { id: V.resultId(o.venue, o.date, o.start), venue: o.venue, type: o.type, date: o.date, start: o.start, hours: o.hours, end: slotEnd(o.start, o.hours), opensAt: opens, open: opens <= t, signed: !!o.auth,
+            courts: courtsOf(o) };                                       // 2.11: 1, or 2 at Glasgow Club
         }),
       order: state.order.slice(),
       results,
@@ -2445,7 +2510,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         log(`A phone unlinked itself from the app: ${me.name}.`);
         return { status: 200, body: { ok: true } };
       case 'once': {
-        const r = addOnce(v.date, v.start, v.hours, t, v.venue, v.type, v.auth || null);
+        const r = addOnce(v.date, v.start, v.hours, t, v.venue, v.type, v.auth || null, v.courts || 1);
         if (r.no) return no(r.full || r.allowance ? 409 : 400, r.no);
         if (r.added) log(`Added ${v.venue ? `${V.placeName(v.venue, v.type)} ` : ''}${v.date} ${hhmm(v.start)} from the app`);
         return done(r.already ? { already: true } : {});
@@ -2498,10 +2563,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         return appLook(v);
       case 'hold': {
         // Telegram only offers Hold under a court that a sheet showed free. The app's equal: the
-        // court must be one that a look showed the app free in the last 15 minutes.
+        // court must be one that a look showed the app free in the last 15 minutes; both courts,
+        // for two at once (2.11).
         const shown = appShown.get(`${v.centre}:${v.date}`);
-        const stale = !(shown && t - shown.at < A.SHOWN_MS && shown.free.has(`${v.start}:${v.court}`));
-        const r = holdStart(v.centre, v.date, v.start, v.court, { by: 'app', chat: owner(), card: null, wide: false, cardless: true, stale });
+        const stale = !(shown && t - shown.at < A.SHOWN_MS && v.courts.every(n => shown.free.has(`${v.start}:${n}`)));
+        const r = holdStart(v.centre, v.date, v.start, v.courts, { by: 'app', chat: owner(), card: null, wide: false, cardless: true, stale });
         if (r.bad) return no(400, TIME_GONE);
         if (r.old) return no(409, LIST_OLD);
         return r.no ? no(409, r.no.say || r.no.toast) : done();

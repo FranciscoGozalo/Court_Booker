@@ -37,12 +37,13 @@ const sealedOf = (n = 60) => crypto.randomBytes(32 + 24 + 16 + n).toString('base
 
 const settle = () => new Promise(r => setTimeout(r, 5));
 const FREE = [{ start: 1080, end: 1140, court: 3, name: 'Tennis Hall Court 3', opensAt: null }];
-function makeBot(t0 = NOON, { linked = true, store = null, pcHoldMs = 25000 } = {}) {
+// `free`: what the stand-in for Glasgow Club shows free.
+function makeBot(t0 = NOON, { linked = true, store = null, pcHoldMs = 25000, free = FREE } = {}) {
   const clock = { t: at(t0) };
   const tg = fakeTelegram(clock);
   const logs = [], pushes = [];
   store = store || memStore({ v: 4, owner: OWNER, order: [3, 4, 5, 2, 1, 6] });
-  const reader = { day: async () => ({ at: clock.t, slots: FREE.map(s => ({ ...s })), listed: 12 }), peek: () => null, health: () => null };
+  const reader = { day: async () => ({ at: clock.t, slots: free.map(s => ({ ...s })), listed: 12 }), peek: () => null, health: () => null };
   const app = createApp({
     now: () => clock.t, tg, store, pictures: PICTURES, linked, glasgow: reader, pcLookMs: 2000, pcHoldMs, log: l => logs.push(l), retryMs: 30,
     push: async (tokens, message) => { pushes.push({ tokens, ...message }); }, wake: async () => 3,
@@ -768,4 +769,104 @@ test('a refusal from your PC says what your PC did, never that nothing was paid:
   const lines = t.hold().lines;
   assert.ok(lines.includes(`Your PC could not pay: ${busy}. Your PC pressed nothing.`), lines.join(' | '));
   assert.ok(!lines.join(' ').includes('nothing was paid'));
+});
+
+// ---------- 2.11: two courts at once ----------
+
+const GORBALS_FRI = 'gorbals/2026-11-20@18:00';
+const FREE_TWO = [...FREE, { start: 1080, end: 1140, court: 4, name: 'Tennis Hall Court 4', opensAt: null }];
+// Courts 3 and 4 asked for from the app, collected by the PC and in the basket, which the PC says it
+// can pay for: £46.00 in all, £23.00 each (`prices`). `old`: a PC whose booker is older than 2.11,
+// whose notes name `court` alone (it held court 3 alone, at £23.00).
+async function twoInBasket(t0 = NOON, { old = false, prices = ['£23.00', '£23.00'] } = {}) {
+  const t = makeBot(t0, { free: FREE_TWO });
+  const phone = await linkPhone(t);
+  await pcPing(t);
+  assert.equal((await ask(t, phone, 'indoor/look', { centre: 'g', date: FRI })).status, 200);
+  t.tg.clear();
+  const ping = pcPing(t, { wait: 5 });
+  assert.equal((await ask(t, phone, 'hold', { ...HOLD, courts: [3, 4] })).status, 200);
+  const order = await ping;
+  const id = order.hold.id, price = old ? '£23.00' : '£46.00';
+  const pc = (stage, extra = {}) => t.app.holdFromAgent({ id, key: 'g', date: FRI, start: 1080, court: 3, ...(old ? {} : { courts: [3, 4] }), stage, ...extra });
+  pc('signing-in');
+  pc('signed-in');
+  pc('adding');
+  pc('held', { price, ...(old || prices === null ? {} : { prices }), left: 12 * 60000, pay: 'ready' });        // prices: null, none sent
+  const beat = (extra = {}) => pc('held', { beat: true, price, left: 11 * 60000, pay: 'ready', ...extra });
+  return { ...t, phone, order, id, pc, beat, hold: () => stateOf(t, phone).hold };
+}
+
+test('two courts at once, end to end: the PC is handed both, the app is shown both and the total, Pay is for the total, and the paid hold is one booking for the slot', async () => {
+  const t = await twoInBasket();
+  assert.deepEqual(t.order, { ok: true, hold: { id: t.id, key: 'g', date: FRI, start: 1080, court: 3, courts: [3, 4] } });
+  // The app: both courts, the total, each court's price; the card's own words.
+  const h = t.hold();
+  assert.deepEqual([h.court, h.courtName, h.courts, h.courtNames, h.price, h.prices, h.stage], [3, 'Court 3', [3, 4], ['Court 3', 'Court 4'], '£46.00', ['£23.00', '£23.00'], 'held']);
+  assert.equal(h.title, 'Gorbals · Fri 20 Nov · 18:00–19:00 · Courts 3 & 4');
+  assert.deepEqual(h.lines, ['£46.00 to pay. In your basket since 12:00.', 'Pay here, or in Chrome on your PC and tap I Have Paid.', 'Let go at 12:12 if unpaid.']);
+  assert.deepEqual(h.can, { release: true, done: true, pay: true });
+  assert.ok(t.logs.includes('Hold: Gorbals 2026-11-20 18:00 courts 3 & 4 are in the basket (£46.00).'));
+  // Its card in Telegram (a Hold tap there brings it): "Courts 3 & 4".
+  await t.app.handleUpdate({ update_id: 1, callback_query: { id: 'q2', data: 'gh:g:20261120:1900:3', from: { id: OWNER }, message: { message_id: 8, chat: { id: OWNER, type: 'private' } } } });
+  await settle();
+  assert.equal(t.tg.last().text.split('\n')[0], '<b>Gorbals · Fri 20 Nov · 18:00–19:00 · Courts 3 &amp; 4</b>');
+  assert.equal(t.tg.last().text.split('\n')[1], '<b>£46.00 to pay.</b> In your basket since 12:00.');
+  // Pay is for the total: one court's price is refused, and nothing goes to the PC.
+  const cvc = sealedOf(40);
+  assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'pay', amount: '£23.00', sealed: cvc }), refused(409, 'The price is £46.00, not £23.00. Check it before you pay.'));
+  assert.deepEqual(t.beat(), { ok: true });
+  assert.equal(t.app.sealedHeld(), 0);
+  assert.equal((await ask(t, t.phone, 'hold/order', { id: t.id, what: 'pay', amount: '£46.00', sealed: cvc })).status, 200);
+  assert.deepEqual(t.hold().lines, ['£46.00 to pay.', 'Telling your PC to pay £46.00…']);
+  assert.equal(t.app.sealedHeld(), 1);
+  // The order goes with the PC's next note, once, with the total; the sealed code is not kept here a moment longer.
+  assert.deepEqual(t.beat(), { ok: true, order: 'pay', amount: '£46.00', sealed: cvc });
+  assert.equal(t.app.sealedHeld(), 0);
+  assert.ok(t.logs.includes('Hold: the order to pay £46.00 for Gorbals 2026-11-20 18:00 courts 3 & 4 went to your PC.'));
+  assert.deepEqual(t.pc('paying', { price: '£46.00', left: 11 * 60000 }), { ok: true });
+  t.clock.t += 9000;
+  t.pc('paying', { beat: true, price: '£46.00', pressed: true, left: 6 * 60000 });
+  assert.deepEqual(t.hold().lines, ['Your PC pressed Pay £46.00; I heard so at 12:00. If your bank asks you to approve it, do that in your banking app.', 'Waiting for Glasgow Club\'s answer…']);
+  // Booked: both courts new on the Bookings page, on your PC's word. One booking for the slot, under the midnight run's id.
+  t.pc('booked', { words: 'Thank you', pressed: true });
+  await settle();
+  const { at: _, ...kept } = t.app.state.results[GORBALS_FRI];
+  assert.deepEqual(kept, { id: GORBALS_FRI, status: 'booked', date: FRI, start: 1080, end: 1140, venue: 'gorbals', type: 'indoor', price: '£46.00', paid: true, court: '3 & 4', courts: [3, 4] });
+  const shown = stateOf(t, t.phone).results.find(r => r.id === GORBALS_FRI);
+  assert.deepEqual([shown.status, shown.court, shown.courts, shown.price, shown.paid], ['booked', '3 & 4', [3, 4], '£46.00', true]);
+  assert.equal(t.hold().lines[0], 'Booked and paid. Now on your Glasgow Club Bookings page.');
+  assert.equal(t.tg.last().text.split('\n')[0], '<b>Gorbals · Fri 20 Nov · 18:00–19:00 · Courts 3 &amp; 4</b>');
+  const note = stateOf(t, t.phone).notes[0];
+  assert.deepEqual([note.kind, note.title, note.ref], ['hold', 'Booked · Gorbals courts 3 & 4', GORBALS_FRI]);
+  assert.ok(t.logs.includes(`Kept as a booking: ${GORBALS_FRI} booked (Courts 3 & 4)`));
+  // Nothing sealed is kept, said or shown anywhere; and the booking is read back as it was kept.
+  assert.ok(!everything(t).includes(cvc));
+  assert.deepEqual(makeBot(NOON, { store: t.store }).app.state.results[GORBALS_FRI].courts, [3, 4]);
+});
+
+test('two courts at once with a PC whose booker is older than 2.11: it holds the first court alone, and is not asked to pay for two', async () => {
+  const t = await twoInBasket(NOON, { old: true });
+  const h = t.hold();
+  assert.deepEqual([h.courts, h.price, h.prices, h.can.pay], [[3, 4], '£23.00', null, false]);
+  assert.deepEqual(h.lines, ['£23.00 to pay. In your basket since 12:00.', 'Can’t pay here: your PC didn’t say both courts are in your basket.', 'Pay in Chrome on your PC and tap I Have Paid.', 'Let go at 12:12 if unpaid.']);
+  assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'pay', amount: '£23.00', sealed: sealedOf(40) }), refused(409, 'Your PC didn’t say both courts are in your basket, so it isn’t asked to pay.'));
+  assert.deepEqual(t.beat(), { ok: true });                                                   // nothing went to the PC
+  assert.equal(t.app.sealedHeld(), 0);
+  assert.ok(t.logs.includes('Hold: Gorbals 2026-11-20 18:00 courts 3 & 4 are in the basket (£23.00). Your PC\'s note named court 3, so it is not asked to pay for both (its booker may be older than 2.11).'));
+  // Paid in Chrome on the PC and found booked: the booking is the one court the PC names, at its price.
+  assert.equal((await ask(t, t.phone, 'hold/order', { id: t.id, what: 'done' })).status, 200);
+  assert.deepEqual(t.beat(), { ok: true, order: 'done' });
+  t.pc('booked', { words: '' });
+  await settle();
+  const r = t.app.state.results[GORBALS_FRI];
+  assert.deepEqual([r.court, r.courts, r.price, r.paid], ['3', undefined, '£23.00', true]);
+});
+
+test('two courts at once: each court\'s price is shown only when the PC gives one for each and they add up to the total', async () => {
+  for (const [prices, shown] of [[['£23.00', '£23.00'], ['£23.00', '£23.00']], [['£23', '£23.00'], ['£23', '£23.00']], [['£20.00', '£23.00'], null], [['£46.00'], null],
+    [['£23.00', 'free'], null], ['£23.00', null], [null, null]]) {
+    const t = await twoInBasket(NOON, { prices });
+    assert.deepEqual([t.hold().price, t.hold().prices, t.hold().can.pay], ['£46.00', shown, true], JSON.stringify(prices));
+  }
 });

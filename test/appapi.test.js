@@ -70,7 +70,7 @@ async function seeFree(t, phone, centre = 'g', date = FRI) {
   return r.body.look;
 }
 const STATE_KEYS = ['now', 'bot', 'venue', 'venues', 'clubspark', 'allowance', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'weekly', 'once', 'order', 'results', 'run', 'indoor', 'card', 'hold', 'notes', 'devices'];
-const HOLD_KEYS = ['id', 'startedBy', 'centre', 'centreName', 'date', 'start', 'end', 'court', 'courtName', 'stage', 'live', 'ended', 'price', 'until', 'heardAt', 'title', 'lines', 'can', 'links'];
+const HOLD_KEYS = ['id', 'startedBy', 'centre', 'centreName', 'date', 'start', 'end', 'court', 'courtName', 'courts', 'courtNames', 'stage', 'live', 'ended', 'price', 'prices', 'until', 'heardAt', 'title', 'lines', 'can', 'links'];
 // The state as a phone is shown it. Whenever it is looked at here, it is also checked to be
 // whole: the contract's fields and no others, and nothing that JSON would drop on the way.
 const stateOf = (t, phone) => {
@@ -252,7 +252,7 @@ test('what each request must look like, with a plain sentence when it does not',
   assert.deepEqual(A.readLook({ centre: 'x', date: FRI }), { why: A.WHY.centre });
   assert.deepEqual(A.readLook({ date: FRI }), { why: A.WHY.look });
   assert.deepEqual(A.readLook({ centre: 'g', date: 'friday' }), { why: A.WHY.look });
-  assert.deepEqual(A.readHold({ centre: 'g', date: FRI, start: 1080, court: 3 }), { centre: 'g', date: FRI, start: 1080, court: 3 });
+  assert.deepEqual(A.readHold({ centre: 'g', date: FRI, start: 1080, court: 3 }), { centre: 'g', date: FRI, start: 1080, court: 3, courts: [3] });      // without courts: the one court (2.11)
   assert.deepEqual(A.readHold({ centre: 'k', date: FRI, start: 1080, court: 3 }), { why: A.WHY.centre });
   for (const bad of [{ centre: 'g', date: FRI, start: 1080 }, { centre: 'g', date: FRI, start: '18:00', court: 3 }, { centre: 'g', start: 1080, court: 3 }, { date: FRI, start: 1080, court: 3 }]) assert.deepEqual(A.readHold(bad), { why: A.WHY.hold });
   assert.deepEqual(A.readHoldOrder({ id: 'a1b2c3d4e5f6', what: 'done' }), { id: 'a1b2c3d4e5f6', what: 'done' });
@@ -263,6 +263,40 @@ test('what each request must look like, with a plain sentence when it does not',
   assert.deepEqual(A.readPush({ token: 'ExpoPushToken[abc-DEF_123]' }), { token: 'ExpoPushToken[abc-DEF_123]' });
   assert.deepEqual(A.readPush({ token: null }), { token: null });
   for (const bad of [{}, { token: '' }, { token: 'abc' }, { token: 'ExponentPushToken[]' }, { token: 'ExponentPushToken[a b]' }, { token: `${PUSH_TOKEN} ` }, { token: 7 }]) assert.deepEqual(A.readPush(bad), { why: A.WHY.push });
+});
+
+test('two courts at once (2.11): what a hold, a weekly booking and a one-off may say of courts, with a plain sentence when it is wrong', () => {
+  const H = { centre: 'g', date: FRI, start: 1080 };
+  // A hold: one court as before, or two at the same start, lowest first, the first of them `court`.
+  assert.deepEqual(A.readHold({ ...H, court: 3, courts: [3, 4] }), { ...H, court: 3, courts: [3, 4] });
+  assert.deepEqual(A.readHold({ ...H, court: 3, courts: [3] }), { ...H, court: 3, courts: [3] });
+  assert.deepEqual(A.readHold({ ...H, court: 3, courts: null }), { ...H, court: 3, courts: [3] });
+  assert.deepEqual(A.readHold({ ...H, court: 3 }), { ...H, court: 3, courts: [3] });                 // an older app's request
+  assert.equal(require('../lib/venues').MAX_COURTS, 2);                                             // the one constant, on the bot's side
+  assert.deepEqual(A.readHold({ ...H, court: 3, courts: [3, 4, 5] }), { why: 'At most 2 courts at once.' });
+  // Twice the same court, not lowest first, not starting with `court`, or not a list of whole numbers.
+  for (const [court, courts] of [[3, [3, 3]], [4, [4, 3]], [3, [4, 5]], [3, [2, 3]], [3, []], [3, [3, '4']], [3, [3, 4.5]], [3, '3,4'], [3, 3], [3, { 0: 3 }]]) {
+    assert.deepEqual(A.readHold({ ...H, court, courts }), { why: A.WHY.holdCourts }, JSON.stringify(courts));
+  }
+  assert.equal(A.WHY.holdCourts, 'courts, when sent, must list court numbers, each once and lowest first, starting with court.');
+  // The shape of the rest is judged first, as before.
+  assert.deepEqual(A.readHold({ ...H, court: '3', courts: [3, 4] }), { why: A.WHY.hold });
+  // Courts named together, as the bot reads them from the PC: 1 or 2 numbers from 1 to 20, each once, lowest first.
+  assert.deepEqual(A.courtList([3, 4]), [3, 4]);
+  assert.deepEqual(A.courtList([20]), [20]);
+  for (const bad of [[], [4, 3], [3, 3], [0, 1], [20, 21], [1, 2, 3], ['3'], null, undefined, '3 & 4', 3]) assert.equal(A.courtList(bad), null, JSON.stringify(bad));
+  // A weekly booking or a one-off: courts 1 or 2, and 2 at Glasgow Club only. What is read has it only when it is 2.
+  const W = { venue: 'gorbals', day: 'wed', start: 1080, hours: 1 };
+  assert.deepEqual(A.readWeekly({ ...W, courts: 2 }), { venue: 'gorbals', type: 'indoor', day: 'wed', start: 1080, hours: 1, on: true, courts: 2 });
+  assert.deepEqual(A.readWeekly({ ...W, courts: 1 }), { venue: 'gorbals', type: 'indoor', day: 'wed', start: 1080, hours: 1, on: true });
+  assert.deepEqual(A.readWeekly(W), { venue: 'gorbals', type: 'indoor', day: 'wed', start: 1080, hours: 1, on: true });
+  assert.deepEqual(A.readWeekly({ ...W, venue: 'scotstoun', type: 'outdoor', start: 600, courts: 2 }).courts, 2);
+  for (const venue of ['queenspark', 'kelvingrove']) assert.deepEqual(A.readWeekly({ ...W, venue, courts: 2 }), { why: 'Two courts at once are for Glasgow Club only.' }, venue);
+  for (const courts of [0, 3, '2', 1.5, true]) assert.deepEqual(A.readWeekly({ ...W, courts }), { why: 'courts, when sent, must be 1 or 2.' }, String(courts));
+  assert.deepEqual(A.readOnce({ venue: 'gorbals', date: '2026-11-25', start: 1080, hours: 1, courts: 2 }), { date: '2026-11-25', start: 1080, hours: 1, venue: 'gorbals', type: 'indoor', courts: 2 });
+  assert.deepEqual(A.readOnce({ date: '2026-11-25', start: 1080, hours: 1, courts: 2 }), { why: A.WHY.clubCourts });                // Kelvingrove's
+  assert.deepEqual(A.readOnce({ date: '2026-11-25', start: 1080, hours: 1, courts: 1 }), { date: '2026-11-25', start: 1080, hours: 1 });
+  assert.deepEqual(A.readWeeklyChange({ id: 'aaaaaaa3', courts: 2 }), { id: 'aaaaaaa3', fields: { courts: 2 } });
 });
 
 // ---------- what is kept ----------
@@ -403,7 +437,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.10.4', api: 3 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.11.0', api: 3 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -660,7 +694,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.10.4',
+    bot: '2.11.0',
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
     venues: venuesOn(TUE),
     // Nothing stands in the way of a look or Book now at a park: the PC is awake, and it is midday.
@@ -688,21 +722,21 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
     plan: [{ day: 'tue', start: 960, hours: 2 }, { day: 'thu', start: 1140, hours: 1 }],
     // 2.10: the same, as weekly entries (Kelvingrove's), each with the day it is next booked for and when that opens.
     weekly: [
-      { id: 'f7de6e62', venue: 'kelvingrove', type: 'outdoor', day: 'tue', start: 960, hours: 2, end: 1080, on: true, next: { date: '2026-11-24', opensAt: at('2026-11-17T22:00:00Z') }, signed: false },
-      { id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 1, end: 1200, on: true, next: { date: '2026-11-26', opensAt: at('2026-11-19T22:00:00Z') }, signed: false },
+      { id: 'f7de6e62', venue: 'kelvingrove', type: 'outdoor', day: 'tue', start: 960, hours: 2, end: 1080, on: true, next: { date: '2026-11-24', opensAt: at('2026-11-17T22:00:00Z') }, signed: false, courts: 1 },
+      { id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 1, end: 1200, on: true, next: { date: '2026-11-26', opensAt: at('2026-11-19T22:00:00Z') }, signed: false, courts: 1 },
     ],
     once: [
-      { id: '2026-11-20@19:00', date: FRI, start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-13T22:00:00Z'), open: true, venue: 'kelvingrove', type: 'outdoor', signed: false },
-      { id: '2026-11-27@10:00', date: '2026-11-27', start: 600, hours: 1, end: 660, opensAt: at('2026-11-20T22:00:00Z'), open: false, venue: 'kelvingrove', type: 'outdoor', signed: false },
+      { id: '2026-11-20@19:00', date: FRI, start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-13T22:00:00Z'), open: true, venue: 'kelvingrove', type: 'outdoor', signed: false, courts: 1 },
+      { id: '2026-11-27@10:00', date: '2026-11-27', start: 600, hours: 1, end: 660, opensAt: at('2026-11-20T22:00:00Z'), open: false, venue: 'kelvingrove', type: 'outdoor', signed: false, courts: 1 },
     ],
     order: [3, 4, 5, 2, 1, 6],
     // Today and later first, soonest first; then what is past, newest first.
     results: [
-      { id: '2026-11-17@09:00', venue: 'kelvingrove', status: 'failed', date: TUE, start: 540, end: 600, court: null, gate: null, why: 'It didn’t work: the booking sheet did not load <twice>.', at: at('2026-11-10T22:01:00Z'), past: false, type: 'outdoor', price: null, paid: null },
-      { id: '2026-11-18@18:00', venue: 'kelvingrove', status: 'none', date: '2026-11-18', start: 1080, end: 1200, court: null, gate: null, why: 'No court free for the whole time.', at: at('2026-11-11T22:05:00Z'), past: false, type: 'outdoor', price: null, paid: null },
-      { id: '2026-11-19@19:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-19', start: 1140, end: 1200, court: '3', gate: '2433', why: null, at: at('2026-11-12T22:00:10Z'), past: false, type: 'outdoor', price: null, paid: null },
-      { id: '2026-11-12@19:00', venue: 'kelvingrove', status: 'failed', date: '2026-11-12', start: 1140, end: 1200, court: null, gate: null, why: 'It didn’t work: no reason given.', at: at('2026-11-05T22:03:00Z'), past: true, type: 'outdoor', price: null, paid: null },
-      { id: '2026-11-10@16:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-10', start: 960, end: 1080, court: '4', gate: null, why: null, at: at('2026-11-03T22:00:09Z'), past: true, type: 'outdoor', price: null, paid: null },
+      { id: '2026-11-17@09:00', venue: 'kelvingrove', status: 'failed', date: TUE, start: 540, end: 600, court: null, gate: null, why: 'It didn’t work: the booking sheet did not load <twice>.', at: at('2026-11-10T22:01:00Z'), past: false, type: 'outdoor', price: null, paid: null, courts: null },
+      { id: '2026-11-18@18:00', venue: 'kelvingrove', status: 'none', date: '2026-11-18', start: 1080, end: 1200, court: null, gate: null, why: 'No court free for the whole time.', at: at('2026-11-11T22:05:00Z'), past: false, type: 'outdoor', price: null, paid: null, courts: null },
+      { id: '2026-11-19@19:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-19', start: 1140, end: 1200, court: '3', gate: '2433', why: null, at: at('2026-11-12T22:00:10Z'), past: false, type: 'outdoor', price: null, paid: null, courts: null },
+      { id: '2026-11-12@19:00', venue: 'kelvingrove', status: 'failed', date: '2026-11-12', start: 1140, end: 1200, court: null, gate: null, why: 'It didn’t work: no reason given.', at: at('2026-11-05T22:03:00Z'), past: true, type: 'outdoor', price: null, paid: null, courts: null },
+      { id: '2026-11-10@16:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-10', start: 960, end: 1080, court: '4', gate: null, why: null, at: at('2026-11-03T22:00:09Z'), past: true, type: 'outdoor', price: null, paid: null, courts: null },
     ],
     run: null,
     indoor: {
@@ -771,7 +805,7 @@ test('the state follows the clock: what has opened, what has started, what is pa
   assert.deepEqual(s.open, []);
   assert.deepEqual(s.results.filter(r => !r.past).map(r => r.id), ['2026-11-27@10:00']);
   assert.deepEqual(s.results.filter(r => r.past).map(r => r.id), ['2026-11-19@19:00', '2026-11-18@18:00', '2026-11-17@09:00', '2026-11-12@19:00', '2026-11-10@16:00']);
-  assert.deepEqual(s.results[0], { id: '2026-11-27@10:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-27', start: 600, end: 660, court: '5', gate: '9911', why: null, at: t.clock.t, past: false, type: 'outdoor', price: null, paid: null });
+  assert.deepEqual(s.results[0], { id: '2026-11-27@10:00', venue: 'kelvingrove', status: 'booked', date: '2026-11-27', start: 600, end: 660, court: '5', gate: '9911', why: null, at: t.clock.t, past: false, type: 'outdoor', price: null, paid: null, courts: null });
 });
 
 test('a one-off that repeats a weekly day, added after its release was missed, is one of the open ones', async () => {
@@ -919,7 +953,7 @@ test('a one-off date from the app is the same as /book: added, already there, or
   let r = await ask(t, phone, 'once', { date: '2026-11-25', start: 1140, hours: 2 });
   assert.equal(r.status, 200);
   assert.deepEqual(Object.keys(r.body), ['ok', 'etag', 'state']);
-  assert.deepEqual(r.body.state.once, [{ id: '2026-11-25@19:00', venue: 'kelvingrove', type: 'outdoor', date: '2026-11-25', start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-18T22:00:00Z'), open: false, signed: false }]);
+  assert.deepEqual(r.body.state.once, [{ id: '2026-11-25@19:00', venue: 'kelvingrove', type: 'outdoor', date: '2026-11-25', start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-18T22:00:00Z'), open: false, signed: false, courts: 1 }]);
   assert.equal(r.body.etag, t.app.appState(phone.device).etag);
   assert.deepEqual(t.store.load().once, [{ date: '2026-11-25', start: 1140, hours: 2 }]);
   assert.deepEqual(t.app.state.once, (await inTelegram(NOON, {}, '/book 25 nov 19:00 2h')).state.once);
@@ -1165,7 +1199,7 @@ test('Scotstoun\'s outdoor courts (o), end to end against the stand-in PC: a loo
   assert.deepEqual([h.centre, h.centreName, h.title, h.links.sheet], ['o', 'Scotstoun outdoor', 'Scotstoun outdoor · Fri 20 Nov · 17:00–18:00 · Court 2', `https://glasgowclub.gladstonego.cloud/book/calendar/SA008?activityDate=${FRI}T00:00:00.000Z`]);
   // The PC's ping collects it with the key o, and the PC's notes about it carry that key.
   const got = await holding;
-  assert.deepEqual(got, { ok: true, hold: { id: h.id, key: 'o', date: FRI, start: 1020, court: 2 } });
+  assert.deepEqual(got, { ok: true, hold: { id: h.id, key: 'o', date: FRI, start: 1020, court: 2, courts: [2] } });
   const pc = (stage, extra = {}) => t.app.holdFromAgent({ id: h.id, key: 'o', date: FRI, start: 1020, court: 2, stage, ...extra });
   for (const stage of ['signing-in', 'signed-in', 'adding']) assert.deepEqual(pc(stage), { ok: true });
   assert.deepEqual(pc('held', { price: '£10.00', left: 12 * 60000 }), { ok: true });
@@ -1295,8 +1329,8 @@ test('a hold from the app, end to end: asked, collected, signed in, in the baske
   const first = t.asked.body.state.hold;
   assert.match(first.id, /^[0-9a-f]{12}$/);
   assert.deepEqual(first, {
-    id: first.id, startedBy: 'app', centre: 'g', centreName: 'Gorbals', date: FRI, start: 1080, end: 1140, court: 3, courtName: 'Court 3',
-    stage: 'asked', live: true, ended: null, price: null, until: null, heardAt: at(NOON),
+    id: first.id, startedBy: 'app', centre: 'g', centreName: 'Gorbals', date: FRI, start: 1080, end: 1140, court: 3, courtName: 'Court 3', courts: [3], courtNames: ['Court 3'],
+    stage: 'asked', live: true, ended: null, price: null, prices: null, until: null, heardAt: at(NOON),
     title: TITLE,
     lines: ['Asking your PC to hold it. Under a minute.'],
     can: { release: true, done: false, pay: false },
@@ -1305,7 +1339,7 @@ test('a hold from the app, end to end: asked, collected, signed in, in the baske
   assert.equal(t.asked.body.state.indoor.holdNo, 'Your PC is already holding a court.');
   assert.deepEqual([t.asked.body.state.pc.canSleep, t.asked.body.state.pc.sleepWhy], [false, 'Your PC is holding a court. Let it go first.']);
   // The PC's ping collects exactly what a tap in Telegram hands it.
-  assert.deepEqual(t.order, { ok: true, hold: { id: first.id, key: 'g', date: FRI, start: 1080, court: 3 } });
+  assert.deepEqual(t.order, { ok: true, hold: { id: first.id, key: 'g', date: FRI, start: 1080, court: 3, courts: [3] } });
   const hold = () => stateOf(t, t.phone).hold;
   assert.deepEqual([hold().stage, hold().lines], ['asked', ['Starting Chrome on your PC…']]);
   for (const [stage, words] of [['signing-in', 'Signing in to Glasgow Club…'], ['signed-in', 'Signed in. Finding the court on the sheet…'], ['adding', 'Putting court 3 in your basket…']]) {
@@ -2042,6 +2076,50 @@ test('a hold from the app is only taken for a court that a look showed the app f
   await u.app.pingFromAgent(HOME);
   await tap(u.app, 'gh:g:20261120:1800:3', 7);
   assert.equal(lastAnswer(u), 'Asking your PC');
+});
+
+test('two courts at once from the app (2.11): both must be ones a look showed free; the PC is handed both as one hold; an older app\'s request is as it was', async () => {
+  const old = refused(409, 'That list is old. Read the day again, then hold a court.');
+  const TWO = { ...HOLD, courts: [3, 4] };
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  await t.app.pingFromAgent(HOME);
+  // The shape first, in plain words; then whether the time is on offer at all; then what a look showed.
+  assert.deepEqual(await ask(t, phone, 'hold', { ...HOLD, courts: [3, 4, 5] }), refused(400, 'At most 2 courts at once.'));
+  assert.deepEqual(await ask(t, phone, 'hold', { ...HOLD, courts: [4] }), refused(400, A.WHY.holdCourts));
+  assert.deepEqual(await ask(t, phone, 'hold', { ...HOLD, courts: [3, 3] }), refused(400, A.WHY.holdCourts));
+  assert.deepEqual(await ask(t, phone, 'hold', { ...HOLD, courts: [3, 21] }), refused(400, 'That time is no longer on offer. Pick again.'));
+  assert.deepEqual(await ask(t, phone, 'hold', TWO), old);                                  // nothing looked at yet
+  // Courts 3 and 4 free at 18:00, court 3 alone at 19:00: both must have been shown free at that start.
+  await seeFree(t, phone);
+  assert.deepEqual(await ask(t, phone, 'hold', { ...TWO, start: 1140 }), old);
+  assert.deepEqual(await ask(t, phone, 'hold', { ...HOLD, courts: [3, 5] }), old);
+  assert.deepEqual(await t.app.pingFromAgent(HOME), { ok: true });                         // none of it reached the PC
+  // Both shown free: one hold, handed to the PC with both courts, `court` the first.
+  const ping = t.app.pingFromAgent(HOME, { wait: 5 });
+  const asked = await ask(t, phone, 'hold', TWO);
+  assert.equal(asked.status, 200);
+  const h = asked.body.state.hold;
+  assert.deepEqual([h.court, h.courtName, h.courts, h.courtNames, h.price, h.prices, h.title, h.lines], [3, 'Court 3', [3, 4], ['Court 3', 'Court 4'], null, null,
+    'Gorbals · Fri 20 Nov · 18:00–19:00 · Courts 3 & 4', ['Asking your PC to hold it. Under a minute.']]);
+  assert.deepEqual(await ping, { ok: true, hold: { id: h.id, key: 'g', date: FRI, start: 1080, court: 3, courts: [3, 4] } });
+  assert.ok(t.logs.includes('Hold asked for: Gorbals 2026-11-20 18:00 courts 3 & 4.'));
+  assert.deepEqual(t.app.holdFromAgent({ id: h.id, key: 'g', date: FRI, start: 1080, court: 3, courts: [3, 4], stage: 'adding' }), { ok: true });
+  assert.deepEqual(stateOf(t, phone).hold.lines, ['Putting courts 3 & 4 in your basket…']);
+  // One hold at a time, of one court or two.
+  assert.deepEqual(await ask(t, phone, 'hold', HOLD), refused(409, 'Your PC is already holding a court.'));
+  // An older app's request names one court and no list: the very hold that `courts: [3]` asks for.
+  for (const body of [HOLD, { ...HOLD, courts: [3] }, { ...HOLD, courts: null }]) {
+    const u = makeBot();
+    const p = await linkPhone(u);
+    await u.app.pingFromAgent(HOME);
+    await seeFree(u, p);
+    const pinged = u.app.pingFromAgent(HOME, { wait: 5 });
+    const one = (await ask(u, p, 'hold', body)).body.state.hold;
+    assert.deepEqual([one.court, one.courtName, one.courts, one.courtNames, one.title], [3, 'Court 3', [3], ['Court 3'], TITLE], JSON.stringify(body));
+    assert.deepEqual(await pinged, { ok: true, hold: { id: one.id, key: 'g', date: FRI, start: 1080, court: 3, courts: [3] } });
+    assert.ok(u.logs.includes('Hold asked for: Gorbals 2026-11-20 18:00 court 3.'));
+  }
 });
 
 test('before the PC has collected a hold, "I have paid" is refused and changes nothing, and Stop stops it', async () => {
