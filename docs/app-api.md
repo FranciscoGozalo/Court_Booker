@@ -1095,7 +1095,7 @@ not reach it: nothing was pressed, and Pay may be asked for again. The checks co
 - 409 "Your PC could not read the price, so it cannot pay for this court."
 - 409 "No word from your PC for over a minute, so it isn’t asked to pay."
 - 409 "Too little time left to pay from here. Pay at your PC, or let it go." (under 30 seconds of `until`)
-- 409 "Update the app to pay for two courts here." (2.11: a hold of two, and `courts` is not exactly `hold.courts`, or not sent. Nothing is spent: `can.pay` stays as it was. An app older than 2.11 does not reload while a hold is showing: close it and open it again)
+- 409 "Close and reopen the app to pay for two courts." (2.11: a hold of two, and `courts` is not exactly `hold.courts`, or not sent. Nothing is spent: `can.pay` stays as it was. An app older than 2.11 does not reload while a hold is showing; closed and opened again, it takes the update, and its Pay names both courts)
 - 409 "The price is £23.00, not £25.00. Check it before you pay." (`amount` is not `hold.price`; for two courts "The price is £46.00, not £23.00. …")
 
 ### What the PC does
@@ -1293,7 +1293,7 @@ The shapes, side by side:
 | bot → PC | the ping's answer | `{ hold: { id, key, date, start, court: 3, courts: [3] } }` | `{ hold: { id, key, date, start, court: 3, courts: [3, 4] } }` |
 | PC → bot | `POST /agent/hold` notes | `court: 3` (a 2.11 booker adds `courts` only for two courts) | `court: 3, courts: [3, 4]`, `price` the total, `prices` each court's |
 | app → PC | the sealed code (Pay) | `{ cvc, id, amount, payKey, centre, date, start, court }`, as before | the same with `courts: [3, 4]`, `amount` the total; or `{ use: "kept", … }` with `courts` too |
-| app → bot | `POST /app/hold/order` (pay) | `amount: hold.price` (and `courts: [3]` from a 2.11 app) | `amount: hold.price`, the total, and `courts: [3, 4]` in plain: without it, 409 "Update the app to pay for two courts here." |
+| app → bot | `POST /app/hold/order` (pay) | `amount: hold.price` (and `courts: [3]` from a 2.11 app) | `amount: hold.price`, the total, and `courts: [3, 4]` in plain: without it, 409 "Close and reopen the app to pay for two courts." |
 | bot → app | `state.results[]` | `court: "3"`, `courts: null` (or `[3]` when the PC names it so) | one result for the slot: `court: "3 & 4"`, `courts: [3, 4]`, `price` the total, `paid` |
 | app → bot | `POST /app/weekly`, `/change`, `/app/once` | `courts` left out, or `1` | `courts: 2`, signed with the v2 words |
 | bot → app | `state.weekly[]`, `state.once[]` | `courts: 1`, `auth` (v1 words) or null | `courts: 2`, `auth` (v2 words) or null |
@@ -1305,7 +1305,7 @@ What the bot checks of two courts: the shape of `courts` (400, as above); that a
 both courts free at that start (409 "That list is old…"); and, before it takes Pay from the app, that
 your PC's note from the basket names both (else 409 "Your PC didn’t say both courts are in your
 basket, so it isn’t asked to pay.") and that the order names both in plain, `courts: [3, 4]` (else
-409 "Update the app to pay for two courts here.", before anything is spent). Your PC checks the rest: both in the basket, the basket's badge
+409 "Close and reopen the app to pay for two courts.", before anything is spent). Your PC checks the rest: both in the basket, the basket's badge
 reading exactly the number of courts it put in, the confirmed amount equal to the total, every amount
 on the payment page either the total or one court's price as read at the basket (anything else and
 nothing is typed or pressed), the Pay button saying exactly the total ("Pay £46.00"), the sealed code
@@ -1331,9 +1331,9 @@ backed up and signed exactly as before. Deploy in this order:
 3. **The app** (an over-the-air update), last. An app older than 2.11 never sends `courts`, shows a
    result's `court: "3 & 4"` and a hold's `courtName: "Courts 3 & 4"` as they are, and ignores the
    fields it does not know. On a phone still running it (another phone started a hold of two), its
-   Pay is refused with "Update the app to pay for two courts here." and nothing is spent, so the
+   Pay is refused with "Close and reopen the app to pay for two courts." and nothing is spent, so the
    hold can still be paid once that phone has the update (it does not reload while a hold is
-   showing: close the app and open it again).
+   showing, so the refusal says to close the app and open it again).
 
 ## Notes and notifications
 

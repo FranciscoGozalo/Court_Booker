@@ -836,7 +836,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (no) return { toast: no };
     if (h.courts.length > 1 && !sameCourts(courts, h.courts)) {
       log(`Hold: an order to pay for ${holdName(h)} named ${courts ? M.courtWordsIn({ court: courts[0], courts }) : 'no courts'}: refused, from an app not updated for two courts.`);
-      return { toast: 'Update the app to pay for two courts here.' };
+      return { toast: 'Close and reopen the app to pay for two courts.' };
     }
     if (amount !== h.price) return { toast: `The price is ${h.price}, not ${amount}. Check it before you pay.` };
     h.payState = 'asked';

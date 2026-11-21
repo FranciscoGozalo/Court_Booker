@@ -851,7 +851,7 @@ test('two courts at once and an app older than 2.11: shown both courts, and its 
   assert.deepEqual([t.hold().court, t.hold().courtName, t.hold().price], [3, 'Courts 3 & 4', '£46.00']);
   // Its Pay names no courts (its box is sealed for court 3 alone, which your PC would refuse): refused here, and nothing spent.
   const old = sealedOf(40);
-  const update = refused(409, 'Update the app to pay for two courts here.');
+  const update = refused(409, 'Close and reopen the app to pay for two courts.');
   assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'pay', amount: '£46.00', sealed: old }), update);
   assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'pay', amount: '£46.00', sealed: old, courts: [3] }), update);
   assert.deepEqual(await ask(t, t.phone, 'hold/order', { id: t.id, what: 'pay', amount: '£46.00', sealed: old, courts: [3, 5] }), update);
