@@ -705,7 +705,7 @@ test('a one-off date at Glasgow Club scheduled before its day opens (2.11.2): ta
   assert.ok(![v1, v2].some(s => t.logs.join('\n').includes(s) || JSON.stringify(t.tg.calls).includes(s)));
 });
 
-test('a one-off date at Glasgow Club on a day already open (2.11.2: as at the parks): taken, shown open, and booked and paid at the PC\'s next run with its own signature; the app holds instead and never sends one', async () => {
+test('a one-off date at Glasgow Club on a day already open (2.11.2: as at the parks): taken, shown open, and booked and paid at the PC\'s next run with its own signature; the app (2.11.3) books such a day now instead and never sends one', async () => {
   const t = makeBot('2026-11-21T20:20:00Z');                                                       // Sat 28 Nov opened at 00:00 today
   const phone = await linkPhone(t);
   const v1 = sign('court-broker/once/v1|gorbals|indoor|2026-11-28|1140|1');
@@ -806,4 +806,37 @@ test('Scotstoun (2.11.2): a one-off date of the other court type than a weekly b
   // ...and Kelvingrove's are as they were.
   const kg = { ...CFG, weekly: [{ id: 'bbbbbbbb', venue: 'kelvingrove', type: 'outdoor', day: 'sat', start: 600, hours: 2, on: true }], once: [{ date: '2026-12-12', start: 600, hours: 1 }], away: [] };
   assert.deepEqual(S.requestsOn(require('../lib/time').civil(2026, 12, 12), kg).map(r => [r.id, r.hours, r.kind]), [['2026-12-12@10:00', 2, 'weekly']]);
+});
+
+// ---------- Book now at Glasgow Club is never a one-off (2.11.3) ----------
+
+test('Book now at Glasgow Club (2.11.3) is never kept as a one-off: not in state.once, never among the jobs handed to the PC, so the 21:55 run can never pay for it later', async () => {
+  const clock = { t: at('2026-11-21T20:20:00Z') };                                                 // Sat 28 Nov opened at 00:00 today
+  const tg = fakeTelegram(clock);
+  const free = [{ start: 1140, end: 1200, court: 2, name: 'Court 2', opensAt: null }];
+  const glasgow = { day: async () => ({ at: clock.t, slots: free.map(s => ({ ...s })), listed: 4 }), peek: () => null, health: () => null };
+  const t = { clock, tg, app: createApp({ now: () => clock.t, tg, store: memStore({ v: 4, owner: OWNER, order: [3, 4, 5, 2, 1, 6] }), pictures: PICTURES, linked: true, glasgow, wake: async () => 3, push: async () => {} }) };
+  const phone = await linkPhone(t);
+  const ping = (wait = 0) => t.app.pingFromAgent(HOME, { wait, card: { key: KEY, has: true, kept: VISA, auto: true }, book: { max: '£30.00' } });
+  await ping();
+  assert.equal((await ask(t, phone, 'indoor/look', { centre: 'g', date: '2026-11-28' })).status, 200);
+  const waiting = ping(5);
+  const auth = sign('court-broker/once/v1|gorbals|indoor|2026-11-28|1140|1');
+  const r = await ask(t, phone, 'glasgow/book', { venue: 'gorbals', type: 'indoor', date: '2026-11-28', start: 1140, hours: 1, court: 2, auth });
+  assert.equal(r.status, 200);
+  const order = await waiting;
+  assert.equal(order.glasgowBook.date, '2026-11-28');
+  // Asked, and while it runs: no one-off, nothing open, no job.
+  const none = () => {
+    const s = state(t, phone);
+    assert.deepEqual([t.app.state.once, t.app.state.onceAway, s.once, s.open, s.release], [[], [], [], [], null]);
+    assert.deepEqual(t.app.jobsForAgent(HOME, { run: false, venues: true }).jobs, []);
+  };
+  none();
+  // Not booked (the court had gone): still none, and nothing for the 21:55 run that evening either.
+  await t.app.resultFromAgent({ id: 'gorbals/2026-11-28@19:00', type: 'indoor', status: 'failed', paid: false, why: 'Court 2 was no longer free at 19:00, and your PC takes no other court' });
+  none();
+  clock.t = at('2026-11-21T21:55:00Z');
+  assert.deepEqual(t.app.jobsForAgent(HOME, { run: true, venues: true }).jobs, []);
+  assert.ok(!JSON.stringify(t.app.state).includes(auth));
 });

@@ -69,7 +69,7 @@ async function seeFree(t, phone, centre = 'g', date = FRI) {
   assert.equal(r.status, 200, JSON.stringify(r.body));
   return r.body.look;
 }
-const STATE_KEYS = ['now', 'bot', 'venue', 'venues', 'clubspark', 'allowance', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'weekly', 'once', 'order', 'results', 'run', 'indoor', 'card', 'hold', 'notes', 'devices'];
+const STATE_KEYS = ['now', 'bot', 'venue', 'venues', 'clubspark', 'glasgow', 'allowance', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'weekly', 'once', 'order', 'results', 'run', 'indoor', 'card', 'hold', 'notes', 'devices'];
 const HOLD_KEYS = ['id', 'startedBy', 'centre', 'centreName', 'date', 'start', 'end', 'court', 'courtName', 'courts', 'courtNames', 'stage', 'live', 'ended', 'price', 'prices', 'until', 'heardAt', 'title', 'lines', 'can', 'links'];
 // The state as a phone is shown it. Whenever it is looked at here, it is also checked to be
 // whole: the contract's fields and no others, and nothing that JSON would drop on the way.
@@ -213,6 +213,36 @@ test('the etag is a fingerprint of the state without the clock', () => {
   assert.equal(s.now, 1);                                      // and the state is left as it was
 });
 
+test('Book now at Glasgow Club (2.11.3): what the request must look like, with a plain sentence when it does not', () => {
+  const AUTH = 'c019d5fd3bab087b5a29d9b76c6c69a7';
+  const ok = { venue: 'gorbals', type: 'indoor', date: FRI, start: 1080, hours: 1, court: 3, auth: AUTH };
+  // One court; `courts` with it, or not; `hours` 1, or left out; Gorbals' type, or left out (it has one).
+  const one = { venue: 'gorbals', type: 'indoor', centre: 'g', date: FRI, start: 1080, courts: [3], auth: AUTH };
+  assert.deepEqual(A.readGlasgowBook(ok), one);
+  assert.deepEqual(A.readGlasgowBook({ ...ok, courts: [3] }), one);
+  const { type, hours, ...bare } = ok;
+  assert.deepEqual(A.readGlasgowBook(bare), one);
+  // Two courts, lowest first, the first of them `court`. Scotstoun names its type: indoor (s) or outdoor (o).
+  assert.deepEqual(A.readGlasgowBook({ ...ok, court: 3, courts: [3, 4] }).courts, [3, 4]);
+  assert.deepEqual(A.readGlasgowBook({ ...ok, venue: 'scotstoun', type: 'indoor' }).centre, 's');
+  assert.deepEqual(A.readGlasgowBook({ ...ok, venue: 'scotstoun', type: 'outdoor', start: 600 }), { ...one, venue: 'scotstoun', type: 'outdoor', centre: 'o', start: 600 });
+  const why = (body, w) => assert.deepEqual(A.readGlasgowBook(body), { why: w }, JSON.stringify(body));
+  for (const bad of [null, 'x', 7, [1]]) why(bad, 'The request body must be a JSON object.');
+  why({ ...ok, venue: undefined }, A.WHY.glasgowBook);
+  why({ ...ok, venue: 'hampden' }, 'There is no such venue: send one of the keys in state.venues.');
+  why({ ...ok, venue: 'queenspark', type: undefined }, 'Book now here is for Glasgow Club: send gorbals or scotstoun.');
+  why({ ...ok, venue: 'scotstoun', type: undefined }, 'Scotstoun has indoor and outdoor courts: send type, indoor or outdoor.');
+  why({ ...ok, type: 'outdoor' }, 'Gorbals has indoor courts only.');
+  for (const bad of [{ date: '2026-11-31' }, { date: '20 nov' }, { start: '1080' }, { start: 1440 }, { court: 0 }, { court: 21 }, { court: '3' }, { court: undefined }]) why({ ...ok, ...bad }, A.WHY.glasgowBook);
+  why({ ...ok, hours: 2 }, 'Glasgow Club courts are booked an hour at a time.');
+  why({ ...ok, start: 1110 }, 'Slots start on the hour. Try a time like 19:00.');
+  why({ ...ok, venue: 'scotstoun', type: 'outdoor', start: 1080 }, 'Scotstoun\'s outdoor courts are open from 08:00 to 18:00.');
+  for (const courts of [[4], [4, 3], [3, 3], [3, 'x'], 'x', []]) why({ ...ok, courts }, A.WHY.holdCourts);
+  why({ ...ok, courts: [3, 4, 5] }, 'At most 2 courts at once.');
+  // It is paid: it must come signed, always.
+  for (const auth of [undefined, null, '', 'C019D5FD3BAB087B5A29D9B76C6C69A7', `${AUTH}0`, AUTH.slice(1)]) why({ ...ok, auth }, 'Book now at Glasgow Club is paid: it must be signed in the app.');
+});
+
 test('what each request must look like, with a plain sentence when it does not', () => {
   // A one-off: the same slot rules as /book, in the same words.
   assert.deepEqual(A.readOnce({ date: '2026-11-25', start: 1140, hours: 2 }), { date: '2026-11-25', start: 1140, hours: 2 });
@@ -321,7 +351,7 @@ test('settings saved before the app existed load as they were, and the state ver
   };
   const s = loadState(JSON.parse(JSON.stringify(old)));
   // 2.10: Kelvingrove's plan, one a day, is now weekly entries at any venue; the plan stays beside them.
-  assert.deepEqual(s, { ...old, apps: [], notes: [], onceAway: [], pcCard: null, weekly: [{ id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 2, on: true }] });
+  assert.deepEqual(s, { ...old, apps: [], notes: [], onceAway: [], pcCard: null, pcBooks: false, weekly: [{ id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 2, on: true }] });
   assert.equal(s.v, 4);
   assert.equal(loadState(null).v, 4);
   assert.deepEqual([loadState(null).apps, loadState(null).notes], [[], []]);
@@ -449,7 +479,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.11.2', api: 3 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.11.3', api: 3 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -706,11 +736,13 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.11.2',
+    bot: '2.11.3',
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
     venues: venuesOn(TUE),
     // Nothing stands in the way of a look or Book now at a park: the PC is awake, and it is midday.
     clubspark: { linked: true, days: { first: TUE, last: '2026-11-23' }, quietUntil: null, lookNo: null, bookNo: null, reads: { used: 0, max: 6, nextAt: null }, book: null },
+    // Book now at Glasgow Club (2.11.3): this PC has not said its booker takes it, so the app holds there.
+    glasgow: { linked: true, pcBooks: false, bookNo: 'Update the booker on your PC.', payMax: null, book: null },
     // This week: Thursday's 19:00 booked, Friday's two hours still to book. Next week: Tuesday and Thursday every week, and Friday the 27th.
     allowance: [
       { week: '2026-11-16', sessions: 1, hours: 1, plannedSessions: 1, plannedHours: 2, maxSessions: 7, maxHours: 14 },
@@ -2389,8 +2421,9 @@ test('what 2.8 saves is what 2.7 saved, with the phones and the notes beside it:
   const saved = t.store.load();
   // The keys 2.7 knows, in its order, then those it has never heard of (2.10's weekly entries and the
   // other venues' one-offs among them). Still version 4.
-  assert.deepEqual(Object.keys(saved), ['v', 'owner', 'plan', 'weekly', 'once', 'onceAway', ...KNOWN_TO_27.slice(4), 'apps', 'notes', 'pcCard']);
+  assert.deepEqual(Object.keys(saved), ['v', 'owner', 'plan', 'weekly', 'once', 'onceAway', ...KNOWN_TO_27.slice(4), 'apps', 'notes', 'pcCard', 'pcBooks']);
   assert.equal(saved.pcCard, null);                                                       // 2.11.1: no ping has said anything of a card
+  assert.equal(saved.pcBooks, false);                                                     // 2.11.3: nor that its booker takes Book now at Glasgow Club
   assert.equal(saved.v, 4);
   assert.ok(saved.apps.length === 1 && saved.notes.length === 2);
   // Each of 2.7's fields is in the shape 2.7 wrote and reads.

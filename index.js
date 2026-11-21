@@ -3,7 +3,8 @@
 // your PC at home signs in to ClubSpark and books (Cloudflare turns Railway away), reports
 // back here, and the bot sends you the court, the time and the gate code on a banner card.
 // For Glasgow Club's indoor courts (Gorbals, Scotstoun) it shows what is free, has your PC put
-// one in your basket when you tap Hold, and leaves the paying to you.
+// one in your basket when you tap Hold, and leaves the paying to you; from the app (2.11.3) your PC
+// books one there now and pays for it, as it books a park now.
 // Needs Node 20 or later, TELEGRAM_BOT_TOKEN, and AGENT_TOKEN for your PC. See README.md.
 
 const { createApp, VERSION } = require('./app');
@@ -33,6 +34,16 @@ const COMMANDS = [
   ['resume', 'Start booking again'],
   ['help', 'Everything I understand'],
 ];
+
+// The endpoint your PC and the iPhone app talk to, with every handler the bot has. The tests build
+// it with this very function (test/glasgowbook.test.js), so a handler left out here shows there: a
+// route without its handler answers as an older bot would, never with a go-ahead. `extra`: the
+// server's other options (tests shorten its waits).
+function serverFor(app, { token = '', publicKey = null, log = () => {}, ...extra } = {}) {
+  const appApi = { hello: app.appHello, pair: app.appPair, auth: app.appAuth, state: app.appState, ask: app.appAsk };
+  return createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onLook: app.lookFromAgent, onHold: app.holdFromAgent, onProgress: app.progressFromAgent, picture: app.picture, token, publicKey, log, appApi,
+    onClubSpark: app.clubSparkFromAgent, onGlasgowBook: app.glasgowBookFromAgent, ...extra });
+}
 
 // The whole bot depends on knowing UK time, so check this server can work it out.
 function ukTimeWorks() {
@@ -77,9 +88,7 @@ async function main() {
   // service a public domain. The iPhone app comes in by the same server, under /app/, with its
   // own tokens (docs/app-api.md), so it is there only where this is.
   if (linked) {
-    const appApi = { hello: app.appHello, pair: app.appPair, auth: app.appAuth, state: app.appState, ask: app.appAsk };
-    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onLook: app.lookFromAgent, onHold: app.holdFromAgent, onProgress: app.progressFromAgent, picture: app.picture, token: agentToken, publicKey, log, appApi,
-      onClubSpark: app.clubSparkFromAgent });
+    const server = serverFor(app, { token: agentToken, publicKey, log });
     const port = Number(process.env.PORT) || 8080;
     server.listen(port, () => log(`Listening for your PC on port ${port} (${[publicKey && 'signed requests', agentToken && 'AGENT_TOKEN'].filter(Boolean).join(' or ')}).`));
     server.on('error', e => log(`The endpoint for your PC could not start: ${e.message}`));
@@ -144,4 +153,8 @@ async function main() {
   }
 }
 
-main().catch(e => { log(`Fatal: ${e.stack || e.message}`); process.exit(1); });
+// Started as the bot (node index.js, as the Dockerfile does); a test that only wants serverFor
+// requires this file without starting anything.
+if (require.main === module) main().catch(e => { log(`Fatal: ${e.stack || e.message}`); process.exit(1); });
+
+module.exports = { serverFor };

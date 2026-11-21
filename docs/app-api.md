@@ -16,10 +16,16 @@ Two things are the app's alone:
   allowance (7 sessions, 14 hours); never around the nightly run; and never a court that costs
   money: bookings are free with the owner's annual pass, and at any price or payment step your PC
   stops and says so.
+- Book now at Glasgow Club (2.11.3, `POST /app/glasgow/book`; see "Book now at Glasgow Club"): the
+  parks' Book now, paid by your PC with the card and code it keeps, only for a slot the app signed
+  with Face ID, at no more than your PC's own cap a court, and only once this bot says go. It adds
+  no payment the app could not already have your PC make at midnight with the same signature.
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.11.2 (`api: 3`; 2.11.2 adds `later` to an indoor look: the courts free on
+This file describes the API as built in version 2.11.3 (`api: 3`; 2.11.3 adds Book now at Glasgow Club, by addition only:
+`POST /app/glasgow/book`, `state.glasgow`, the ping's `glasgowBook` and `POST /agent/glasgow/book` (see "Book now at
+Glasgow Club"); 2.11.2 adds `later` to an indoor look: the courts free on
 a day's sheet that Glasgow Club has not opened for booking yet, with when it opens, so that the app can schedule a Glasgow Club
 date as it does a park's (see `POST /app/indoor/look`, and "A one-off date at Glasgow Club" under `POST /app/once`); nothing
 else changes shape; 2.11.1 keeps the card your PC last said it keeps across a
@@ -49,8 +55,9 @@ Everything of `api: 1` is as it was, but for two things: the words of a hold in 
 longer say to pay on the phone: signing in to Glasgow Club on a phone does not show the basket your
 PC filled), and the weekly allowance, which can now refuse a one-off date or a weekly time that
 would pass it. The pure parts are in `lib/appapi.js`, the parks' in `lib/clubspark.js`,
-`lib/venues.js` and `lib/allowance.js`, the push sender in `lib/push.js`, and the checks in
-`test/appapi.test.js`, `test/pay.test.js`, `test/clubspark.test.js` and `test/allowance.test.js`.
+`lib/venues.js` and `lib/allowance.js`, Book now at Glasgow Club in `lib/glasgowbook.js`, the push
+sender in `lib/push.js`, and the checks in `test/appapi.test.js`, `test/pay.test.js`,
+`test/clubspark.test.js`, `test/glasgowbook.test.js` and `test/allowance.test.js`.
 
 Bodies are JSON, at most 4 KB. Instants (`at`, `seenAt`, `until`, `opensAt`…) are milliseconds since
 1970. `start` and `end` are minutes after midnight, UK time. Dates are `YYYY-MM-DD`, UK calendar dates.
@@ -110,7 +117,7 @@ week's 7 sessions and 14 hours, one card on its way to the PC at a time, and one
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.11.1", api: 3 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.11.3", api: 3 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -150,7 +157,7 @@ current etag the answer waits up to `wait` seconds for a change and then, if the
 
 ```
 state = {
-  now, bot: "2.11.1",
+  now, bot: "2.11.3",
   venue: { name: "Kelvingrove Park", short: "KP", first: 540, last: 1260, lengths: [1, 2],
            courts: [1,2,3,4,5,6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
   venues: [ { key, name, club: "clubspark" | "glasgow", types: ["outdoor"] | ["indoor"] | ["indoor", "outdoor"],
@@ -159,6 +166,7 @@ state = {
               release: { daysAhead: 7, at }, paid, allowance } ],                // every venue, in a fixed order
   clubspark: { linked, days: { first, last }, quietUntil, lookNo, bookNo,  // the parks on ClubSpark
                reads: { used, max: 6, nextAt }, book: null | book },
+  glasgow: { linked, pcBooks, bookNo, payMax, book: null | glasgowBook },  // 2.11.3: Book now at Glasgow Club
   allowance: [ { week, sessions, hours, plannedSessions, plannedHours, maxSessions: 7, maxHours: 14 } ],   // this week, then next
   paused: false,
   kept: "disk" | "variable" | "no",
@@ -194,6 +202,13 @@ hold = { id, startedBy: "app" | "telegram", centre, centreName, date, start, end
 book = { id, venue, venueName, date, start, end, hours, court, courtName,       // Book now at a park
          stage: "asked" | "starting" | "signing-in" | "signed-in" | "booking", live,
          ended: null | "booked" | "gone" | "failed" | …, why, gate, at, heardAt, line }
+
+glasgowBook = { id, venue, venueName, type, centre, date, start, end, hours: 1,   // Book now at Glasgow Club (2.11.3)
+                court, courts: [3] | [3, 4], courtName,
+                stage: "asked" | "starting" | "signed-in" | "paying" | "approve", live,
+                ended: null | "booked" | "failed" | "none" | "refused" | "gone" | "quit"
+                       | "notsent" | "nopickup" | "nostart" | "silent" | "timeout",
+                why, price, paid, at, heardAt, line }
 ```
 
 ### The state, field by field
@@ -287,6 +302,41 @@ Kelvingrove's; when each venue opens its days is `venues[].release` (api 3).
     over a minute." / "Booked: court 3. Gate code 4821." (or "… Gate code not shown.") /
     "Not booked: <why>."
 
+**`glasgow`** (2.11.3): Book now at Glasgow Club, as `POST /app/glasgow/book` stands now. The app's
+screens and flow are the parks'; only paying differs. See "Book now at Glasgow Club" for the request.
+
+- `linked`: as `pc.linked`.
+- `pcBooks`: whether your PC's booker takes Book now here: its last ping said so (`glasgowBook`, see
+  "Your PC's side" below). Kept on disk, so a bot just restarted says it at once. While it is false
+  (a booker older than 2.11.3), the app holds a court on a day open now, as before.
+- `bookNo`: the sentence `POST /app/glasgow/book` would be refused with now, for the reasons that do
+  not depend on the day, the time or the courts; null when it can start. The app checks it before
+  asking for Face ID, so nothing is signed that could not be sent.
+- `payMax`: your PC's price cap a court, as its last ping said ("£30.00", its `GLASGOW_AUTO_PAY_MAX`),
+  or null when no ping since the bot started has said it. The app shows it in the confirm.
+- `book`: the booking being followed, or the last one, kept in memory only (null after a restart):
+  - `id`: 12 hex characters. `venue`, `type`, `centre` (g, s or o), `venueName` ("Gorbals",
+    "Scotstoun", "Scotstoun outdoor"). `date`, `start`, `end`, `hours` (always 1).
+  - `court`: the first court; `courts`: every court asked for, lowest first; `courtName`: "Court 3",
+    or "Courts 3 & 4".
+  - `stage`: `"asked"` → `"starting"` (Chrome is up on your PC) → `"signed-in"` → `"paying"` (it had
+    this bot's go-ahead) → `"approve"` (your bank wants the payment approved in its app). It only
+    moves forwards and stays where it was when the booking ends.
+  - `live`: true while under way; the same as `ended === null`.
+  - `ended`: your PC's result, `"booked"`, `"failed"` or `"none"`; `"refused"` (your PC did not
+    start it), `"gone"` (its tool went without a result), `"quit"` (its tool stopped without one);
+    and five this bot decides itself, as for a park: `"notsent"`, `"nopickup"`, `"nostart"`,
+    `"silent"`, `"timeout"` (half an hour after it was collected). See the endings table below.
+  - `why`: null while under way and when booked; otherwise the result's reason as `results` says it,
+    with what was paid, without "It didn’t work: ".
+  - `price`: what your PC said it was about to pay (the total for two courts), then what it paid;
+    else null. `paid`: null while under way; then `true`, `false` or `"maybe"`, as the result's.
+  - `at`: when it was asked for. `heardAt`: when your PC last said anything about it.
+  - `line`: one plain sentence for the moment: "Asking your PC to book it." / "Starting Chrome on
+    your PC…" / "Signing in to Glasgow Club…" / "Signed in. Booking Court 3…" / "Paying £23.00…" /
+    "Approve £23.00 in your bank’s app." / "No word from your PC for over a minute." /
+    "Booked: Court 3. Paid £23.00." / "Not booked: <why>."
+
 **`allowance`**: Glasgow Life Tennis's weekly allowance, this week and then next: at most 7
 sessions and 14 hours in a week, across the seven parks. A week is taken to run Monday to Sunday
 (UK), and a session counts in the week of the day it is played. That is an assumption: the rules
@@ -327,7 +377,7 @@ as the owner gave them do not say. `week`: that Monday, YYYY-MM-DD.
   asleep." / "Your PC isn’t answering." (offline) / "Staying awake for the 22:00 booking." (from 30
   minutes before a release; "… the 00:00 booking." around Glasgow Club's midnight) / "Your PC is
   holding a court. Let it go first." / "Your PC is booking a court. Wait for it to finish." (Book now
-  at a park, under way)
+  at a park, or at Glasgow Club since 2.11.3, under way)
 - `sleepAsked`: when sleep was asked for, while the PC has not collected the request yet (it has
   two minutes to; after that, or once collected, null). `wokeAt`: when the last wake-up was sent
   since the bot started, or null.
@@ -632,6 +682,7 @@ is fine, and things as they stand refuse it (the same request may work later).
 | `POST /app/push` | | `{ token }`: this phone's Expo push token, or null to stop |
 | `POST /app/clubspark/look` | (app only) | `{ venue, date, fresh }` → `{ ok: true, look }` (no state): a park's free courts |
 | `POST /app/clubspark/book` | (app only) | `{ venue, date, start, hours, court }`: Book now at a park |
+| `POST /app/glasgow/book` | (app only, 2.11.3) | `{ venue, type, date, start, hours: 1, court, courts?, auth }`: Book now at Glasgow Club, paid by your PC |
 
 ```
 look = { centre, date, at, by: "pc" | "bot", note, sheet,
@@ -745,7 +796,7 @@ says "ClubSpark asked for payment; nothing was booked or paid".
 - 409, one of the `clubspark.bookNo` sentences:
   - the "turned your PC away" and "still going" sentences above;
   - "Not available 21:25–22:30, around the nightly booking."
-  - "Your PC is already booking a court."
+  - "Your PC is already booking a court." (here, or at Glasgow Club since 2.11.3)
   - "Your PC is holding a court at Glasgow Club. Let it go first."
   - "Your PC isn’t awake. Wake it and try again."
   - "That’s 4 bookings in an hour. Next at 13:00."
@@ -810,8 +861,9 @@ your PC takes no court for it.
   what to book once, when its run starts at 21:55: a date whose day opens at the coming midnight,
   added after that, is not known to it that night (nor tried after), and the bot says "No word from
   your PC" about it after the midnight, as for any booking of the release left without a result.
-- **A day already open** (`open` true; the app never sends one: on such a day it holds a court
-  instead, and pays from the app): taken all the same, as a park's would be. It is in `open`, and
+- **A day already open** (`open` true; the app never sends one: since 2.11.3 it books such a day now,
+  with `POST /app/glasgow/book`, which is never kept as a one-off; with a bot or PC older than that
+  it holds a court instead, and pays from the app): taken all the same, as a park's would be. It is in `open`, and
   your PC books it at its next run (the nightly one at 21:55; `open: true` on the job, which your PC
   takes only with the one-off's own signature), with whatever court is free then, and pays. Nothing
   is booked at once, and it is never held. That keeps a one-off at every venue to one rule.
@@ -1014,10 +1066,11 @@ whether that time is on offer at all, then this, then the guards.
 - 409, one of the `indoor.holdNo` sentences:
   - "Your PC is already holding a court."
   - "Your PC is booking a park court. Hold one when it’s done." (Book now, under way)
+  - "Your PC is booking a court at Glasgow Club. Hold one when it’s done." (Book now at Glasgow Club, 2.11.3, under way)
   - "Your PC isn’t awake. Wake it and try again."
   - "Not available 21:25–22:15, around the nightly booking. The sheet still opens."
   - "Glasgow Club was checking visitors from your home connection. Not available until 13:00."
-  - "That’s 6 holds in an hour. Next at 13:00."
+  - "That’s 6 holds in an hour. Next at 13:00." (since 2.11.3 Book now at Glasgow Club counts toward the six as well: each is a sign-in there)
   - "Your PC isn’t linked, and it’s your PC that holds the court." (not over HTTP)
 
 **`POST /app/hold/order`** `{ id, what }`. `release` is Stop (before the basket) or Let it go;
@@ -1415,6 +1468,171 @@ backed up and signed exactly as before. Deploy in this order:
    hold can still be paid once that phone has the update (it does not reload while a hold is
    showing, so the refusal says to close the app and open it again).
 
+## Book now at Glasgow Club (2.11.3)
+
+The app's screens and flow are the same at every venue; your PC handles the operator, and paying is
+the one difference. On a day open now, Book at Glasgow Club goes as it does at a park: one confirm
+("Book Court 2?", with the place, the time and your PC's cap), then Face ID signs it, then "Booking
+Court 2…", then the court on Courts ("PAID £23.00"), or "Not booked" with the reason, and a card, a
+note and a notification. Your PC books and pays with the card and code it keeps, by its midnight run's
+own code: the signature checked, the cap, one payment, the Bookings page checked. The code is in
+`lib/glasgowbook.js`; the PC's side in the booker (`lib/hold.js`, `lib/link.js` and
+`tools/glasgow-club-book.js` there). Fields are only added: `api` stays 3.
+
+### The request
+
+**`POST /app/glasgow/book`** `{ venue, type, date, start, hours: 1, court, courts, auth }`. The answer is
+the state, with `glasgow.book` at stage `"asked"`; from then on it moves in the state as your PC goes.
+
+- `venue`: `gorbals` or `scotstoun`; `type`: `indoor`, or `outdoor` at Scotstoun (Gorbals' may be left
+  out). `date`, `start`: a day open now (Glasgow Club opens each day at 00:00, 7 days ahead), on the
+  hour; Scotstoun's outdoor courts from 08:00 to 17:00. `hours`: 1, or left out.
+- `court`, `courts`: the courts to book, as for a hold: `courts` lowest first, the first of them
+  `court`; `court` alone is one court. Exactly those courts are booked, or none: if any of them is not
+  free when your PC looks, it takes none and says which (as at a park, it never takes another).
+- `auth` (required): the app's Face ID signature over `court-broker/once/v1|<venue>|<type>|<date>|<start>|1`,
+  or the v2 words `…|1|2` for two courts (see "Signed bookings"). Your PC rebuilds the words from the
+  order itself and refuses what does not verify. The court numbers are not signed: they can only
+  narrow what is taken, never add to it. Handed to your PC once, with the order, and never kept here
+  after that; never in the log, the settings or Telegram.
+- It is never kept as a one-off (not in `once`, never among the jobs at 21:55), so no later run can
+  pay for it.
+- The checks come in this order: the shape; the day; the time; a booking kept already for that venue,
+  date and start, of either court type (Scotstoun's indoor and outdoor share a result's id); a look
+  showing the app every court asked for free at that start in the last 15 minutes (as for a hold);
+  then the guards in `glasgow.bookNo`, in the order below.
+
+- 400 "Book now at Glasgow Club needs a venue, a date (YYYY-MM-DD), a start in minutes after midnight and a court number."
+- 400 "Book now here is for Glasgow Club: send gorbals or scotstoun." (a park, which has its own Book now)
+- 400 "There is no such venue: send one of the keys in state.venues." / "Scotstoun has indoor and outdoor courts: send type, indoor or outdoor." / "Gorbals has indoor courts only."
+- 400 "Glasgow Club courts are booked an hour at a time." / "Slots start on the hour. Try a time like 19:00." / "Scotstoun's outdoor courts are open from 08:00 to 18:00."
+- 400 "courts, when sent, must list court numbers, each once and lowest first, starting with court." / "At most 2 courts at once."
+- 400 "Book now at Glasgow Club is paid: it must be signed in the app."
+- 400 "That day is no longer on offer. Pick again."
+- 400 "Not open yet: opens Sun 22 Nov at 00:00." (the app schedules those: `POST /app/once`)
+- 400 "That time is no longer on offer. Pick again."
+- 409 "Court 3 is already booked for you at Gorbals on Fri 20 Nov at 18:00." ("Courts 3 & 4 are …"; at Scotstoun, the place as booked: "… at Scotstoun outdoor …")
+- 409 "That list is old. Read the day again, then book a court."
+- 409, the `glasgow.bookNo` sentences, checked in this order:
+  1. "Your PC isn’t linked, and it’s your PC that books Glasgow Club." (not over HTTP)
+  2. "Your PC is already booking a court." (this one)
+  3. "Your PC is holding a court at Glasgow Club. Let it go first."
+  4. "Your PC is already booking a court." (a park's Book now)
+  5. "Your PC isn’t awake. Wake it and try again."
+  6. "Not available 21:25–00:30 tonight, around the midnight booking." (on a night your PC books at
+     Glasgow Club: its run is up from 21:25 until half an hour after midnight) or "Not available
+     21:25–22:15, around the nightly booking." (every night)
+  7. "Not available until the nightly booking has finished."
+  8. "Glasgow Club was checking visitors from your home connection. Not available until 13:00."
+  9. "That’s 6 sign-ins to Glasgow Club in an hour. Next at 13:00." (holds and Book now together)
+  10. "Update the booker on your PC." (its pings do not say `glasgowBook`; the app holds instead)
+  11. "Your PC can’t pay just now: <its reason>." (from its ping, read fresh from its `.env` each
+      time: "GLASGOW_PAY_PER_DAY in .env is 0", its daily limit used up, a cap that does not read,
+      no card kept, the card expired, DRY_RUN on), or "Your PC hasn’t said yet whether it can pay.
+      Try again in a minute." (no ping has said its cap since the bot started)
+  12. "There is no card on your PC. Add one in the app first."
+  13. "Turn on Pay Automatically first." (also while an off is on its way to your PC)
+  14. "Your new card has not reached your PC yet. Try again in a moment." / "Pay Automatically has
+      not reached your PC yet. Try again in a moment."
+
+While it runs: no other booking, no hold (`indoor.holdNo` "Your PC is booking a court at Glasgow Club.
+Hold one when it’s done."; Telegram's Hold button says the same), no park's Book now, no sleep
+(`pc.sleepWhy` "Your PC is booking a court. Wait for it to finish."), and no card, forget or Pay
+Automatically on ("Your PC is paying for a court just now. Try again once that is over."). Pay
+Automatically off is always taken: it stops this booking at its go-ahead, if it has not had it.
+
+### Your PC's side
+
+| Step | From → to | What |
+| --- | --- | --- |
+| Capability | PC → bot, every ping | `glasgowBook: { max: "£30.00", why? }`. Present: its booker takes Book now (`glasgow.pcBooks`); `max`: its cap a court; `why`: why it cannot pay just now. An older bot ignores it. |
+| Hand-over | bot → PC, the ping's answer | `{ glasgowBook: { id, key, date, start, courts, auth } }`, once, and only while this very ping says `glasgowBook` (read before anything is handed over). `key`: g, s or o. An older link ignores it, and the booking ends `"nostart"` at 90 seconds, with nothing booked. |
+| Steps | PC → bot, `POST /agent/glasgow/book` | `{ id, stage, … }`, signed as every request of the PC's. Answers below. |
+| Result | PC → bot, `POST /agent/result` | `{ id: "gorbals/2026-11-20@18:00", date, start, end, type, status, court, courts, price, paid, why }`, as at midnight: the card, the note, the push, Courts. |
+
+| Stage (the PC says) | The bot does | Answer |
+| --- | --- | --- |
+| `starting` (its tool is up) | stage, heard | `{ ok: true }` |
+| `signed-in` | stage | `{ ok: true }` |
+| `paying` `{ price, courts }` (about to press Pay) | the checks below | `{ ok: true, go: true }`, else `{ ok: true, stop: true }` |
+| any stage with `beat: true` (every 30 seconds while it runs) | heard, nothing more | `{ ok: true }` |
+| `approve` `{ price, court, courts }` | stage; your bank's approval said once (Telegram, a note, a push) | `{ ok: true }` |
+| `refused` `{ why }` (its link would not start it) | ends `"refused"` | `{ ok: true }` |
+| `gone` `{ why?, pressed?, kind? }` (its link: the tool has gone) | ends `"gone"`, unless a result came | `{ ok: true }` |
+| `quit` `{ why, pressed? }` (its tool stopped) | ends `"quit"`, unless a result came | `{ ok: true }` |
+
+- **The go-ahead** (`go: true`) is given only to a booking this bot still follows, for exactly the
+  courts it asked for, at a price (the total) no more than your PC's cap from its pings (`max`) times
+  the number of courts, while its pings say it can pay, keeps a card and keeps Pay Automatically on,
+  and no off is on its way to it. Anything else is `stop`: an ended booking, one given up on, one this
+  bot does not know (it restarted since), a booking that does not match. Your PC presses nothing
+  without `go: true`, and with `stop` it takes the courts out of the basket again, pays nothing and
+  sends a failed result, whose `why` this bot then gives in its own words ("Pay Automatically was
+  turned off, so I told your PC not to pay", "£31.00 is over your PC's cap of £30.00, so …").
+- A route without its handler answers 404, as an older bot does: never anything that could read as
+  a go (`index.js` builds the server with every handler: `serverFor`).
+- `kind: "challenge"` (Glasgow Club checked visitors from home): an hour of quiet for holds and
+  Book now alike, whatever else is known.
+- **Your PC's result is the booking's first**, before anything else is done with it, if it is for the
+  same slot and court type and comes within 35 minutes of the collection. It replaces any ending
+  decided here; a booking replaces any ending at all, and nothing replaces a booking. It is kept even
+  when Telegram will not take its card. An ending this bot decided whose card was slow on its way is
+  not kept over your PC's word that came meanwhile.
+
+### How it can end
+
+A result from your PC is said as at midnight. An ending without one is kept as a failed result,
+with a card in Telegram, a note and a notification. Telegram and `results[].why` add what was paid
+("Nothing was paid.", or "Pay was pressed, and whether the payment went through is not known: look in
+your banking app and under Bookings on Glasgow Club's site.").
+
+| Ending | `paid` | `why` |
+| --- | --- | --- |
+| `notsent` | false | "<why>, so it was not handed to your PC" ("Glasgow Club was checking visitors from your home connection", "your PC's nightly booking run was near", "your PC was holding a court at Glasgow Club", "your PC was booking a park court", "your PC no longer said it books Glasgow Club", "your PC could not pay just then (<its reason>)") |
+| `nopickup` (25 s) | false | "your PC did not collect it in time" |
+| `nostart` (90 s, no word at all) | false | "your PC collected it but did not start on it" |
+| `refused` | false | "your PC did not start it: <its reason>" |
+| `silent` (4 min), before the go-ahead | false | "no word from your PC for four minutes, so I stopped following it. It pays nothing without my go-ahead" |
+| `timeout` (30 min), before the go-ahead | false | "your PC was still at it half an hour after it took the booking, so I stopped following it. It pays nothing without my go-ahead" |
+| `gone` / `quit`, before the go-ahead | false | "your PC's booking stopped before paying (<why>)" |
+| any of these, after a stop | false | "<why it was stopped>, so I told your PC not to pay" |
+| `gone` / `quit`, after the go-ahead, no press noted | false | "your PC stopped before Pay was pressed (<why>). An unpaid court lapses by itself" |
+| `gone` / `quit`, after the go-ahead, a press noted (or may have been) | `"maybe"` | "your PC's booking stopped (<why>) while it was paying for Court 3" |
+| `silent`, after the go-ahead | `"maybe"` | "no word from your PC while it was paying for Court 3" |
+| `timeout`, after the go-ahead | `"maybe"` | "I stopped following it half an hour after your PC took it, while it was paying for Court 3" |
+
+Your PC's word (`refused`, `gone`, `quit`) replaces an ending this bot decided (`notsent` …
+`timeout`), with a card of its own.
+
+### Mixed versions
+
+Deploy the PC's booker first (as every update: `npm ci`, then restart the "ClubSpark PC link" task;
+not while a hold runs, nor 21:25–00:30), then this bot, then the app (an update to build 2). Each step
+is safe on its own, and nothing pays wrongly in between; each part rolled back on its own falls back
+to Hold.
+
+| PC | Bot | App | What happens |
+| --- | --- | --- | --- |
+| new | old | old | The ping's `glasgowBook` is ignored. Hold as before. |
+| new | new | old | The old app ignores `glasgow` and holds; `/app/hold` and Pay as before. |
+| new | new | new | Book now. |
+| old | new | new | No `glasgowBook` in the ping: `pcBooks` false, so the app holds; nothing is ever handed over. |
+| new | old | new | No `glasgow` in the state: Hold. |
+| PC rolled back | new | new | Its first ping clears `pcBooks` before anything is handed over. |
+| any | bot restarted mid-booking | new | The booking is lost here. Your PC's `paying` gets `stop` (unknown), so nothing is paid, and its failed result comes. After a go-ahead, its result comes as usual. |
+
+### Known limits of Book now at Glasgow Club
+
+- Each slot is paid for once at most (your PC's `vault/used.json`, shared with midnight, checked
+  before it signs in). So a second court at an hour already booked is refused here ("Court 2 is
+  already booked …"), and a slot your PC once started to pay for (a key typed, even if it then stopped
+  before Pay) is refused by your PC after that ("your PC has paid, or tried to pay, for this slot
+  before …"). For those, hold the court in Telegram, or book on Glasgow Club's site.
+- A Book now and a hold count together toward the six sign-ins an hour, but a hold refused for it
+  still says "That’s 6 holds in an hour."
+- What looks showed the app, and the booking being followed, are kept in memory only: after a restart
+  of the bot, look again; your PC is told to stop a booking the bot no longer knows.
+
 ## Notes and notifications
 
 Whatever the bot tells the owner unprompted in Telegram (a court booked or not, trouble before a
@@ -1449,6 +1667,7 @@ goes for every sentence in the state.
 | `missed` | it could not, or the weekly allowance kept a job from the nightly run | "Not booked" | "Tue 24 Nov · 19:00–21:00. No court free for the whole time." or "… It didn’t work: <reason>." (the park first, as above) |
 | `warn` | ClubSpark turned your PC away, reading or booking a park | "ClubSpark turned your PC away" | "ClubSpark turned your PC away at 12:05, reading Maryhill Park's courts (ClubSpark showed a "Just a moment" page), which is how it treats a connection it is checking. Nothing more is read or booked at ClubSpark from the app until 14:05. Your nightly booking run uses the same connection: if ClubSpark still turns it away at 22:00, that run may not get through." (once for each pause; also sent in Telegram) |
 | `warn` | trouble before a booking | "Trouble before the booking" | "<reason>. Trying again (2 of 3)." |
+| `warn` | your bank wants a payment approved (at midnight, or Book now at Glasgow Club, 2.11.3), once for each slot | "Approve the payment in your bank's app" | "Your PC is paying £23.00 for Gorbals · Fri 20 Nov · 18:00–19:00, court 3. Approve it in your bank’s app within five minutes." (also sent in Telegram) |
 | `warn` | 20 minutes before, the PC does not answer | "Your PC is not answering" | "I sent it a wake-up at 21:40, ahead of tonight's booking, and it has not replied. Booking opens at 22:00 for Tue 24 Nov · 16:00–18:00." With no way to wake it from the bot: "It has not been in touch for over a day. Booking opens …", or, if the PC has never been in touch at all, "It has not been in touch yet. Booking opens …" |
 | `warn` | 2 minutes before, the run has not started | "The booking run has not started" or "Your PC has not checked in" | the two lines of Telegram's warning |
 | `warn` | 8 minutes after, no result | "No word from your PC" | "It started on Tue 24 Nov · 16:00–18:00 but has not said how it went. Check ClubSpark, and book by hand if it is not there." |
@@ -1526,6 +1745,10 @@ phone's push token: the phone stays linked, and gets notifications again once th
   ClubSpark, but the bot will not have the result. What looks showed the app, the reads counted
   and the two hours after ClubSpark turned your PC away are lost with a restart too (your PC keeps
   its own two hours, and says so on the next look).
+- The same for Book now at Glasgow Club (2.11.3): after a restart `glasgow.book` is null, your PC's
+  "paying" is answered `stop`, so nothing is paid, and its failed result comes as usual; after a
+  go-ahead given before the restart, its result comes as usual too. `glasgow.pcBooks` is kept, but
+  `payMax` waits for your PC's next ping, and no Book now starts until then.
 - Your PC's link reads a park for a look before it asks for anything more: up to 40 seconds, most
   often 10 to 20. A hold, a card or an indoor look asked meanwhile waits for it, and a hold not
   collected within 25 seconds, or an indoor look not answered within 20, is given up (nothing was

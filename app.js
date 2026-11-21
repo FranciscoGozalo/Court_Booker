@@ -8,6 +8,9 @@
 // or from the iPhone app, which has your PC pay with the card it keeps (the bot passes on the
 // card and its security code sealed for your PC's key, and can open neither). Glasgow Club's
 // site turns Railway away too, so while your PC is awake it does the reading as well.
+// Book now at Glasgow Club (2.11.3, lib/glasgowbook.js): from the app, on a day open now, the same
+// as at the parks; your PC books and pays with the card and code it keeps, only for what the app
+// signed with Face ID, and only once this bot says go. Telegram has no Book button (it cannot sign).
 // The iPhone app (docs/app-api.md) is another way in to the same things: what it asks is done by
 // the functions the Telegram commands and buttons use, with the same checks.
 
@@ -27,8 +30,9 @@ const { createExpoPush, mask: maskPush } = require('./lib/push');
 const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
+const GB = require('./lib/glasgowbook');
 
-const VERSION = '2.11.2';
+const VERSION = '2.11.3';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -131,7 +135,7 @@ function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, weekly: [], once: [], onceAway: [], order: [1, 2, 3, 4, 5, 6], paused: false,
     results: {}, sent: {}, pics: {}, lastSeen: null, lastRun: null, home: null,
-    apps: [], notes: [], pcCard: null,
+    apps: [], notes: [], pcCard: null, pcBooks: false,
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -160,6 +164,9 @@ function loadState(raw, env = {}) {
       if (h && publicIPv4(h.ip) && typeof h.at === 'number') state.home = { ip: h.ip, at: h.at };
       state.notes = A.cleanNotes(raw.notes);                      // what the bot told you unprompted, kept for the app
       state.pcCard = cleanPcCard(raw.pcCard);                     // the card your PC last said it keeps (2.11.1): its summary only
+      // Whether your PC's last ping said its booker takes Book now at Glasgow Club (2.11.3), so a bot
+      // just restarted shows the app Book there, not Hold, before the PC's first ping.
+      state.pcBooks = raw.pcBooks === true;
     }
     for (const kind of KINDS) {                                   // what Telegram calls each picture, once it has it
       const p = raw.pics && raw.pics[kind];
@@ -402,6 +409,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (booking) return `Staying awake for the ${booking.club ? '00:00' : hhmm(releaseMin)} booking.`;
     if (holdLive(t)) return 'Your PC is holding a court. Let it go first.';
     if (cs.live(t)) return 'Your PC is booking a court. Wait for it to finish.';
+    if (gb.live(t)) return 'Your PC is booking a court. Wait for it to finish.';      // at Glasgow Club (2.11.3)
     return null;
   }
   // `sent` says the request is waiting for the PC.
@@ -425,6 +433,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     const park = cs.takeOrder(t);                      // a park on ClubSpark: { csLook } or { csBook } (lib/clubspark.js)
     if (park) return park;
+    const club = gb.takeOrder(t);                      // Book now at Glasgow Club (2.11.3): { glasgowBook } (lib/glasgowbook.js)
+    if (club) return club;
     if (hold && !hold.end && !hold.taken) {
       hold.taken = true;
       hold.heard = hold.takenAt = t;
@@ -676,6 +686,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (!linked) return { toast: 'Your PC isn’t linked.', say: 'Your PC isn’t linked, and it’s your PC that holds the court.' };
     if (holdLive(t)) return { toast: 'Your PC is already holding a court.', busy: true };
     if (cs.live(t)) return { toast: 'Your PC is booking a court.', say: 'Your PC is booking a park court. Hold one when it’s done.' };
+    // Book now at Glasgow Club (2.11.3). Not `busy`: that says a hold is live, and a Hold tap would then
+    // look for its card (there is no hold).
+    if (gb.live(t)) return { toast: 'Your PC is booking a court.', say: 'Your PC is booking a court at Glasgow Club. Hold one when it’s done.' };
     if (pcState(t) !== 'awake') {
       return { toast: 'Your PC isn’t awake.', say: 'Your PC isn’t awake. Wake it and try again.', wake: wakeState() === 'ready' };
     }
@@ -1188,7 +1201,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
   let cardAsk = null;                                 // waiting for the PC: { id, kind: 'card' | 'forget', sealed, at, takenAt }
   let cardWhy = null;                                 // why the last card (or forget) did not go through, in words, for the app
-  const payingNow = () => !!hold && !hold.end && (PAYING.includes(hold.stage) || ['asked', 'told', 'paying'].includes(hold.payState));
+  // Paying for a hold, or Book now at Glasgow Club under way (2.11.3): a card, a forget or automatic
+  // payments switched on wait until it is over. (Off is never refused: a Book now that has not had
+  // the go-ahead is told to stop once off is on its way, lib/glasgowbook.js.)
+  const payingNow = () => (!!hold && !hold.end && (PAYING.includes(hold.stage) || ['asked', 'told', 'paying'].includes(hold.payState))) || gb.live(now());
   // What stands in the way of a card (`kind` 'card') or a forget now, in words, or null.
   function cardNo(kind, t) {
     if (!linked) return 'Your PC is not linked to me, and it is your PC that keeps the card.';
@@ -1469,22 +1485,79 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // (POST /app/clubspark/look and /book), and your PC answers on POST /agent/clubspark/*. A
   // booking's outcome is an ordinary result: the card, the note and the push. It is kept even when
   // Telegram will not take the card, as is a job the weekly allowance keeps from the nightly run.
-  async function keepResult(raw) {
-    try { return await resultFromAgent(raw); } catch (e) {
+  // `opts`: passed on to resultFromAgent (`own`: an ending Book now at Glasgow Club decided here).
+  async function keepResult(raw, opts = {}) {
+    try { return await resultFromAgent(raw, opts); } catch (e) {
       log(`Could not send the card for ${raw.id}: ${e.message}`);
-      const r = cleanResult(raw), prev = r && state.results[r.id];
-      if (r && !(prev && prev.status === 'booked')) { state.results[r.id] = { ...r, at: now() }; save(); }
+      keepAnyway(cleanResult(raw));
       return { ok: true };
     }
+  }
+  // A result kept without its card (Telegram would not take it): never over a booking kept for that id.
+  function keepAnyway(r) {
+    const prev = r && state.results[r.id];
+    if (r && !(prev && prev.status === 'booked')) { state.results[r.id] = { ...r, at: now() }; save(); }
   }
   // Tests may give `clubspark` (the waits in lib/clubspark.js) alongside createApp's other options.
   const cs = CS.createClubSpark({
     now, log, releaseMin, daysAhead, linked, ...((arguments[0] && arguments[0].clubspark) || {}),
     pcAwake: t => pcState(t) === 'awake', holdLive: t => holdLive(t), runGoing: t => !!runNow(t),
+    glasgowLive: t => gb.live(t),
     wakePings: () => { for (const w of [...waiters].reverse()) w.wake(); },            // the newest ping first, as for a look
     heard: t => { state.lastSeen = t; },
     results: () => state.results, record: keepResult, note,
     tell: html => (owner() === null ? Promise.resolve() : say(owner(), html)),
+  });
+
+  // ---------- Book now at Glasgow Club (2.11.3, lib/glasgowbook.js) ----------
+  // The parks' Book now, at Glasgow Club: the app asks (POST /app/glasgow/book, signed with Face ID),
+  // your PC collects it on its ping, says each step on POST /agent/glasgow/book, asks for the go-ahead
+  // before it presses Pay, and sends its result on POST /agent/result as the midnight run does.
+  // What your PC's last ping said of it (`glasgowBook`): { max, why } (its price cap a court, and why
+  // it cannot pay just now), or null when it said nothing (an older booker, or no ping since this
+  // start). Whether it said anything at all is kept on disk too (state.pcBooks).
+  let pcBook = null;
+  function pcBookFrom(book) {
+    const b = book && typeof book === 'object' && !Array.isArray(book) ? book : null;
+    const why = b && typeof b.why === 'string' ? A.cut(noteText(A.plain(b.why)), 200) : '';
+    pcBook = b ? { max: A.readAmount(b.max), why: why || null } : null;
+    if (!!b !== state.pcBooks) {
+      state.pcBooks = !!b;
+      log(b ? 'Your PC says its booker books and pays at Glasgow Club now (Book now).' : 'Your PC no longer says its booker books at Glasgow Club now: the app holds there instead.');
+      save();
+    }
+  }
+  // Glasgow Club's night: on a night your PC books there at midnight, its run is up from 21:25 until
+  // half an hour after midnight, and it takes nothing else meanwhile.
+  const clubNight = t => !state.paused && owner() !== null && !!releaseAround(t, cfg(), (1440 - releaseMin) * 60000 + HOLD_BEFORE_MS, CLUB_HOLD_AFTER_MS + 1, true);
+  function bookNightNo(t) {
+    const from = (releaseMin - HOLD_BEFORE_MS / 60000 + 1440) % 1440;
+    if (clubNight(t)) return `Not available ${hhmm(from)}–${hhmm(CLUB_HOLD_AFTER_MS / 60000)} tonight, around the midnight booking.`;
+    if (nearHoldGuard(t)) return `Not available ${hhmm(from)}–${hhmm((releaseMin + HOLD_AFTER_MS / 60000) % 1440)}, around the nightly booking.`;
+    return null;
+  }
+  // Tests may give `glasgowbook` (its waits) alongside createApp's other options.
+  const gb = GB.createGlasgowBook({
+    now, log, linked, ...((arguments[0] && arguments[0].glasgowbook) || {}),
+    pcAwake: t => pcState(t) === 'awake', holdLive: t => holdLive(t), csLive: t => cs.live(t), runGoing: t => !!runNow(t), nightNo: bookNightNo,
+    quietUntil: t => siteQuietUntil(t),
+    // Sign-ins to Glasgow Club this hour, shared with holds: read and added to where holds keep them.
+    starts: () => holdStarts, addStart: t => { holdStarts.push(t); },
+    pc: () => ({ books: state.pcBooks === true, max: pcBook ? pcBook.max : null, why: pcBook ? pcBook.why : null }),
+    card: () => ({ said: pcCardSaid, kept: !!pcCard && !(cardAsk && cardAsk.kind === 'forget'), auto: pcAuto === true && !(autoAsk && autoAsk.kind === 'off'),
+      asking: cardAsk && cardAsk.kind === 'card' ? 'card' : autoAsk && autoAsk.kind === 'on' ? 'auto' : null }),
+    shownFree: (centre, date, start, courts) => {
+      const shown = appShown.get(`${centre}:${date}`);
+      return !!shown && now() - shown.at < A.SHOWN_MS && courts.every(n => shown.free.has(`${start}:${n}`));
+    },
+    results: () => state.results, record: raw => keepResult(raw, { own: true }), bankSay,
+    wakePings: () => { for (const w of [...waiters].reverse()) w.wake(); },
+    heard: t => { state.lastSeen = t; },
+    setQuiet: t => {
+      holdQuiet = t + HOLD_QUIET_MS;
+      log(`Glasgow Club was checking visitors when your PC went to book a court: nothing is held or booked there until ${clock(holdQuiet)}.`);
+      if (indoor.turnedAway) indoor.turnedAway('pc', 'the site was checking its visitors when your PC went to book a court');
+    },
   });
 
   // ---------- what you ask for ----------
@@ -1895,9 +1968,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // Sleep tap reaches it within seconds instead of at its next ping.
   // `card` is what the ping says about the card for paying from the app: { key, has, kept, done }
   // (see cardFromPc), as lib/server.js reads it from the ping.
-  async function pingFromAgent(from = {}, { wait = 0, refused = null, card = null } = {}) {
+  // `book` (2.11.3): the ping's `glasgowBook`, { max, why }, when its booker takes Book now at Glasgow
+  // Club; null when it says nothing. Read before anything is handed over, so that a PC rolled back to
+  // an older booker is never handed a Book now on its first ping.
+  async function pingFromAgent(from = {}, { wait = 0, refused = null, card = null, book = null } = {}) {
     state.lastSeen = now();
     noteHome(from);
+    pcBookFrom(book);
     save();
     cardFromPc(card);
     autoFromPc(card);
@@ -1967,35 +2044,55 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // Your PC is paying for one of the nightly run's Glasgow Club bookings, and your bank wants you
   // to approve the payment in its app: said at once, in Telegram and as a note (so a notification
   // on your phone). `raw`: { stage: 'bank', id, price, court, courts, type } (`courts` and the
-  // total `price` for two courts at once, 2.11). Said once for each booking.
+  // total `price` for two courts at once, 2.11). Said once for each booking. The night's run is
+  // going, so the wait for its result starts again (`lastRun`).
   const bankSaid = new Set();
   async function bankNote(raw) {
     const r = cleanResult({ id: raw && raw.id, status: 'failed', type: raw && raw.type });
     if (!r || !V.clubOf(r.venue)) return { ok: false, why: 'that is not one of the run\'s Glasgow Club bookings' };
     state.lastSeen = state.lastRun = now();
     save();
-    if (bankSaid.has(r.id)) return { ok: true };
-    bankSaid.add(r.id);
+    await bankSay({ venue: r.venue, type: r.type, date: r.date, start: r.start, price: raw.price, court: raw.court, courts: raw.courts });
+    return { ok: true };
+  }
+  // The words themselves, once for each slot: for the midnight run (bankNote) and for Book now at
+  // Glasgow Club (2.11.3, which says it with no change to `lastRun`: it is no part of the night's run).
+  async function bankSay({ venue, type, date, start, price, court, courts }) {
+    const id = V.resultId(venue, date, start);
+    if (bankSaid.has(id)) return;
+    bankSaid.add(id);
     if (bankSaid.size > 20) bankSaid.delete(bankSaid.values().next().value);
-    const price = typeof raw.price === 'string' && /^£\d{1,4}(\.\d\d)?$/.test(raw.price) ? raw.price : null;
-    const court = intIn(raw.court, 1, 20), courts = A.courtList(raw.courts);
-    const which = courts && courts.length > 1 ? M.courtWordsIn({ courts }) : court ? `court ${court}` : '';
+    const paid = A.readAmount(price);
+    const one = intIn(court, 1, 20), list = A.courtList(courts);
+    const which = list && list.length > 1 ? M.courtWordsIn({ courts: list }) : one ? `court ${one}` : '';
     const title = 'Approve the payment in your bank\'s app';
-    const body = `Your PC is paying ${price ? `${price} ` : ''}for ${M.slotOf({ ...r, end: r.start + 60 })}${which ? `, ${which}` : ''}. Approve it in your bank’s app within five minutes.`;
-    log(`Your bank wants the payment for ${r.id} approved: told you so.`);
+    const body = `Your PC is paying ${paid ? `${paid} ` : ''}for ${M.slotOf({ venue, type, date, start, end: start + 60 })}${which ? `, ${which}` : ''}. Approve it in your bank’s app within five minutes.`;
+    log(`Your bank wants the payment for ${id} approved: told you so.`);
     note('warn', title, body);
     const chat = owner();
     if (chat !== null) await say(chat, `<b>${M.esc(title)}</b>\n${M.esc(body)}`).catch(e => log(`Could not say so in Telegram: ${e.message}`));
-    return { ok: true };
   }
 
   // The PC says what happened. The message goes out first: if Telegram fails, the PC is told
   // so and tries again, and nothing is recorded twice.
   // `quiet`: kept without a card, a note or a push, for a booking that has been told of already
   // (a hold that ended booked: see holdBooked). Then a booking kept for that id stands.
-  async function resultFromAgent(raw, { quiet = false } = {}) {
+  // Book now at Glasgow Club (2.11.3): your PC's result for a slot it is booking now is heard by the
+  // follower first, before anything here can fail or return early (a booking kept already, Telegram
+  // down), and is kept even when Telegram will not take its card, as a park's Book now's is. `own`:
+  // an ending the follower decided itself, on its way to being kept (not heard by it again).
+  async function resultFromAgent(raw, { quiet = false, own = false } = {}) {
     const r = cleanResult(raw);
     if (!r) return { ok: false, why: 'that result is missing something or does not make sense' };
+    const followed = quiet || own ? null : gb.onResult(r);
+    if (!followed) return takeResult(r, quiet, own);
+    try { return await takeResult(followed, quiet); } catch (e) {
+      log(`Could not send the card for ${followed.id}: ${e.message}`);
+      keepAnyway(followed);
+      return { ok: true };
+    }
+  }
+  async function takeResult(r, quiet, own = false) {
     const prev = state.results[r.id];
     if (prev && prev.status === 'booked' && (r.status !== 'booked' || quiet)) return { ok: true };       // a booking stands
     const same = quiet || (prev && prev.status === r.status && prev.court === r.court);
@@ -2003,6 +2100,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (!same && chat !== null) {
       if (r.status === 'booked') await sendCard(chat, 'booked', M.bookedCaption(r), UI.afterBooked());
       else await sendCard(chat, 'missed', M.failedText(r), UI.afterFailed());
+    }
+    // Another result for this id kept while the card was on its way: a booking stands, and so does your
+    // PC's own word over an ending Book now at Glasgow Club decided here (`own`, 2.11.3).
+    const meanwhile = state.results[r.id];
+    if (meanwhile !== prev && ((meanwhile && meanwhile.status === 'booked' && r.status !== 'booked') || own)) {
+      log(`Result for ${r.id} not kept over the one kept meanwhile (${meanwhile ? meanwhile.status : 'none'}).`);
+      return { ok: true };
     }
     state.results[r.id] = { ...r, at: now() };
     for (const k of Object.keys(state.results)) if (now() - state.results[k].at > RESULTS_KEEP_MS) delete state.results[k];
@@ -2304,6 +2408,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const pastAway = state.onceAway.filter(o => civilOf(o.date) < today);
       if (pastAway.length) { state.onceAway = state.onceAway.filter(o => civilOf(o.date) >= today); save(); }
       cs.tick(t);                                     // a booking at a park the PC never collected, or went silent on
+      gb.tick(t);                                     // ...and at Glasgow Club (2.11.3)
       await refreshNewest(t);
       await checkHold(t);
       checkCard(t);
@@ -2458,6 +2563,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       venue: { name: 'Kelvingrove Park', short: 'KP', first: UI.FIRST_START, last: UI.LAST_END, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin, daysAhead, maxAheadDays: MAX_AHEAD_DAYS },
       venues: V.venueList(G.SHEETS, iso(today), G.sheetUrl, { daysAhead, releaseMin }),          // every venue and its court types (lib/venues.js)
       clubspark: cs.view(t),                                           // the parks: looks and Book now (lib/clubspark.js)
+      // Book now at Glasgow Club (2.11.3, lib/glasgowbook.js). `pcBooks`: your PC's booker takes it (else
+      // the app holds); `bookNo`: why none can start now; `payMax`: your PC's price cap a court, as its
+      // last ping said ("£30.00"), or null; `book`: the booking being followed, or the last one.
+      glasgow: { linked, pcBooks: state.pcBooks === true, bookNo: gb.blocker(t), payMax: pcBook ? pcBook.max : null, book: gb.view(t) },
       allowance: W.weeks(c, state.results, t),                         // this week and next (lib/allowance.js)
       paused: state.paused,
       kept: kept(),
@@ -2550,6 +2659,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     // The answer to a request that was carried out: the state as it now stands.
     const done = (extra = {}) => { const s = appState(me); return s ? { status: 200, body: { ok: true, ...extra, ...s } } : no(401, 'unpaired'); };
     if (/^clubspark\/(look|book)$/.test(name)) { log(`From the app: ${name}`); return cs.appAsk(name.slice('clubspark/'.length), body, done); }
+    if (/^glasgow\/book$/.test(name)) { log(`From the app: ${name}`); return gb.appAsk(body, done); }        // 2.11.3 (its signature is never logged)
     if (!APP_ASKS.includes(name)) return null;
     const read = { once: A.readOnce, 'once/remove': A.readOnceRemove, plan: A.readPlan, 'plan/remove': A.readPlanRemove, order: A.readOrder, pause: A.readPause,
       weekly: A.readWeekly, 'weekly/change': A.readWeeklyChange, 'weekly/on': A.readWeeklyOn, 'weekly/remove': A.readWeeklyRemove, 'weekly/auth': A.readWeeklyAuth,
@@ -2656,7 +2766,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   }
 
   return {
-    clubSparkFromAgent: cs.fromAgent,
+    clubSparkFromAgent: cs.fromAgent, glasgowBookFromAgent: raw => gb.fromPc(raw),
     handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, holdFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures,
     appHello, appPair, appAuth, appState, appAsk, sealedHeld,
   };

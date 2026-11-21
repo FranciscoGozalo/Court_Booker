@@ -178,6 +178,51 @@ test('a note about a hold needs the token, and its answer carries your order bac
   });
 });
 
+test('the ping says whether its booker takes Book now at Glasgow Club (2.11.3): an object is passed on as `book`, anything else is nothing', async () => {
+  const got = [];
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onPing: (from, said) => { got.push(said); return {}; } }, async base => {
+    const ping = body => fetch(`${base}/agent/ping`, { method: 'POST', headers: auth, body: JSON.stringify(body) }).then(r => r.json());
+    assert.deepEqual(await ping({ glasgowBook: { max: '£30.00' } }), { ok: true });
+    await ping({ glasgowBook: { max: '£30.00', why: 'GLASGOW_PAY_PER_DAY in .env is 0' }, wait: 1 });
+    for (const glasgowBook of [null, 'yes', true, ['£30.00'], 30]) await ping({ glasgowBook });
+    await ping({});                                                                              // an older PC
+    assert.deepEqual(got.map(s => s.book), [{ max: '£30.00' }, { max: '£30.00', why: 'GLASGOW_PAY_PER_DAY in .env is 0' }, null, null, null, null, null, null]);
+    assert.equal(got[1].wait, 1);
+  });
+});
+
+test('a note about Book now at Glasgow Club needs the PC\'s token; the go-ahead comes back as the handler gave it; and a bot without the handler says there is no such thing, never ok', async () => {
+  const got = [];
+  const onGlasgowBook = raw => { got.push(raw); return raw.stage === 'paying' ? { go: true } : {}; };
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onGlasgowBook }, async base => {
+    const post = (body, headers = auth) => fetch(`${base}/agent/glasgow/book`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body });
+    assert.equal((await post(JSON.stringify({ id: 'a1b2c3d4e5f6', stage: 'paying' }), {})).status, 401);
+    assert.equal((await post(JSON.stringify({ id: 'a1b2c3d4e5f6', stage: 'paying' }), { authorization: 'Bearer wrong' })).status, 401);
+    assert.equal((await post('not json')).status, 400);
+    assert.deepEqual(await (await post(JSON.stringify({ id: 'a1b2c3d4e5f6', stage: 'starting' }))).json(), { ok: true });
+    assert.deepEqual(await (await post(JSON.stringify({ id: 'a1b2c3d4e5f6', stage: 'paying', price: '£23.00', courts: [3] }))).json(), { ok: true, go: true });
+    assert.deepEqual(got.map(r => r.stage), ['starting', 'paying']);
+  });
+  // Signed with the PC's key, as the booker sends it.
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const pub = readPublicKey(publicKey.export({ type: 'spki', format: 'der' }).toString('base64'));
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onGlasgowBook, publicKey: pub, token: '' }, async base => {
+    const body = JSON.stringify({ id: 'a1b2c3d4e5f6', stage: 'paying', price: '£23.00', courts: [3] });
+    const send = h => fetch(`${base}/agent/glasgow/book`, { method: 'POST', headers: { authorization: h }, body });
+    const res = await send(signedHeader(privateKey, 'POST', '/agent/glasgow/book', body));
+    assert.deepEqual([res.status, await res.json()], [200, { ok: true, go: true }]);
+    assert.equal((await send(signedHeader(privateKey, 'POST', '/agent/clubspark/book', body))).status, 401);      // signed for another route
+  });
+  // A handler that fails is a 500. None at all (a server built without it): 404, as an older bot answers.
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onGlasgowBook: () => { throw new Error('boom'); } }, async base => {
+    assert.equal((await fetch(`${base}/agent/glasgow/book`, { method: 'POST', headers: auth, body: '{}' })).status, 500);
+  });
+  await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }) }, async base => {
+    const res = await fetch(`${base}/agent/glasgow/book`, { method: 'POST', headers: auth, body: JSON.stringify({ id: 'a1b2c3d4e5f6', stage: 'paying' }) });
+    assert.deepEqual([res.status, await res.json()], [404, { ok: false, why: 'no such thing here' }]);
+  });
+});
+
 test('a request that never finishes arriving is cut off, while an answer may take its time', async () => {
   const net = require('node:net');
   // As it runs: 15 seconds for a request's headers, 30 for the whole of it.
