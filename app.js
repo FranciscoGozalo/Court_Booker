@@ -231,7 +231,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     });
     const dropped = before - state.apps.length;
     if (dropped) log(`Unlinked ${dropped === 1 ? 'a phone' : `${dropped} phones`} linked to the app while this bot answered to another chat.`);
-    if (dropped || stamped) save();
+    // The card a PC said it keeps (2.11.1) was said to another chat's bot: not shown to this one's phones.
+    const card = fileWasAnothers && !!state.pcCard;
+    if (card) { state.pcCard = null; log('Forgot the card a PC said it keeps while this bot answered to another chat.'); }
+    if (dropped || stamped || card) save();
   }
   const releaseMin = parseTime(env.RELEASE_TIME) ?? 22 * 60;
   const daysAhead = intIn(env.DAYS_AHEAD, 1, 30) ?? 7;
@@ -1177,6 +1180,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   let pcCardSaid = false;                             // whether a ping has said which card it keeps (since this start)
   // What the pings said of the card, kept on disk when it changes: the summary alone (cleanCard).
   function keepCard() {
+    if (!pcCardSaid && !state.pcCard) return;          // no ping has said which card (an older PC's "auto" alone): "no card" is not known
     const next = { kept: pcCard ? A.cleanCard(pcCard) || null : null, auto: pcAuto === true };
     if (JSON.stringify(next) === JSON.stringify(state.pcCard)) return;
     state.pcCard = next;
@@ -1280,11 +1284,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       cardAsk = null;
     }
   }
-  // The card for the app's state: null when your PC keeps none (as far as I know), nothing is
-  // on its way, and there is nothing to say. `said` (2.11.1): whether a ping has said which card it
-  // keeps since the bot started; false while what is shown is what the PC said before the restart.
+  // The card for the app's state. `said` (2.11.1): whether a ping has said which card it keeps since
+  // the bot started; false while what is shown is what the PC said before the restart. "No card" is
+  // a card with no brand, last four digits or expiry: said by the PC (since the bot started, or
+  // before, then with `said: false`). Null only when nothing at all is known: no ping has said which
+  // card it keeps, none was kept from before, and nothing is on its way or to be said.
   function cardView() {
-    if (!pcCard && !cardAsk && !cardWhy && !pcAuto && !autoAsk && !autoWhy) return null;
+    if (!pcCardSaid && !state.pcCard && !pcCard && !cardAsk && !cardWhy && !pcAuto && !autoAsk && !autoWhy) return null;
     return {
       brand: pcCard ? pcCard.brand : null, last4: pcCard ? pcCard.last4 : null, expMonth: pcCard ? pcCard.expMonth : null, expYear: pcCard ? pcCard.expYear : null,
       tag: pcCard ? pcCard.tag : null,

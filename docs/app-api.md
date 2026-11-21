@@ -20,7 +20,8 @@ Two things are the app's alone:
 Everything else adds no new power.
 
 This file describes the API as built in version 2.11.1 (`api: 3`; 2.11.1 keeps the card your PC last said it keeps across a
-restart of the bot, and adds `card.said` (see `card`); 2.11.0 added two courts at once at Glasgow Club, by fields
+restart of the bot, adds `card.said`, and shows "no card" as a card with no brand, not as null, which now means
+nothing is known yet (see `card`); 2.11.0 added two courts at once at Glasgow Club, by fields
 only: `courts` on `POST /app/hold` and in `hold` (with `courtNames` and `prices`), and `courts` on weekly bookings, one-off
 dates and results, and in the signature's words for two courts (see "Two courts at once (2.11)"); and each weekly booking's
 and one-off date's signature itself, `weekly[].auth` and `once[].auth`, which an app from 2.11 checks against the card's pay
@@ -441,14 +442,23 @@ way (`pending`, `forgetting`, `autoAsked`) and why the last one did not go (`why
 kept in memory only, and so is `pc.cardKey`: after a restart they are null or false until the PC's
 next ping (within a minute while it is awake, hours while it sleeps). A card forgotten on the PC is
 kept as none. A settings file older than 2.11.1 has no card in it: `card` is null until the PC's
-next ping, as before.
-Null when the PC keeps no card as far as the bot knows, none is on its way and there is nothing to say.
+next ping, as before. Settings that were another chat's (the bot now answers to another owner) have
+it dropped, with their phones.
 
+Three cases, since 2.11.1:
+
+- **Null: nothing is known.** No ping has said which card the PC keeps since the bot started, none
+  was kept from before (a first start, or a settings file older than 2.11.1), and nothing is on its
+  way or to be said. Not heard yet: the app should not take it for "no card".
+- **No card:** an object whose `brand`, `last4`, `expMonth`, `expYear` and `tag` are null (`pending`,
+  `forgetting`, `why`, `autoAsked` and `autoWhy` as they stand): the PC said it keeps none, with
+  `said: true` when a ping said so since the bot started, `said: false` when it is what the PC said
+  before the restart. (Before 2.11.1 this was null.)
+- **A card:** its summary, with `said` as above.
 - `said` (2.11.1): true once a ping from the PC has said which card it keeps since the bot started;
   false while what is shown is what the PC said before the restart (it may have changed since, on the
-  PC itself). The app can tell "not heard yet" (`said: false`) from what the PC says now. A `card` that
-  is null says no card is kept, as far as the bot knows (a restart included), or that nothing has been
-  heard at all.
+  PC itself). A ping that says only whether the PC keeps the code for automatic payments, and not
+  which card it keeps, says nothing of the card: `said` and `card` stay as they were.
 
 - `brand`: "Visa", "Mastercard", "American Express", "Maestro", "Discover", "Diners Club", "JCB"
   or "Card". `last4`: the last four digits, a string. `expMonth` (1 to 12) and `expYear` (four

@@ -31,6 +31,8 @@ const STRAY = 'I am not following this hold any more (I was restarted while your
 // The PC's card key, as its pings give it (an X25519 public key is 32 bytes), and the card it keeps.
 const KEY = crypto.randomBytes(32).toString('base64');
 const VISA = { brand: 'Visa', last4: '4242', expMonth: 12, expYear: 2030 };
+// The card as the app is shown it when the PC has said it keeps none (2.11.1): not null, which is "nothing known yet".
+const NO_CARD = { brand: null, last4: null, expMonth: null, expYear: null, tag: null, pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null, said: true };
 // What the app seals is opaque to the bot: here, bytes of the right sizes. (The PC's own tests seal
 // and open real boxes with tweetnacl.) A key (32), a nonce (24), the box's own 16, and what was sealed.
 const sealedOf = (n = 60) => crypto.randomBytes(32 + 24 + 16 + n).toString('base64');
@@ -38,14 +40,14 @@ const sealedOf = (n = 60) => crypto.randomBytes(32 + 24 + 16 + n).toString('base
 const settle = () => new Promise(r => setTimeout(r, 5));
 const FREE = [{ start: 1080, end: 1140, court: 3, name: 'Tennis Hall Court 3', opensAt: null }];
 // `free`: what the stand-in for Glasgow Club shows free.
-function makeBot(t0 = NOON, { linked = true, store = null, pcHoldMs = 25000, free = FREE } = {}) {
+function makeBot(t0 = NOON, { linked = true, store = null, pcHoldMs = 25000, free = FREE, env = {} } = {}) {
   const clock = { t: at(t0) };
   const tg = fakeTelegram(clock);
   const logs = [], pushes = [];
   store = store || memStore({ v: 4, owner: OWNER, order: [3, 4, 5, 2, 1, 6] });
   const reader = { day: async () => ({ at: clock.t, slots: free.map(s => ({ ...s })), listed: 12 }), peek: () => null, health: () => null };
   const app = createApp({
-    now: () => clock.t, tg, store, pictures: PICTURES, linked, glasgow: reader, pcLookMs: 2000, pcHoldMs, log: l => logs.push(l), retryMs: 30,
+    now: () => clock.t, tg, store, pictures: PICTURES, linked, env, glasgow: reader, pcLookMs: 2000, pcHoldMs, log: l => logs.push(l), retryMs: 30,
     push: async (tokens, message) => { pushes.push({ tokens, ...message }); }, wake: async () => 3,
   });
   return { app, tg, clock, store, logs, pushes };
@@ -170,7 +172,7 @@ test('the PC\'s card key comes with its pings and is shown to the app; one that 
   await pcPing(t, { key: 'not a key', kept: { brand: 'Visa' } });
   assert.deepEqual([stateOf(t, phone).pc.cardKey, stateOf(t, phone).card], [null, null]);
   await pcPing(t, { kept: null });
-  assert.deepEqual([stateOf(t, phone).pc.cardKey, stateOf(t, phone).card], [KEY, null]);
+  assert.deepEqual([stateOf(t, phone).pc.cardKey, stateOf(t, phone).card], [KEY, NO_CARD]);
   await pcPing(t);
   assert.deepEqual(stateOf(t, phone).card, { ...VISA, tag: null, pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null, said: true });
   // A ping that says nothing of the card leaves what was known as it was.
@@ -262,7 +264,8 @@ test('the card your PC last said it keeps outlives a restart of the bot (2.11.1)
   // The PC's ping says what it keeps, here with more beside it than it ever sends: none of that is kept or shown.
   const t = makeBot();
   const phone = await linkPhone(t);
-  const secrets = { number: '4242424242424242', payKey: Buffer.alloc(32, 0x5a).toString('base64'), cvc: '737', name: 'F GOZALO' };
+  // Values that cannot turn up by chance in hex, base64 or a timestamp (each has a space and a #).
+  const secrets = { number: '4242 4242 4242 4242 #n', payKey: 'pay key WlpaWlpa #k', cvc: 'cvc 737 #c', name: 'F GOZALO #m' };
   await t.app.pingFromAgent(HOME, { card: { key: KEY, has: true, kept: { ...VISA, tag: '60bf07c4', ...secrets }, auto: true } });
   assert.deepEqual(stateOf(t, phone).card, { ...VIEW, said: true });
   assert.deepEqual(t.store.load().pcCard, { kept: { ...VISA, tag: '60bf07c4' }, auto: true });
@@ -280,10 +283,10 @@ test('the card your PC last said it keeps outlives a restart of the bot (2.11.1)
   await ask(r, p, 'card/forget');
   const o = await pcPing(r);
   await r.app.pingFromAgent(HOME, { card: { key: KEY, has: true, kept: null, done: { id: o.forgetCard.id, ok: true }, auto: false } });
-  assert.equal(stateOf(r, p).card, null);
+  assert.deepEqual(stateOf(r, p).card, NO_CARD);                                                // "no card", said: not "not heard yet"
   assert.deepEqual(r.store.load().pcCard, { kept: null, auto: false });
   const s = makeBot(NOON, { store: r.store });
-  assert.equal(stateOf(s, { device: s.app.appAuth(phone.token) }).card, null);
+  assert.deepEqual(stateOf(s, { device: s.app.appAuth(phone.token) }).card, { ...NO_CARD, said: false });     // no card, as the PC last said
   // Automatic payments turned off on the PC are kept as well, the card still kept.
   await s.app.pingFromAgent(HOME, { card: { key: KEY, has: true, kept: VISA, auto: true } });
   await s.app.pingFromAgent(HOME, { card: { key: KEY, has: true, kept: VISA, auto: false } });
@@ -297,10 +300,29 @@ test('the card your PC last said it keeps outlives a restart of the bot (2.11.1)
   // One written by hand with more in it: only the summary is read, and only the summary is written back.
   const v = makeBot(NOON, { store: memStore({ v: 4, owner: OWNER, order: [3, 4, 5, 2, 1, 6], pcCard: { kept: { ...VISA, ...secrets }, auto: true, ...secrets } }) });
   assert.deepEqual(v.app.state.pcCard, { kept: { ...VISA, tag: null }, auto: true });
-  // Nothing secret anywhere: not on disk, in the log, in Telegram or in what the app is shown.
+  // Nothing secret anywhere: not on disk, in the log, in Telegram or in what the app is shown. On disk, the summary's fields and no others.
   const all = JSON.stringify([t.store.load(), r.store.load(), s.store.load(), v.app.state, t.logs, r.logs, s.logs, v.logs, t.tg.calls, r.tg.calls, s.tg.calls,
     t.app.appState(phone.device), r.app.appState(p.device)]);
   for (const x of Object.values(secrets)) assert.ok(!all.includes(x), x);
+  for (const kept of [t.store.load().pcCard, v.app.state.pcCard]) {
+    assert.deepEqual(Object.keys(kept).sort(), ['auto', 'kept']);
+    assert.deepEqual(Object.keys(kept.kept).sort(), ['brand', 'expMonth', 'expYear', 'last4', 'tag']);
+  }
+  // A ping that says whether the PC keeps the code but not which card (an older PC): "no card" is not taken from it.
+  const w = makeBot();
+  const wp = await linkPhone(w);
+  await w.app.pingFromAgent(HOME, { card: { key: KEY, has: false, auto: false } });
+  assert.deepEqual([w.app.state.pcCard, stateOf(w, wp).card], [null, null]);
+  // Settings that were another chat's (TELEGRAM_CHAT_ID says another owner): their PC's card is forgotten with their phones.
+  const theirs = memStore({ v: 4, owner: 99, order: [3, 4, 5, 2, 1, 6], pcCard: { kept: VISA, auto: true } });
+  const x = makeBot(NOON, { store: theirs, env: { TELEGRAM_CHAT_ID: String(OWNER) } });
+  assert.deepEqual([x.app.state.pcCard, theirs.load().pcCard], [null, null]);
+  assert.ok(x.logs.includes('Forgot the card a PC said it keeps while this bot answered to another chat.'));
+  const xp = await linkPhone(x);
+  assert.equal(stateOf(x, xp).card, null);
+  // The owner's own file, read with TELEGRAM_CHAT_ID set to that owner: kept.
+  const mine = makeBot(NOON, { store: memStore({ v: 4, owner: OWNER, order: [3, 4, 5, 2, 1, 6], pcCard: { kept: VISA, auto: true } }), env: { TELEGRAM_CHAT_ID: String(OWNER) } });
+  assert.deepEqual(mine.app.state.pcCard, { kept: { ...VISA, tag: null }, auto: true });
 });
 
 test('a card is refused while it cannot reach the PC: no card key yet, the PC asleep, or the PC paying', async () => {
@@ -330,13 +352,13 @@ test('forget: the PC deletes the card it keeps; a card that has not reached the 
   assert.match(order.forgetCard.id, /^[0-9a-f]{12}$/);
   assert.deepEqual(order, { ok: true, forgetCard: { id: order.forgetCard.id } });
   await pcPing(t, { kept: null, done: { id: order.forgetCard.id, ok: true } });
-  assert.equal(stateOf(t, t.phone).card, null);
+  assert.deepEqual(stateOf(t, t.phone).card, NO_CARD);
   assert.ok(t.logs.includes('Your PC forgot its card.'));
   // Nothing to forget: the PC says it keeps none.
   assert.deepEqual(await ask(t, t.phone, 'card/forget'), refused(409, 'Your PC keeps no card.'));
   // A card on its way and not yet collected: it goes, unseen by the PC; and the PC, keeping none, is asked nothing.
   await ask(t, t.phone, 'card', { sealed: sealedOf() });
-  assert.equal((await ask(t, t.phone, 'card/forget')).body.state.card, null);
+  assert.deepEqual((await ask(t, t.phone, 'card/forget')).body.state.card, NO_CARD);
   assert.equal(t.app.sealedHeld(), 0);
   assert.deepEqual(await pcPing(t, { kept: null }), { ok: true });
   // A card on its way while the PC keeps another: it goes, and the kept one is forgotten.
