@@ -449,7 +449,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.11.1', api: 3 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.11.2', api: 3 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -706,7 +706,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.11.1',
+    bot: '2.11.2',
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
     venues: venuesOn(TUE),
     // Nothing stands in the way of a look or Book now at a park: the PC is awake, and it is midday.
@@ -1148,6 +1148,7 @@ test('a look by the PC: asked on its ping like a tap in Telegram, and answered w
       { start: 1080, end: 1140, courts: [{ n: 1, name: 'Tennis Hall Court 1', price: null }, { n: 3, name: 'Tennis Hall Court 3', price: null }] },
       { start: 1140, end: 1200, courts: [{ n: 3, name: 'Tennis Hall Court 3', price: null }] },
     ],
+    later: [],                                                 // 2.11.2: nothing on that day waits for its opening
     sheet: SHEET_G,
   } } });
   // The same day again within the minute is what is known already: the PC is not asked twice.
@@ -1196,6 +1197,7 @@ test('Scotstoun\'s outdoor courts (o), end to end against the stand-in PC: a loo
       { start: 960, end: 1020, courts: [{ n: 1, name: 'Outdoor Tennis Court 1', price: null }] },
       { start: 1020, end: 1080, courts: [{ n: 1, name: 'Outdoor Tennis Court 1', price: null }, { n: 2, name: 'Outdoor Tennis Court 2', price: null }] },
     ],
+    later: [],
     sheet: `https://glasgowclub.gladstonego.cloud/book/calendar/SA008?activityDate=${FRI}T00:00:00.000Z`,
   } } });
   // Telegram's card for that day is the outdoor sheet's, by its own name.
@@ -1253,12 +1255,58 @@ test('a look by the bot itself, where Glasgow Club lets this server in; and a da
     centre: 's', date: '2026-11-25', at: at(NOON), by: 'bot',
     note: 'Not open for booking yet: Glasgow Club opens it at 00:00 on Wed 18 Nov (the midnight after Tue 17 Nov).\nFree as it stands: 18:00, 19:00.',
     slots: [],                                                                            // nothing can be booked, or held, until then
+    // 2.11.2: what is free as it stands, and when it opens, for the app to offer to schedule.
+    later: [
+      { start: 1080, end: 1140, opensAt: at(opens), courts: [{ n: 2, name: 'Tennis Hall Court 2', price: null }] },
+      { start: 1140, end: 1200, opensAt: at(opens), courts: [{ n: 2, name: 'Tennis Hall Court 2', price: null }] },
+    ],
     sheet: 'https://glasgowclub.gladstonego.cloud/book/calendar/SA011?activityDate=2026-11-25T00:00:00.000Z',
   });
   const open = makeBot(NOON, { glasgow: letIn(FRIDAY) });
   const openPhone = await linkPhone(open);
   const got = (await ask(open, openPhone, 'indoor/look', { centre: 'g', date: FRI })).body.look;
   assert.deepEqual([got.by, got.slots.map(s => [s.start, s.courts.map(c => c.n)])], ['bot', [[1080, [1, 3]], [1140, [3]]]]);
+});
+
+test('a day not open yet, read by the PC (2.11.2): `later` has every court free as it stands, by start, with when it opens and the PC\'s names for the courts; none of it can be held', async () => {
+  const t = makeBot(NOON, { glasgow: turnedAway });
+  const phone = await linkPhone(t);
+  await t.app.pingFromAgent(HOME);
+  const WED = '2026-11-25', opens = '2026-11-18T00:00:00Z';                                  // the ninth day: it opens at the coming midnight
+  const notYet = (hh, extra = {}) => slot(WED, hh, { before: true, from: opens, ...extra });
+  const sheet = {
+    'Tennis Hall Court 4': [notYet(18), notYet(20, { status: 'Unavailable' })],
+    'Tennis Hall Court 1': [notYet(18), notYet(19)],
+    'Tennis Hall Court 3': [notYet(18), notYet(19, { status: 'Booked' })],
+  };
+  const ping = t.app.pingFromAgent(HOME, { wait: 5 });
+  const looking = ask(t, phone, 'indoor/look', { centre: 'g', date: WED });
+  const order = await ping;
+  assert.deepEqual([order.look.key, order.look.date], ['g', WED]);
+  t.app.lookFromAgent({ id: order.look.id, ok: true, sheet: fromPc(sheet) });
+  const look = (await looking).body.look;
+  assert.deepEqual(look.slots, []);
+  assert.deepEqual(look.later, [
+    { start: 1080, end: 1140, opensAt: at(opens), courts: [{ n: 1, name: 'Tennis Hall Court 1', price: null }, { n: 3, name: 'Tennis Hall Court 3', price: null }, { n: 4, name: 'Tennis Hall Court 4', price: null }] },
+    { start: 1140, end: 1200, opensAt: at(opens), courts: [{ n: 1, name: 'Tennis Hall Court 1', price: null }] },
+  ]);
+  assert.equal(look.note, 'Not open for booking yet: Glasgow Club opens it at 00:00 on Wed 18 Nov (the midnight after Tue 17 Nov).\nFree as it stands: 18:00, 19:00.');
+  // Shown, but not open: a hold of any of them is refused as one no look showed free, and the PC is not asked.
+  assert.deepEqual(await ask(t, phone, 'hold', { centre: 'g', date: WED, start: 1080, court: 1 }), refused(409, 'That list is old. Read the day again, then hold a court.'));
+  assert.deepEqual(await ask(t, phone, 'hold', { centre: 'g', date: WED, start: 1080, court: 1, courts: [1, 3] }), refused(409, 'That list is old. Read the day again, then hold a court.'));
+  assert.equal(stateOf(t, phone).hold, null);
+  // A day partly open (the hours still to open come later): each start is in one list or the other, by what the sheet says of it.
+  t.clock.t += 61000;
+  const ping2 = t.app.pingFromAgent(HOME, { wait: 5 });
+  const looking2 = ask(t, phone, 'indoor/look', { centre: 'g', date: FRI });
+  const order2 = await ping2;
+  t.app.lookFromAgent({ id: order2.look.id, ok: true, sheet: fromPc({
+    'Tennis Hall Court 2': [slot(FRI, 18), slot(FRI, 21, { before: true, from: '2026-11-17T21:00:00Z' })],
+    'Tennis Hall Court 5': [slot(FRI, 21, { before: true, from: '2026-11-17T20:00:00Z' })],
+  }) });
+  const part = (await looking2).body.look;
+  assert.deepEqual(part.slots, [{ start: 1080, end: 1140, courts: [{ n: 2, name: 'Tennis Hall Court 2', price: null }] }]);
+  assert.deepEqual(part.later, [{ start: 1260, end: 1320, opensAt: at('2026-11-17T20:00:00Z'), courts: [{ n: 2, name: 'Tennis Hall Court 2', price: null }, { n: 5, name: 'Tennis Hall Court 5', price: null }] }]);     // the earliest of its courts
 });
 
 test('a look that cannot be made is refused in the words Telegram\'s card would show', async () => {

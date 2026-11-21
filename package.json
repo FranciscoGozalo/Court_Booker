@@ -1,6 +1,6 @@
 {
   "name": "court-booker",
-  "version": "2.11.1",
+  "version": "2.11.2",
   "description": "Telegram bot that keeps your Kelvingrove court bookings; your PC at home books them at each release and the bot sends the court, time and gate code.",
   "private": true,
   "main": "index.js",

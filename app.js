@@ -28,7 +28,7 @@ const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 
-const VERSION = '2.11.1';
+const VERSION = '2.11.2';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -2511,11 +2511,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     let got;
     try { got = await readIndoor(v.centre, v.date, v.fresh); } catch (err) { return no(A.whole(G.whyText(err))); }
-    const slots = [];
+    // `slots`: the courts that can be booked (and held) now. `later` (2.11.2): those free on the
+    // sheet but not open for booking yet, in the same shape with `opensAt` (the earliest of that
+    // start's courts), so that the app can offer them to schedule. Never held from: not in `slots`.
+    const slots = [], later = [];
     for (const s of got.slots) {
-      if (s.opensAt !== null) continue;                                  // not open for booking yet: the note says when
-      let at = slots.find(o => o.start === s.start);
-      if (!at) slots.push(at = { start: s.start, end: s.end, courts: [] });
+      const open = s.opensAt === null, list = open ? slots : later;
+      let at = list.find(o => o.start === s.start);
+      if (!at) list.push(at = { start: s.start, end: s.end, ...(open ? {} : { opensAt: s.opensAt }), courts: [] });
+      else if (!open && s.opensAt < at.opensAt) at.opensAt = s.opensAt;
       at.courts.push({ n: s.court, name: A.whole(s.name || `Court ${s.court}`), price: null });      // the sheet carries no price: that shows once a court is held
     }
     const [, ...words] = UI.indoorDay({ ...ctx(), app: true }, v.centre, v.date, got).caption.split('\n').map(A.plain);
@@ -2525,7 +2529,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     for (const [key, shown] of appShown) if (shownAt - shown.at >= A.SHOWN_MS) appShown.delete(key);
     appShown.set(`${v.centre}:${v.date}`, { at: shownAt, free: new Set(slots.flatMap(s => s.courts.map(c => `${s.start}:${c.n}`))) });
     return { status: 200, body: { ok: true, look: {
-      centre: v.centre, date: v.date, at: got.at, by: got.via === 'pc' ? 'pc' : 'bot', note: words.join('\n'), slots,
+      centre: v.centre, date: v.date, at: got.at, by: got.via === 'pc' ? 'pc' : 'bot', note: words.join('\n'), slots, later,
       sheet: G.sheetUrl(G.CENTRES[v.centre], v.date),
     } } };
   }
