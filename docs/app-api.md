@@ -1269,7 +1269,7 @@ The shapes, side by side:
 | app → bot | `POST /app/hold` | `{ centre, date, start, court }` (or `courts: [3]`) | `{ centre, date, start, court: 3, courts: [3, 4] }` |
 | bot → app | `state.hold` | `court: 3, courtName: "Court 3", courts: [3], courtNames: ["Court 3"]`, `price` | `court: 3, courtName: "Court 3", courts: [3, 4], courtNames: ["Court 3", "Court 4"]`, `price: "£46.00"`, `prices: ["£23.00", "£23.00"]` |
 | bot → PC | the ping's answer | `{ hold: { id, key, date, start, court: 3, courts: [3] } }` | `{ hold: { id, key, date, start, court: 3, courts: [3, 4] } }` |
-| PC → bot | `POST /agent/hold` notes | `court: 3` (and `courts: [3]` from a 2.11 booker) | `court: 3, courts: [3, 4]`, `price` the total, `prices` each court's |
+| PC → bot | `POST /agent/hold` notes | `court: 3` (a 2.11 booker adds `courts` only for two courts) | `court: 3, courts: [3, 4]`, `price` the total, `prices` each court's |
 | app → PC | the sealed code (Pay) | `{ cvc, id, amount, payKey, centre, date, start, court }`, as before | the same with `courts: [3, 4]`, `amount` the total; or `{ use: "kept", … }` with `courts` too |
 | app → bot | `POST /app/hold/order` (pay) | `amount: hold.price` | `amount: hold.price`, the total |
 | bot → app | `state.results[]` | `court: "3"`, `courts: null` (or `[3]` when the PC names it so) | one result for the slot: `court: "3 & 4"`, `courts: [3, 4]`, `price` the total, `paid` |
