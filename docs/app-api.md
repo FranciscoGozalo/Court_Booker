@@ -19,7 +19,10 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.11.1 (`api: 3`; 2.11.1 keeps the card your PC last said it keeps across a
+This file describes the API as built in version 2.11.2 (`api: 3`; 2.11.2 adds `later` to an indoor look: the courts free on
+a day's sheet that Glasgow Club has not opened for booking yet, with when it opens, so that the app can schedule a Glasgow Club
+date as it does a park's (see `POST /app/indoor/look`, and "A one-off date at Glasgow Club" under `POST /app/once`); nothing
+else changes shape; 2.11.1 keeps the card your PC last said it keeps across a
 restart of the bot, adds `card.said`, and shows "no card" as a card with no brand, not as null, which now means
 nothing is known yet (see `card`); 2.11.0 added two courts at once at Glasgow Club, by fields
 only: `courts` on `POST /app/hold` and in `hold` (with `courtNames` and `prices`), and `courts` on weekly bookings, one-off
@@ -372,7 +375,8 @@ see "Two courts at once (2.11)".
 the bot keeps it until midnight), at every venue (api 3), by date, start and venue. `id` as above;
 `venue` and `type` as in `weekly` (`"kelvingrove"`, `"outdoor"` for Kelvingrove's); `end` is `start`
 plus the hours; `opensAt` is when that day opens for booking at that venue; `open` is whether it has.
-`signed` (2.10.1), `auth` (2.11) and `courts` (2.11) as in `weekly`.
+`signed` (2.10.1), `auth` (2.11) and `courts` (2.11) as in `weekly`. Glasgow Club's are as the parks',
+up to 90 days ahead (see "A one-off date at Glasgow Club" under `POST /app/once`).
 
 **`results`**: what the PC reported, kept for 60 days. First those dated today or later, soonest
 first; then the past ones, newest first. `past`: the date is before today (UK).
@@ -631,7 +635,8 @@ is fine, and things as they stand refuse it (the same request may work later).
 
 ```
 look = { centre, date, at, by: "pc" | "bot", note, sheet,
-         slots: [ { start, end, courts: [ { n, name, price } ] } ] }      // free courts only, by start time
+         slots: [ { start, end, courts: [ { n, name, price } ] } ],          // free courts that can be booked now, by start time
+         later: [ { start, end, opensAt, courts: [ { n, name, price } ] } ] }   // 2.11.2: free, but not open for booking yet
 ```
 
 ### The parks on ClubSpark
@@ -787,6 +792,36 @@ one-off takes that number (its hours still stay as they were), and with it the `
 which covers it; with no `auth`, it is left unsigned, since the signature it had was for the courts it
 had. The same number again changes nothing but a signature, as before.
 
+**A one-off date at Glasgow Club** (as built since 2.10; written down in 2.11.2, when the app began to
+schedule there as it does at the parks). It is taken exactly as a park's: any date from today to
+`venue.maxAheadDays` (90) days ahead, the same horizon as the parks. The differences are only those
+of paying: it is paid by your PC with the card it keeps, so it should come signed (`auth`, over the
+v1 words, or the v2 words for `courts: 2`; see "Signed bookings"), and it is booked only while
+automatic payments are on (`card.auto`). Unsigned, it is still taken and listed (`signed: false`), but
+your PC takes no court for it.
+
+- **A day not open yet** (`once[].open` false; `opensAt` is 00:00, 7 days before the date): it is
+  that midnight's to book. Its release is listed like any other (`release`, or `later` when another
+  comes first), with `from: "once"` and `at` that midnight; your PC's nightly run the evening before
+  (21:55) is handed it with its `auth` and `courts` (`GET /agent/jobs`), stays awake, and at 00:00
+  takes the lowest-numbered free court (two for `courts: 2`, all or none) and pays, exactly as for a
+  weekly booking. A one-off that
+  was on the list at its midnight is not tried again after that midnight's half hour. Your PC asks
+  what to book once, when its run starts at 21:55: a date whose day opens at the coming midnight,
+  added after that, is not known to it that night (nor tried after), and the bot says "No word from
+  your PC" about it after the midnight, as for any booking of the release left without a result.
+- **A day already open** (`open` true; the app never sends one: on such a day it holds a court
+  instead, and pays from the app): taken all the same, as a park's would be. It is in `open`, and
+  your PC books it at its next run (the nightly one at 21:55; `open: true` on the job, which your PC
+  takes only with the one-off's own signature), with whatever court is free then, and pays. Nothing
+  is booked at once, and it is never held. That keeps a one-off at every venue to one rule.
+- **Hours**: Glasgow Club's are an hour long, on the hour (400 otherwise). Scotstoun's outdoor courts
+  take starts from 08:00 to 17:00 (400 otherwise). The bot knows no opening hours for the indoor
+  centres, so any hour is taken there; at an hour Glasgow Club has no court, your PC finds none free
+  and the result says so ("No court free for the whole time. Nothing was paid."). The app offers
+  07:00 to 21:00 starts on a day it has no look for.
+- **Courts**: `courts: 2` takes two courts at the same hour, all or none (see "Two courts at once (2.11)").
+
 - 400 "A one-off booking needs a date (YYYY-MM-DD), a start in minutes after midnight, and hours (1 or 2)."
 - 400 "courts, when sent, must be 1 or 2."
 - 400 "Two courts at once are for Glasgow Club only." (`courts: 2` at a park, Kelvingrove included)
@@ -914,7 +949,18 @@ for a court in a look's `slots` (see `POST /app/hold`).
   free courts): "No court free that day." / "Glasgow Club lists no courts that day. Open the sheet
   to check." / for a day (or
   hours) not open for booking yet, when it opens and what is free as it stands. Courts that are
-  not open for booking yet are in the note only, never in `slots`.
+  not open for booking yet are in the note and in `later`, never in `slots`.
+- `later` (2.11.2): the courts free on the sheet that Glasgow Club has not opened for booking yet, in
+  the shape of `slots`, by start time, with `opensAt`: when that start opens for booking, as the sheet
+  says (the earliest of its courts'; ms). Empty (`[]`) when there are none, never left out. For the
+  app's Schedule on a day not open yet: the times, how many courts are free at each as it stands,
+  and their names. `price` is always null, as in `slots` (the sheet carries none). They cannot be held
+  (a hold of one is refused as "That list is old…": only `slots` count, see `POST /app/hold`). Read
+  by your PC or by the bot alike: your PC passes on each slot's `bookableFrom` and whether it is open
+  yet (its short form, `[startTime, endTime, bookableFrom, bookableUntil, not open yet, status]`, with
+  each court's name), so `later` has the courts and their names either way. The look covers the nine
+  days the sheet is read for (`indoor.days`); a date further off has no look: the app offers the
+  venue's hours (see "A one-off date at Glasgow Club" under `POST /app/once`).
 - `sheet`: that centre's sheet for that day on Glasgow Club's site, to book and pay there by hand.
 
 - 400 "A look needs a centre (g, s or o) and a date (YYYY-MM-DD)."
