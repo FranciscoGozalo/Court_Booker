@@ -19,7 +19,8 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.11.0 (`api: 3`; 2.11.0 added two courts at once at Glasgow Club, by fields
+This file describes the API as built in version 2.11.1 (`api: 3`; 2.11.1 keeps the card your PC last said it keeps across a
+restart of the bot, and adds `card.said` (see `card`); 2.11.0 added two courts at once at Glasgow Club, by fields
 only: `courts` on `POST /app/hold` and in `hold` (with `courtNames` and `prices`), and `courts` on weekly bookings, one-off
 dates and results, and in the signature's words for two courts (see "Two courts at once (2.11)"); and each weekly booking's
 and one-off date's signature itself, `weekly[].auth` and `once[].auth`, which an app from 2.11 checks against the card's pay
@@ -105,7 +106,7 @@ week's 7 sessions and 14 hours, one card on its way to the PC at a time, and one
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.11.0", api: 3 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.11.1", api: 3 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -145,7 +146,7 @@ current etag the answer waits up to `wait` seconds for a change and then, if the
 
 ```
 state = {
-  now, bot: "2.11.0",
+  now, bot: "2.11.1",
   venue: { name: "Kelvingrove Park", short: "KP", first: 540, last: 1260, lengths: [1, 2],
            courts: [1,2,3,4,5,6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
   venues: [ { key, name, club: "clubspark" | "glasgow", types: ["outdoor"] | ["indoor"] | ["indoor", "outdoor"],
@@ -173,7 +174,7 @@ state = {
              centres: [ { key: "g", name: "Gorbals", site, label: "Gorbals", type: "indoor" },
                         { key: "s", name: "Scotstoun", site, label: "Scotstoun", type: "indoor" },
                         { key: "o", name: "Scotstoun", site, label: "Scotstoun outdoor", type: "outdoor" } ] },
-  card:    null | { brand, last4, expMonth, expYear, tag, pending, forgetting, why, auto, autoAsked, autoWhy },   // the card your PC keeps, for Pay and automatic payments
+  card:    null | { brand, last4, expMonth, expYear, tag, pending, forgetting, why, auto, autoAsked, autoWhy, said },   // the card your PC keeps, for Pay and automatic payments; said (2.11.1)
   hold:    null | hold,
   notes:   [ { id, at, kind: "booked" | "missed" | "warn" | "hold" | "info", title, body, ref } ],   // newest first, the last 30; ref (2.10.4): the result it is about, or null
   devices: [ { id, name, at, seenAt, me } ],
@@ -431,9 +432,23 @@ Telegram's message, such as "ClubSpark did not load. Trying again (2 of 3)."
   (2.9.3): what the sheet is called to a person, so that Scotstoun's two can be told apart
   ("Gorbals", "Scotstoun", "Scotstoun outdoor"); `centres[].type` (2.9.3): `"indoor"` or `"outdoor"`.
 
-**`card`**: the card your PC keeps for paying from the app, as the PC's pings say (the bot keeps
-none of it across a restart: the PC's next ping, within a minute while it is awake, says it again).
+**`card`**: the card your PC keeps for paying from the app, as the PC's pings say. Since 2.11.1 the
+bot keeps what the PC last said across a restart (every deploy is one): the card's summary (`brand`,
+`last4`, `expMonth`, `expYear`, `tag`, exactly what the app is shown, none of it secret) and `auto`,
+in its settings file (`pcCard`; never in the one-line `/backup`). Nothing else of a card ever reaches
+the bot, so nothing else can be kept: never its number, its pay key or a security code. What is on its
+way (`pending`, `forgetting`, `autoAsked`) and why the last one did not go (`why`, `autoWhy`) are
+kept in memory only, and so is `pc.cardKey`: after a restart they are null or false until the PC's
+next ping (within a minute while it is awake, hours while it sleeps). A card forgotten on the PC is
+kept as none. A settings file older than 2.11.1 has no card in it: `card` is null until the PC's
+next ping, as before.
 Null when the PC keeps no card as far as the bot knows, none is on its way and there is nothing to say.
+
+- `said` (2.11.1): true once a ping from the PC has said which card it keeps since the bot started;
+  false while what is shown is what the PC said before the restart (it may have changed since, on the
+  PC itself). The app can tell "not heard yet" (`said: false`) from what the PC says now. A `card` that
+  is null says no card is kept, as far as the bot knows (a restart included), or that nothing has been
+  heard at all.
 
 - `brand`: "Visa", "Mastercard", "American Express", "Maestro", "Discover", "Diners Club", "JCB"
   or "Card". `last4`: the last four digits, a string. `expMonth` (1 to 12) and `expYear` (four
@@ -1404,8 +1419,9 @@ phone's push token: the phone stays linked, and gets notifications again once th
   what it should be, but both orders travel through it.
 - A bot that is not what it should be can still start holds, drop or delay what the app sends, or
   ask the PC to forget its card: nuisances, not payments.
-- A restart of the bot loses `pc.cardKey` and `card` until the PC's next ping (within a minute while
-  it is awake), and a card or a Pay waiting for the PC: send it again. While the PC pays, the bot
+- A restart of the bot loses `pc.cardKey` until the PC's next ping (within a minute while it is
+  awake), and a card or a Pay waiting for the PC: send it again. The card the PC last said it keeps
+  is kept (2.11.1), with `card.said` false until that ping. While the PC pays, the bot
   follows a restart as it can: in a message and a note (see above).
 - The card on the PC is protected by Windows for the user signed in there: a program running as that
   user can unlock it. While the PC types it in, the card and the code pass through the browser

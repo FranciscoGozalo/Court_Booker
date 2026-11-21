@@ -28,7 +28,7 @@ const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 
-const VERSION = '2.11.0';
+const VERSION = '2.11.1';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -113,13 +113,25 @@ function cleanResult(raw) {
   return r;
 }
 
+// What your PC last said of its card (2.11.1), kept on disk so that a restart of the bot does not
+// show the app "no card" until the PC's next ping: { kept, auto }. `kept` is the summary a ping
+// gives and the app is shown (lib/appapi.js cleanCard: brand, last four digits, expiry month and
+// year, tag), or null when the PC said it keeps none; `auto` whether it keeps the code for automatic
+// payments. Nothing else of a card ever reaches the bot, and nothing else is kept: never the number,
+// the pay key or a security code. Null when no ping has said (or the file is older than 2.11.1).
+function cleanPcCard(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const kept = raw.kept === null ? null : A.cleanCard(raw.kept);
+  return kept === undefined ? null : { kept, auto: raw.auto === true };
+}
+
 // Settings from storage, or from the environment on a first start, made safe to use.
 // Settings saved by version 1 (the link alerts) keep the owner, weekly plan, court order and pictures.
 function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, weekly: [], once: [], onceAway: [], order: [1, 2, 3, 4, 5, 6], paused: false,
     results: {}, sent: {}, pics: {}, lastSeen: null, lastRun: null, home: null,
-    apps: [], notes: [],
+    apps: [], notes: [], pcCard: null,
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -147,6 +159,7 @@ function loadState(raw, env = {}) {
       const h = raw.home;                                         // where your PC last called from, for waking it
       if (h && publicIPv4(h.ip) && typeof h.at === 'number') state.home = { ip: h.ip, at: h.at };
       state.notes = A.cleanNotes(raw.notes);                      // what the bot told you unprompted, kept for the app
+      state.pcCard = cleanPcCard(raw.pcCard);                     // the card your PC last said it keeps (2.11.1): its summary only
     }
     for (const kind of KINDS) {                                   // what Telegram calls each picture, once it has it
       const p = raw.pics && raw.pics[kind];
@@ -1152,12 +1165,23 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // one at a time, a newer one in its place, CARD_ASK_MS at most. The PC opens it, checks it and
   // keeps it, protected by Windows; its pings say which card it keeps (brand, last four digits,
   // expiry: `pcCard`), and the one after the card says how it went. Forgetting the card goes the
-  // same way, without a box. None of this is kept across a restart: the PC's next ping says it all again.
+  // same way, without a box. Since 2.11.1 that summary (and whether the PC keeps the code for
+  // automatic payments) is kept on disk (state.pcCard, see cleanPcCard), so a restart shows the app
+  // the card your PC last said it keeps, with `said: false` until a ping says it again. The rest
+  // (the card key, a card or an order on its way, why the last one did not go) is kept in memory
+  // only: the PC's next ping says it all again.
   const CARD_ASK_MS = 2 * 60 * 1000;                  // a card waits this long for the PC to collect it...
   const CARD_ANSWER_MS = 2 * 60 * 1000;               // ...and a card or a forget, once collected, this long for the PC's answer
   let cardKey = null;                                 // the PC's card key, as its last ping gave it (base64), or null
-  let pcCard = null;                                  // the card the PC keeps, as its last ping said: { brand, last4, expMonth, expYear, tag }, or null
+  let pcCard = state.pcCard ? state.pcCard.kept : null;   // the card the PC keeps, as its last ping said (before a restart too): { brand, last4, expMonth, expYear, tag }, or null
   let pcCardSaid = false;                             // whether a ping has said which card it keeps (since this start)
+  // What the pings said of the card, kept on disk when it changes: the summary alone (cleanCard).
+  function keepCard() {
+    const next = { kept: pcCard ? A.cleanCard(pcCard) || null : null, auto: pcAuto === true };
+    if (JSON.stringify(next) === JSON.stringify(state.pcCard)) return;
+    state.pcCard = next;
+    save();
+  }
   let cardAsk = null;                                 // waiting for the PC: { id, kind: 'card' | 'forget', sealed, at, takenAt }
   let cardWhy = null;                                 // why the last card (or forget) did not go through, in words, for the app
   const payingNow = () => !!hold && !hold.end && (PAYING.includes(hold.stage) || ['asked', 'told', 'paying'].includes(hold.payState));
@@ -1227,7 +1251,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     if (c.has) {
       const kept = A.cleanCard(c.kept);
-      if (kept !== undefined) { pcCard = kept; pcCardSaid = true; }
+      if (kept !== undefined) { pcCard = kept; pcCardSaid = true; keepCard(); }       // a card forgotten (null) is kept so too
     }
     const done = c.done;
     if (!done || typeof done !== 'object' || typeof done.ok !== 'boolean' || !cardAsk || !cardAsk.takenAt || done.id !== cardAsk.id) return;      // one this bot is not waiting for (a repeat, or from before a restart)
@@ -1257,7 +1281,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
   }
   // The card for the app's state: null when your PC keeps none (as far as I know), nothing is
-  // on its way, and there is nothing to say.
+  // on its way, and there is nothing to say. `said` (2.11.1): whether a ping has said which card it
+  // keeps since the bot started; false while what is shown is what the PC said before the restart.
   function cardView() {
     if (!pcCard && !cardAsk && !cardWhy && !pcAuto && !autoAsk && !autoWhy) return null;
     return {
@@ -1265,6 +1290,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       tag: pcCard ? pcCard.tag : null,
       pending: !!cardAsk && cardAsk.kind === 'card', forgetting: !!cardAsk && cardAsk.kind === 'forget', why: cardWhy,
       auto: pcAuto, autoAsked: autoAsk ? autoAsk.kind : null, autoWhy,           // automatic payments (2.10)
+      said: pcCardSaid,
     };
   }
   // How many sealed boxes this bot holds in memory just now (0, 1 or 2): for the tests, which
@@ -1278,7 +1304,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // card does: handed over once, unopened, and never written to the log or to disk. Off: your PC
   // deletes it (so does a new card, or the card forgotten).
   let autoAsk = null;                                 // waiting for the PC: { id, kind: 'on' | 'off', sealed, at, takenAt }
-  let pcAuto = false;                                 // whether the PC keeps a code for automatic payments, as its last ping said
+  let pcAuto = !!state.pcCard && state.pcCard.auto;   // whether the PC keeps a code for automatic payments, as its last ping said (before a restart too)
   let autoWhy = null;                                 // why the last "on" (or "off") did not go through, in words, for the app
   function autoFromApp(sealed) {
     const t = now();
@@ -1322,7 +1348,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // on or off went (`autoDone`, for the id it was handed).
   function autoFromPc(c) {
     if (!c || typeof c !== 'object') return;
-    if (typeof c.auto === 'boolean') pcAuto = c.auto;
+    if (typeof c.auto === 'boolean') { pcAuto = c.auto; keepCard(); }
     const done = c.autoDone;
     if (!done || typeof done !== 'object' || typeof done.ok !== 'boolean' || !autoAsk || !autoAsk.takenAt || done.id !== autoAsk.id) return;
     const on = autoAsk.kind === 'on';

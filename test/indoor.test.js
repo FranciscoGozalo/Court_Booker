@@ -638,7 +638,7 @@ test('Kelvingrove is one tap further on, and everything about it is as before', 
   await t.app.handleUpdate(say(OWNER, '/help'));
   assert.match(t.tg.last().text, /\/gorbals {2}and {2}\/scotstoun/);
   await t.app.handleUpdate(say(OWNER, '/status'));
-  assert.match(t.tg.last().text, /\(version 2\.11\.0\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
+  assert.match(t.tg.last().text, /\(version 2\.11\.1\)[\s\S]*\nIndoor courts \(Glasgow Club\): not looked up since the last restart\n/);
 });
 
 test('the look at Glasgow Club on start-up is said in the log, whichever way it goes, and /status has it', async () => {

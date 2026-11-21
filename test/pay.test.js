@@ -172,7 +172,7 @@ test('the PC\'s card key comes with its pings and is shown to the app; one that 
   await pcPing(t, { kept: null });
   assert.deepEqual([stateOf(t, phone).pc.cardKey, stateOf(t, phone).card], [KEY, null]);
   await pcPing(t);
-  assert.deepEqual(stateOf(t, phone).card, { ...VISA, tag: null, pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null });
+  assert.deepEqual(stateOf(t, phone).card, { ...VISA, tag: null, pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null, said: true });
   // A ping that says nothing of the card leaves what was known as it was.
   await t.app.pingFromAgent(HOME);
   assert.deepEqual([stateOf(t, phone).pc.cardKey, stateOf(t, phone).card.last4], [KEY, '4242']);
@@ -191,7 +191,7 @@ test('a card from the app: waiting for the PC, handed over on its next ping exac
   const ping = pcPing(t, { kept: null, wait: 5 });                                           // the PC's waiting ping
   const r = await ask(t, phone, 'card', { sealed });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body.state.card, { brand: null, last4: null, expMonth: null, expYear: null, tag: null, pending: true, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null });
+  assert.deepEqual(r.body.state.card, { brand: null, last4: null, expMonth: null, expYear: null, tag: null, pending: true, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null, said: true });
   const order = await ping;
   assert.match(order.card.id, /^[0-9a-f]{12}$/);
   assert.deepEqual(order, { ok: true, card: { id: order.card.id, sealed } });
@@ -200,10 +200,10 @@ test('a card from the app: waiting for the PC, handed over on its next ping exac
   assert.equal(stateOf(t, phone).card.pending, true);                                         // until the PC says how it went
   // The PC kept it: the next ping says so, with the card it keeps now.
   await pcPing(t, { done: { id: order.card.id, ok: true } });
-  assert.deepEqual(stateOf(t, phone).card, { ...VISA, tag: null, pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null });
+  assert.deepEqual(stateOf(t, phone).card, { ...VISA, tag: null, pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null, said: true });
   // The PC says it again (it does until a ping gets through): nothing changes.
   await pcPing(t, { done: { id: order.card.id, ok: true } });
-  assert.deepEqual(stateOf(t, phone).card, { ...VISA, tag: null, pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null });
+  assert.deepEqual(stateOf(t, phone).card, { ...VISA, tag: null, pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null, said: true });
   assert.deepEqual(t.logs.filter(l => /card/i.test(l)), [
     'Your PC gave me its card key.',
     'From the app: card',
@@ -232,7 +232,7 @@ test('a newer card takes the place of one still waiting; one not collected withi
   late.clock.t += 1;
   assert.deepEqual(await pcPing(late), { ok: true });                                         // too old to hand over
   await late.app.tick();
-  assert.deepEqual(stateOf(late, late.phone).card, { ...VISA, tag: null, pending: false, forgetting: false, why: 'Your PC did not collect the card within two minutes, so I dropped it. Send it again while your PC is awake.', auto: false, autoAsked: null, autoWhy: null });
+  assert.deepEqual(stateOf(late, late.phone).card, { ...VISA, tag: null, pending: false, forgetting: false, why: 'Your PC did not collect the card within two minutes, so I dropped it. Send it again while your PC is awake.', auto: false, autoAsked: null, autoWhy: null, said: true });
   assert.equal(late.app.sealedHeld(), 0);
   // The next card clears what was said.
   assert.equal((await ask(late, late.phone, 'card', { sealed: second })).body.state.card.why, null);
@@ -244,7 +244,7 @@ test('the PC would not keep the card, or did not say: the app is told, in the PC
   const order = await pcPing(t);
   await pcPing(t, { done: { id: order.card.id, ok: false, why: 'the card number does not pass the check every card number passes (a digit may be wrong)' } });
   assert.deepEqual(stateOf(t, t.phone).card, { ...VISA, tag: null, pending: false, forgetting: false,
-    why: 'Your PC did not keep that card: the card number does not pass the check every card number passes (a digit may be wrong).', auto: false, autoAsked: null, autoWhy: null });
+    why: 'Your PC did not keep that card: the card number does not pass the check every card number passes (a digit may be wrong).', auto: false, autoAsked: null, autoWhy: null, said: true });
   // An answer for another card, or one that does not read, is not taken for this one.
   await ask(t, t.phone, 'card', { sealed: sealedOf() });
   const next = await pcPing(t);
@@ -254,7 +254,53 @@ test('the PC would not keep the card, or did not say: the app is told, in the PC
   t.clock.t += 2 * 60000 + 1;
   await t.app.tick();
   assert.deepEqual(stateOf(t, t.phone).card, { ...VISA, tag: null, pending: false, forgetting: false,
-    why: 'Your PC took the card but did not say whether it kept it. The card shown here is the one your PC says it keeps.', auto: false, autoAsked: null, autoWhy: null });
+    why: 'Your PC took the card but did not say whether it kept it. The card shown here is the one your PC says it keeps.', auto: false, autoAsked: null, autoWhy: null, said: true });
+});
+
+test('the card your PC last said it keeps outlives a restart of the bot (2.11.1): its summary alone, shown with said: false until the PC says it again; a forget is kept too', async () => {
+  const VIEW = { ...VISA, tag: '60bf07c4', pending: false, forgetting: false, why: null, auto: true, autoAsked: null, autoWhy: null };
+  // The PC's ping says what it keeps, here with more beside it than it ever sends: none of that is kept or shown.
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  const secrets = { number: '4242424242424242', payKey: Buffer.alloc(32, 0x5a).toString('base64'), cvc: '737', name: 'F GOZALO' };
+  await t.app.pingFromAgent(HOME, { card: { key: KEY, has: true, kept: { ...VISA, tag: '60bf07c4', ...secrets }, auto: true } });
+  assert.deepEqual(stateOf(t, phone).card, { ...VIEW, said: true });
+  assert.deepEqual(t.store.load().pcCard, { kept: { ...VISA, tag: '60bf07c4' }, auto: true });
+  // A restart (a deploy): the same card at once, said: false, though no ping has come; the card key is not kept.
+  const r = makeBot(NOON, { store: t.store });
+  const p = { device: r.app.appAuth(phone.token) };
+  assert.deepEqual(stateOf(r, p).card, { ...VIEW, said: false });
+  assert.equal(stateOf(r, p).pc.cardKey, null);
+  // A ping that says nothing of the card (an older PC) changes nothing; the PC's next ping that does: said.
+  await r.app.pingFromAgent(HOME);
+  assert.equal(stateOf(r, p).card.said, false);
+  await r.app.pingFromAgent(HOME, { card: { key: KEY, has: true, kept: { ...VISA, tag: '60bf07c4' }, auto: true } });
+  assert.deepEqual(stateOf(r, p).card, { ...VIEW, said: true });
+  // Forgotten on the PC: kept so, and after the next restart there is no card, as the PC last said.
+  await ask(r, p, 'card/forget');
+  const o = await pcPing(r);
+  await r.app.pingFromAgent(HOME, { card: { key: KEY, has: true, kept: null, done: { id: o.forgetCard.id, ok: true }, auto: false } });
+  assert.equal(stateOf(r, p).card, null);
+  assert.deepEqual(r.store.load().pcCard, { kept: null, auto: false });
+  const s = makeBot(NOON, { store: r.store });
+  assert.equal(stateOf(s, { device: s.app.appAuth(phone.token) }).card, null);
+  // Automatic payments turned off on the PC are kept as well, the card still kept.
+  await s.app.pingFromAgent(HOME, { card: { key: KEY, has: true, kept: VISA, auto: true } });
+  await s.app.pingFromAgent(HOME, { card: { key: KEY, has: true, kept: VISA, auto: false } });
+  assert.deepEqual(s.store.load().pcCard, { kept: { ...VISA, tag: null }, auto: false });
+  // A settings file older than 2.11.1 has no card: null, as before; and one whose card does not read is taken as none.
+  for (const pcCard of [undefined, null, 'Visa 4242', { kept: { brand: 'Diners', last4: '4242', expMonth: 1, expYear: 2030 }, auto: true }]) {
+    const u = makeBot(NOON, { store: memStore({ v: 4, owner: OWNER, order: [3, 4, 5, 2, 1, 6], ...(pcCard === undefined ? {} : { pcCard }) }) });
+    const up = await linkPhone(u);
+    assert.equal(stateOf(u, up).card, null, JSON.stringify(pcCard));
+  }
+  // One written by hand with more in it: only the summary is read, and only the summary is written back.
+  const v = makeBot(NOON, { store: memStore({ v: 4, owner: OWNER, order: [3, 4, 5, 2, 1, 6], pcCard: { kept: { ...VISA, ...secrets }, auto: true, ...secrets } }) });
+  assert.deepEqual(v.app.state.pcCard, { kept: { ...VISA, tag: null }, auto: true });
+  // Nothing secret anywhere: not on disk, in the log, in Telegram or in what the app is shown.
+  const all = JSON.stringify([t.store.load(), r.store.load(), s.store.load(), v.app.state, t.logs, r.logs, s.logs, v.logs, t.tg.calls, r.tg.calls, s.tg.calls,
+    t.app.appState(phone.device), r.app.appState(p.device)]);
+  for (const x of Object.values(secrets)) assert.ok(!all.includes(x), x);
 });
 
 test('a card is refused while it cannot reach the PC: no card key yet, the PC asleep, or the PC paying', async () => {
@@ -279,7 +325,7 @@ test('a card is refused while it cannot reach the PC: no card key yet, the PC as
 test('forget: the PC deletes the card it keeps; a card that has not reached the PC goes at once; and there may be nothing to forget', async () => {
   const t = await withCard();
   const r = await ask(t, t.phone, 'card/forget');
-  assert.deepEqual([r.status, r.body.state.card], [200, { ...VISA, tag: null, pending: false, forgetting: true, why: null, auto: false, autoAsked: null, autoWhy: null }]);
+  assert.deepEqual([r.status, r.body.state.card], [200, { ...VISA, tag: null, pending: false, forgetting: true, why: null, auto: false, autoAsked: null, autoWhy: null, said: true }]);
   const order = await pcPing(t);
   assert.match(order.forgetCard.id, /^[0-9a-f]{12}$/);
   assert.deepEqual(order, { ok: true, forgetCard: { id: order.forgetCard.id } });
@@ -296,7 +342,7 @@ test('forget: the PC deletes the card it keeps; a card that has not reached the 
   // A card on its way while the PC keeps another: it goes, and the kept one is forgotten.
   const u = await withCard();
   await ask(u, u.phone, 'card', { sealed: sealedOf() });
-  assert.deepEqual((await ask(u, u.phone, 'card/forget')).body.state.card, { ...VISA, tag: null, pending: false, forgetting: true, why: null, auto: false, autoAsked: null, autoWhy: null });
+  assert.deepEqual((await ask(u, u.phone, 'card/forget')).body.state.card, { ...VISA, tag: null, pending: false, forgetting: true, why: null, auto: false, autoAsked: null, autoWhy: null, said: true });
   assert.ok((await pcPing(u)).forgetCard);
   // A card handed over and not yet answered for: forget goes after it, so the PC deletes whatever it then keeps.
   const v = await withCard();
@@ -316,7 +362,7 @@ test('forget: the PC deletes the card it keeps; a card that has not reached the 
   await ask(x, x.phone, 'card/forget');
   const o = await pcPing(x);
   await pcPing(x, { done: { id: o.forgetCard.id, ok: false, why: 'the card file could not be deleted (EPERM)' } });
-  assert.deepEqual(stateOf(x, x.phone).card, { ...VISA, tag: null, pending: false, forgetting: false, why: 'Your PC could not forget its card: the card file could not be deleted (EPERM).', auto: false, autoAsked: null, autoWhy: null });
+  assert.deepEqual(stateOf(x, x.phone).card, { ...VISA, tag: null, pending: false, forgetting: false, why: 'Your PC could not forget its card: the card file could not be deleted (EPERM).', auto: false, autoAsked: null, autoWhy: null, said: true });
 });
 
 // ---------- Pay ----------
@@ -698,7 +744,7 @@ test('nothing sealed is ever written to the log, to disk, to Telegram or to the 
     const answered = await call('POST', '/agent/ping', { awake: true, cardKey: KEY, card: { brand: 'Mastercard', last4: '4444', expMonth: 1, expYear: 2031 }, cardDone: { id: ping.json.card.id, ok: true } }, pc);
     assert.deepEqual(answered, { status: 200, json: { ok: true } });
     const state = (await call('GET', '/app/state', undefined, phone)).json.state;
-    assert.deepEqual([state.pc.cardKey, state.card], [KEY, { brand: 'Mastercard', last4: '4444', expMonth: 1, expYear: 2031, tag: null, pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null }]);
+    assert.deepEqual([state.pc.cardKey, state.card], [KEY, { brand: 'Mastercard', last4: '4444', expMonth: 1, expYear: 2031, tag: null, pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null, said: true }]);
     // Pay: from the app, to the PC's next note.
     assert.equal((await call('POST', '/app/hold/order', { id: t.id, what: 'pay', amount: '£23.00', sealed: cvc }, phone)).status, 200);
     const note = await call('POST', '/agent/hold', { id: t.id, key: 'g', date: FRI, start: 1080, court: 3, stage: 'held', beat: true, price: '£23.00', left: 600000, pay: 'ready' }, pc);
@@ -753,7 +799,7 @@ test('asked for while the PC could pay, and its next note says it cannot: the or
 test('the card your PC keeps carries its tag (from the pay key), and only a tag of 8 hex characters is passed on', async () => {
   const t = await withCard();
   await pcPing(t, { kept: { ...VISA, tag: '60bf07c4' } });
-  assert.deepEqual(stateOf(t, t.phone).card, { ...VISA, tag: '60bf07c4', pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null });
+  assert.deepEqual(stateOf(t, t.phone).card, { ...VISA, tag: '60bf07c4', pending: false, forgetting: false, why: null, auto: false, autoAsked: null, autoWhy: null, said: true });
   for (const bad of ['60BF07C4', '60bf07c', '60bf07c4a', 'xyzxyzxy', 1234, null, { a: 1 }]) {
     assert.deepEqual(A.cleanCard({ ...VISA, tag: bad }), { ...VISA, tag: null }, JSON.stringify(bad));
   }
