@@ -409,8 +409,11 @@ same venue, date and start, and under the same id (`scotstoun/2026-11-25@18:00`)
 `gate: null`, `status: "booked"`, `why: null`, and `end` an hour after `start`. So the schedule does
 not book that slot again, a later result for it does not count twice, and like every Glasgow Club
 booking it counts toward no allowance. No card, note or notification comes with it: the hold's own
-(`"Booked · Scotstoun outdoor court 1"`) has said so. A booking already kept for that id stands; a
-"not booked" one is replaced. A hold that ends any other way keeps no result.
+(`"Booked · Scotstoun outdoor court 1"`) has said so. Where no note says so (a hold the bot gave up
+on and your PC later found booked, or one the bot was not following, paid for at your PC with "I
+have paid"), a quiet wake goes instead, for the app's widgets (see "Notes and notifications"). A
+booking already kept for that id stands; a "not booked" one is replaced. A hold that ends any other
+way keeps no result.
 A hold of two courts (2.11) is one result too, under the same id: `court: "3 & 4"`, `courts: [3, 4]`,
 `price` the total your PC read at the basket, `paid: true` (its note: `"Booked · Gorbals courts 3 & 4"`).
 The courts are the ones your PC's "booked" note names (its `courts`, or its `court` alone from a PC
@@ -725,7 +728,9 @@ says "ClubSpark asked for payment; nothing was booked or paid".
   says go only to a booking it still follows; your PC does nothing at all unless this bot has heard
   it start.
 - How it ends is an ordinary result (`results`, with the court and gate code when booked) with a
-  card in Telegram, a note and a notification, as the nightly run's results have. At Kelvingrove
+  card in Telegram, a note and a notification, as the nightly run's results have (kept even when
+  Telegram will not take the card: then with no note, and a quiet wake for the app's widgets
+  instead, see "Notes and notifications"). At Kelvingrove
   its id is the nightly run's own (`YYYY-MM-DD@HH:MM`): a one-off on the list for that slot then
   counts as booked. Elsewhere the park is in front of it.
 - A booking counts towards its week (`allowance`) as soon as it is booked.
@@ -1463,6 +1468,33 @@ in the bot's log and nowhere else, with anything shaped like a push token masked
 answers that a token is not registered any more (`DeviceNotRegistered`), the bot forgets that
 phone's push token: the phone stays linked, and gets notifications again once the app sends
 `POST /app/push` with a token. A phone that has been unlinked is sent nothing.
+
+### Waking the app for its widgets
+
+The app's Home Screen widgets and today's court on the Lock Screen show what is booked, and the app
+writes them only while it runs. So that a court booked with the app closed (the parks at 22:00,
+Glasgow Club at midnight) reaches them, two kinds of notification also wake the app in the
+background for a moment, for it to read `GET /app/state` once and write them again:
+
+- **A note about a result** (one with a `ref`: `booked`, `missed`, and a `hold` that ended booked,
+  whether from the nightly run, Glasgow Club's midnight, Book now or a hold paid for) carries
+  `_contentAvailable: true`, which Expo's push service passes to Apple as `content-available: 1`.
+  Nothing else about it changes: the same `title`, `body`, sound, `data: { ref }` and priority, shown
+  as ever. Every other note's notification is as it was, and does not wake the app.
+- **A quiet wake**, where what is booked changes and no note says so: a booking kept from a hold no
+  note tells of (see "A Glasgow Club court held and then booked" under `results`), a Book now
+  booking kept although Telegram would not take its card, and a booking your PC sends again for the
+  same court with something new in it (its gate code, what was paid). It is
+  `{ to, data: { refresh: "state" }, _contentAvailable: true, priority: "normal" }`: no `title`, no
+  `body`, no sound, so it is shown nowhere (Expo calls it a headless background notification), at
+  APNs priority 5, which Apple asks of a notification that only wakes an app. At most three go in
+  any six hours (Apple asks for no more than two or three an hour); one past that is not sent, and
+  the log says so ("The app was not woken for its widgets …"), as it says each that goes ("Woke the
+  app for its widgets: …"). The count is kept in memory: a restart of the bot starts it again.
+
+Either is best effort, as every notification is, and iOS decides whether and when to wake the app:
+it may hold one back (Low Power Mode, or too many lately), and it wakes no app the owner has swiped
+away. The app's `data` is only a hint; it reads the state the same way whatever woke it.
 
 ## Known limits
 

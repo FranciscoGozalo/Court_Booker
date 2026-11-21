@@ -433,6 +433,21 @@ test('Book now, end to end: asked, collected, each step, the go-ahead, booked; a
   assert.deepEqual(pcSays(t, 'book', { id, stage: 'booking' }), { ok: true, stop: true });
 });
 
+test('Book now with Telegram down: the booking is kept all the same, and with no note to tell of it the app is woken quietly', async () => {
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  const { id } = await bookingCollected(t, phone);
+  assert.deepEqual(pcSays(t, 'book', { id, stage: 'booking' }), { ok: true, go: true });
+  t.tg.failSend = 1;
+  assert.deepEqual(pcSays(t, 'book', { id, stage: 'booked', court: '1', gate: '4821' }), { ok: true });
+  await settle();
+  const s = stateOf(t, phone);
+  assert.deepEqual([s.results[0].id, s.results[0].status, s.results[0].gate], ['queenspark/2026-11-20@18:00', 'booked', '4821']);
+  assert.deepEqual(s.notes.filter(n => n.kind === 'booked'), []);
+  assert.deepEqual(t.pushes, [{ tokens: [PUSH_TOKEN], wake: true, data: { refresh: 'state' } }]);
+  assert.ok(t.logs.includes('Woke the app for its widgets: queenspark/2026-11-20@18:00 was booked, and Telegram would not take its card.'));
+});
+
 test('Kelvingrove booked now is a result under its usual id, so the nightly run does not book that slot again', async () => {
   const t = makeBot(NOON, { state: { once: [{ date: FRI, start: 1080, hours: 1 }] } });
   const phone = await linkPhone(t);

@@ -261,26 +261,57 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // push service no longer knows stays linked, but gets no more notifications until the app
   // gives a token again.
   // `ref` (2.10.4): the result the note is about, so the app opens that court when it, or its notification, is tapped.
+  // A note about a result (one with a `ref`: a court booked or not, by the nightly run, at Glasgow
+  // Club's midnight or with Book now, and a hold that ended booked) also wakes the app on the phone
+  // in the background for a moment (lib/push.js, `wake`), so its widgets catch up with the app closed.
   function note(kind, title, body, ref = null) {
     try {
       const n = A.makeNote(kind, title, body, now(), ref);
       state.notes = [n, ...state.notes].slice(0, A.NOTES_KEEP);
       save();
-      const tokens = [...new Set(state.apps.map(d => d.push).filter(Boolean))];
-      if (tokens.length) {
-        Promise.resolve().then(() => pushOut(tokens, n.ref ? { title: n.title, body: n.body, data: { ref: n.ref } } : { title: n.title, body: n.body }))
-          .then(told => {
-            const gone = told && Array.isArray(told.unregistered) ? told.unregistered : [];
-            const phones = state.apps.filter(d => d.push && gone.includes(d.push));
-            if (!phones.length) return;
-            for (const d of phones) d.push = null;
-            save();
-            log(`The push service no longer knows ${phones.length === 1 ? 'a linked phone' : `${phones.length} linked phones`}, so no more notifications go there until the app asks for them again.`);
-          })
-          .catch(e => log(`A notification could not be sent: ${maskPush((e && e.message) || e)}`));
-      }
+      const tokens = pushTokens();
+      if (tokens.length) sendPush(tokens, n.ref ? { title: n.title, body: n.body, data: { ref: n.ref }, wake: true } : { title: n.title, body: n.body });
     } catch (e) {
       log(`Could not keep a note for the app: ${(e && e.message) || e}`);
+    }
+  }
+  // The push tokens the linked phones gave, each once.
+  function pushTokens() { return [...new Set(state.apps.map(d => d.push).filter(Boolean))]; }
+  // One notification to those phones, not waited for. Nothing here can throw.
+  function sendPush(tokens, message) {
+    Promise.resolve().then(() => pushOut(tokens, message))
+      .then(told => {
+        const gone = told && Array.isArray(told.unregistered) ? told.unregistered : [];
+        const phones = state.apps.filter(d => d.push && gone.includes(d.push));
+        if (!phones.length) return;
+        for (const d of phones) d.push = null;
+        save();
+        log(`The push service no longer knows ${phones.length === 1 ? 'a linked phone' : `${phones.length} linked phones`}, so no more notifications go there until the app asks for them again.`);
+      })
+      .catch(e => log(`A notification could not be sent: ${maskPush((e && e.message) || e)}`));
+  }
+  // What is booked changed, and no note says so: a booking kept from a hold that no note tells of
+  // (paid for at your PC after this bot gave up on the hold, or restarted while your PC held it), a
+  // booking kept though Telegram would not take its card (Book now), or one your PC sends again with
+  // something new in it (its gate code, what was paid). The app's widgets show what is booked, so the
+  // phones are sent a quiet wake (lib/push.js: no title, no body, no sound; `data: { refresh:
+  // 'state' }`) for the app to read the state again in the background. Three in six hours at most:
+  // Apple asks for no more than two or three of these an hour, and past that the app's own refresh in
+  // the background catches up later. Best effort, as a note's notification is.
+  const APP_WAKE_MAX = 3, APP_WAKE_MS = 6 * 60 * 60 * 1000;
+  let appWakes = [];                        // when the quiet wakes went, over the last six hours (this run only)
+  function wakeApp(why) {
+    try {
+      const tokens = pushTokens();
+      if (!tokens.length) return;
+      const t = now();
+      appWakes = appWakes.filter(at => t - at < APP_WAKE_MS);
+      if (appWakes.length >= APP_WAKE_MAX) { log(`The app was not woken for its widgets (${APP_WAKE_MAX} quiet wakes in six hours already): ${why}.`); return; }
+      appWakes.push(t);
+      log(`Woke the app for its widgets: ${why}.`);
+      sendPush(tokens, { wake: true, data: { refresh: 'state' } });
+    } catch (e) {
+      log(`Could not wake the app: ${(e && e.message) || e}`);
     }
   }
   // A message's own words as a note: its first line is the title, the `lines` after it the body.
@@ -651,17 +682,22 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // same venue, date and start, and under the same id (lib/venues.js, resultId). So a weekly
   // booking or a one-off for that slot is not booked again, and a later result for it does not
   // count twice. Like every Glasgow Club booking it counts toward no allowance. Its card and its
-  // note have told of it already: nothing more is said. `c`: { key, date, start, court, courts }
+  // note tell of it, when it has them: nothing more is said here. `c`: { key, date, start, court, courts }
   // (a hold, or a note about one); `price`: as your PC read it, the total for two courts. Two
   // courts (2.11) are one result for the slot: `court` "3 & 4", `courts` [3, 4]. One is kept as
   // before 2.11, `court` alone.
+  // True when it is a booking kept anew (none was kept for that id: one kept stands), so that a
+  // caller with no note that tells of it wakes the app for its widgets (wakeApp).
   function holdBooked(c, price) {
     const centre = G.CENTRES[c.key];
-    if (!centre) return;
+    if (!centre) return false;
     const courts = A.courtList(c.courts) || [c.court];
-    resultFromAgent({ id: V.resultId(centre.venue, c.date, c.start), status: 'booked', type: centre.type, end: c.start + 60, court: courts.join(' & '),
+    const id = V.resultId(centre.venue, c.date, c.start);
+    const had = state.results[id];
+    resultFromAgent({ id, status: 'booked', type: centre.type, end: c.start + 60, court: courts.join(' & '),
       ...(courts.length > 1 ? { courts } : {}), price: typeof price === 'string' ? price : null, paid: true }, { quiet: true })
       .catch(e => log(`Could not keep the hold as a booking: ${e.message}`));
+    return !(had && had.status === 'booked');
   }
   // Until when Glasgow Club's site is to be left alone by your PC: it met a "checking your
   // browser" page there, holding a court or reading the sheet. 0 when it is not.
@@ -919,16 +955,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const t = now();
     const ending = HOLD_ENDS.includes(stage);
     // Booked: kept as a booking, whatever else is said of it (a court paid for with "I have paid" is said nothing more).
-    if (stage === 'booked' && courtOfNote(raw)) holdBooked(courtOfNote(raw), raw.price);
+    // A booking kept anew that no note below tells of still reaches the app's widgets: a quiet wake.
+    const keptAnew = stage === 'booked' && !!courtOfNote(raw) && holdBooked(courtOfNote(raw), raw.price);
+    const untold = () => { if (keptAnew) wakeApp('a hold I am not following ended booked'); };
     const s = strangers.get(id) || { going: false, ended: false, failed: false, pressed: null, court: null };
     const said = pressOf(raw, stage);
     s.pressed = said ? stronger(s.pressed || false, said) : s.pressed;   // the PC link's "gone" may say nothing of a press: what an earlier note said stands
     const couldNot = !ending && stage === 'held' && raw.pay === 'failed' && !s.pressed;
-    if (!s.pressed && !couldNot) return;
+    if (!s.pressed && !couldNot) return untold();
     if (!s.court) s.court = courtOfNote(raw);
     strangers.set(id, s);
     if (strangers.size > 20) strangers.delete(strangers.keys().next().value);
-    if (couldNot ? s.failed || s.ended : ending ? s.ended : s.going || s.ended) return;
+    if (couldNot ? s.failed || s.ended : ending ? s.ended : s.going || s.ended) return untold();
     if (couldNot) s.failed = true; else if (ending) s.ended = true; else s.going = true;
     const scr = UI.indoorHoldStray(ctx(), { ...(s.court || {}), stage: 'held', pressed: s.pressed || false, end: ending ? stage : null, why: noteText(raw.why), words: noteText(raw.words),
       basket: BASKETS.includes(raw.basket) ? raw.basket : '', removed: null, checked: raw.checked === true, bank: ['approve', 'code'].includes(raw.bank) ? raw.bank : '',
@@ -959,7 +997,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const h = hold && id === hold.id ? hold : (id && former.get(id)) || null;
     if (!h) {
       if (id && gaveUp.has(id)) {
-        if (stage === 'booked' && courtOfNote(raw)) holdBooked(courtOfNote(raw), raw.price);     // given up on here, and paid for at your PC all the same
+        // Given up on here, and paid for at your PC all the same: kept as a booking, which no note tells of (its hold's said it ended).
+        if (stage === 'booked' && courtOfNote(raw) && holdBooked(courtOfNote(raw), raw.price)) wakeApp('a hold given up on here was booked at your PC');
         return { ok: true, order: 'release' };
       }
       if (id && /^[0-9a-f]{6,40}$/.test(id)) strangerNote(raw, id, stage);
@@ -1469,11 +1508,16 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // (POST /app/clubspark/look and /book), and your PC answers on POST /agent/clubspark/*. A
   // booking's outcome is an ordinary result: the card, the note and the push. It is kept even when
   // Telegram will not take the card, as is a job the weekly allowance keeps from the nightly run.
+  // Then there is no note either: a booking so kept wakes the app quietly for its widgets.
   async function keepResult(raw) {
     try { return await resultFromAgent(raw); } catch (e) {
       log(`Could not send the card for ${raw.id}: ${e.message}`);
       const r = cleanResult(raw), prev = r && state.results[r.id];
-      if (r && !(prev && prev.status === 'booked')) { state.results[r.id] = { ...r, at: now() }; save(); }
+      if (r && !(prev && prev.status === 'booked')) {
+        state.results[r.id] = { ...r, at: now() };
+        save();
+        if (r.status === 'booked') wakeApp(`${r.id} was booked, and Telegram would not take its card`);
+      }
       return { ok: true };
     }
   }
@@ -1992,7 +2036,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // The PC says what happened. The message goes out first: if Telegram fails, the PC is told
   // so and tries again, and nothing is recorded twice.
   // `quiet`: kept without a card, a note or a push, for a booking that has been told of already
-  // (a hold that ended booked: see holdBooked). Then a booking kept for that id stands.
+  // (a hold that ended booked: see holdBooked, whose caller wakes the app when no note tells of it).
+  // Then a booking kept for that id stands.
+  // A booking the PC sends again for the same court, with something new in it (its gate code, what
+  // was paid), has no card or note either; the app's widgets show those, so it wakes the app quietly.
   async function resultFromAgent(raw, { quiet = false } = {}) {
     const r = cleanResult(raw);
     if (!r) return { ok: false, why: 'that result is missing something or does not make sense' };
@@ -2013,6 +2060,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         : r.gate ? `gate ${r.gate}` : 'gate code not shown';
       if (r.status === 'booked') note('booked', `${M.courtWords(r)} booked`, `${M.slotOf(r)} · ${after}`, r.id);       // "Courts 3 & 4 booked" for two (2.11)
       else note('missed', 'Not booked', `${M.slotOf(r)}. ${A.plain(M.failedWhy(r))}`, r.id);
+    } else if (!quiet && prev && r.status === 'booked' && JSON.stringify({ ...prev, at: 0 }) !== JSON.stringify({ ...r, at: 0 })) {
+      wakeApp(`${r.id} was sent again, changed`);
     }
     return { ok: true };
   }

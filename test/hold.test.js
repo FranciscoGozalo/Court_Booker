@@ -267,6 +267,7 @@ test('a hold paid for and booked is kept as a booking, under the midnight run\'s
   assert.equal(t.app.state.notes[0].ref, GORBALS_FRI);                                         // tapped, the app opens the booking (2.10.4)
   assert.equal(t.pushes.length, pushes + 1);
   assert.deepEqual(t.pushes.at(-1).data, { ref: GORBALS_FRI });
+  assert.equal(t.pushes.at(-1).wake, true);                                                    // and it wakes the app, for its widgets: no second, quiet one
   // The app's results show it as any other booking at Glasgow Club.
   const shown = t.app.appState(phone).state.results.find(r => r.id === GORBALS_FRI);
   assert.deepEqual({ ...shown, at: 0 }, {
@@ -360,6 +361,45 @@ test('a hold this bot is not following (it restarted) that ends booked is kept a
   // A note that does not say which court it was keeps nothing.
   fresh.app.holdFromAgent({ id: 'c1b2c3d4e5f6', stage: 'booked', words: '' });
   assert.equal(Object.keys(fresh.app.state.results).length, 2);
+});
+
+test('a booking kept from a hold that no note tells of wakes the app quietly, for its widgets', async () => {
+  const QUIET = { wake: true, data: { refresh: 'state' } };
+  // The bot restarted while your PC held the court, and it was paid for at your PC (I have paid): kept, said nothing of, and the app woken.
+  const fresh = makeApp(`${TUE}T12:05:00Z`);
+  await linkPhone(fresh);
+  fresh.app.holdFromAgent({ id: 'b1b2c3d4e5f6', key: 'g', date: FRI, start: 1080, court: 3, stage: 'booked', words: '' });
+  await settle();
+  assert.equal(keptAs(fresh, GORBALS_FRI).status, 'booked');
+  assert.deepEqual(fresh.pushes, [QUIET]);
+  assert.ok(fresh.logs.includes('Woke the app for its widgets: a hold I am not following ended booked.'));
+  // Said again: the booking stands, and nothing more goes.
+  fresh.app.holdFromAgent({ id: 'b1b2c3d4e5f6', key: 'g', date: FRI, start: 1080, court: 3, stage: 'booked', words: '' });
+  await settle();
+  assert.equal(fresh.pushes.length, 1);
+  // One whose PC says Pay was pressed: its "Booked" note wakes the app, and no quiet wake goes besides.
+  fresh.app.holdFromAgent({ id: 'a1b2c3d4e5f6', key: 's', date: FRI, start: 1140, court: 2, stage: 'booked', words: '', price: '£23.00', pressed: true });
+  await settle();
+  assert.deepEqual(fresh.pushes.slice(1).map(p => [/^Booked · /.test(p.title), p.data, p.wake]), [[true, { ref: 'scotstoun/2026-11-20@19:00' }, true]]);
+  // A hold given up on here (no more word from your PC), with another started since: your PC's later
+  // word that it was booked after all is kept, with no note, and wakes the app.
+  const t = await started();
+  await linkPhone(t);
+  held(t);
+  t.clock.t = at(`${TUE}T12:19:00Z`);
+  await t.app.tick();
+  await settle();
+  assert.equal(t.app.state.notes[0].title, 'Hold ended · Gorbals court 3');
+  await t.app.pingFromAgent({ ip: '81.2.69.142' });
+  const ping = t.app.pingFromAgent({ ip: '81.2.69.142' }, { wait: 5 });
+  await tap(t.app, 'gh:g:20261120:1900:3', 8);
+  assert.ok((await ping).hold);
+  const before = t.pushes.length;
+  assert.deepEqual(note(t, 'booked', { words: '' }), { ok: true, order: 'release' });
+  await settle();
+  assert.equal(keptAs(t, GORBALS_FRI).status, 'booked');
+  assert.deepEqual(t.pushes.slice(before), [QUIET]);
+  assert.ok(t.logs.includes('Woke the app for its widgets: a hold given up on here was booked at your PC.'));
 });
 
 // ---------- two courts at once (2.11) ----------

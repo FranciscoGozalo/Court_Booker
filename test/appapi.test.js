@@ -1446,7 +1446,7 @@ test('a hold from the app, end to end: asked, collected, signed in, in the baske
   await settle();
   const note = stateOf(t, t.phone).notes[0];
   assert.deepEqual([note.kind, note.title, note.body, note.at], ['hold', 'Hold ended · Gorbals court 3', 'Fri 20 Nov · 18:00–19:00. Let go. Not paid.', at(NOON) + 35000]);
-  assert.deepEqual(t.pushes, [{ tokens: [PUSH_TOKEN], title: note.title, body: note.body }]);
+  assert.deepEqual(t.pushes, [{ tokens: [PUSH_TOKEN], title: note.title, body: note.body }]);      // nothing booked changed: it does not wake the app
   // Nothing of it went to Telegram: a hold started from the app has no card there.
   assert.equal(t.tg.calls.length, 0);
   assert.ok(t.logs.includes('Hold asked for: Gorbals 2026-11-20 18:00 court 3.'));
@@ -1470,6 +1470,7 @@ test('I have paid from the app: the PC looks at the Bookings page, and "booked" 
   assert.deepEqual([h.ended, h.live, h.lines], ['booked', false, ['Booked. Now on your Glasgow Club Bookings page.', 'The page said: “Thank you <Francisco>. Reference ########”']]);
   await settle();
   assert.deepEqual(t.pushes.map(p => [p.title, p.body]), [['Booked · Gorbals court 3', 'Fri 20 Nov · 18:00–19:00. Booked. Now on your Glasgow Club Bookings page. The page said: “Thank you <Francisco>. Reference ########”']]);
+  assert.deepEqual([t.pushes[0].data, t.pushes[0].wake], [{ ref: 'gorbals/2026-11-20@18:00' }, true]);      // a hold paid is a booking: it wakes the app, once
   assert.equal(stateOf(t, t.phone).notes[0].kind, 'hold');
 });
 
@@ -1680,7 +1681,8 @@ test('a court booked, or not, is a note and a notification, in the card\'s own f
   assert.deepEqual(Object.keys(notes[0]), ['id', 'at', 'kind', 'title', 'body', 'ref']);
   assert.equal(notes[0].ref, '2026-11-24@16:00');                     // tapped, the app opens that court (2.10.4)
   // One notification, to every phone that gave a token (and not to the one that did not), carrying the court it is about.
-  assert.deepEqual(t.pushes, [{ tokens: [PUSH_TOKEN, 'ExpoPushToken[second-phone]'], title: 'Court 3 booked', body: 'Tue 24 Nov · 16:00–18:00 · gate 2433', data: { ref: '2026-11-24@16:00' } }]);
+  // About a result, it wakes the app as well, so the widgets catch up with the app closed.
+  assert.deepEqual(t.pushes, [{ tokens: [PUSH_TOKEN, 'ExpoPushToken[second-phone]'], title: 'Court 3 booked', body: 'Tue 24 Nov · 16:00–18:00 · gate 2433', data: { ref: '2026-11-24@16:00' }, wake: true }]);
   // The same result again (the PC retrying) is neither said nor noted twice.
   await t.app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 });
   await settle();
@@ -1701,6 +1703,7 @@ test('a court booked, or not, is a note and a notification, in the card\'s own f
     ['booked', 'Court 3 booked', 'Tue 24 Nov · 16:00–18:00 · gate 2433'],
   ]);
   assert.deepEqual(t.pushes.map(p => p.title), ['Court 3 booked', 'Court 4 booked', 'Not booked', 'Not booked']);
+  assert.ok(t.pushes.every(p => p.wake === true));                                         // every result wakes the app, booked or not
   assert.deepEqual(notes.map(n => n.ref), ['2026-11-24@20:00', '2026-11-24@19:00', '2026-11-25@19:00', '2026-11-24@16:00']);   // a miss opens its date
   assert.deepEqual(t.store.load().notes, t.app.state.notes);
   // A result Telegram would not take is not recorded, and not noted: the PC sends it again.
@@ -1878,6 +1881,62 @@ test('notifications go to Expo\'s push service as one request, and whatever goes
     'A notification could not be sent: getaddrinfo ENOTFOUND exp.host',
     'A notification could not be sent: The operation was aborted due to timeout',
   ]);
+});
+
+test('a notification that wakes the app carries content-available; a quiet wake is shown nowhere: no words, no sound, normal priority', async () => {
+  const sent = [];
+  const push = createExpoPush({ fetchImpl: async (url, init) => { sent.push(JSON.parse(init.body)); return new Response(JSON.stringify({ data: [{ status: 'ok' }] }), { status: 200 }); } });
+  // A note about a result: shown as ever, and it wakes the app besides (Expo passes `_contentAvailable` to Apple as content-available).
+  await push([PUSH_TOKEN], { title: 'Court 3 booked', body: 'Thu 26 Nov · 19:00–21:00 · gate 2433', data: { ref: '2026-11-26@19:00' }, wake: true });
+  // A quiet wake: only the wake and its data, at the priority Apple asks of one that only wakes an app.
+  await push([PUSH_TOKEN, 'ExpoPushToken[b]'], { wake: true, data: { refresh: 'state' } });
+  // No words and no wake is nothing: never sent.
+  assert.deepEqual(await push([PUSH_TOKEN], { data: { refresh: 'state' } }), { unregistered: [] });
+  // Any other note, as before: no wake.
+  await push([PUSH_TOKEN], { title: 'Your PC stayed awake', body: 'It did not go to sleep: busy.' });
+  assert.deepEqual(sent, [
+    [{ to: PUSH_TOKEN, title: 'Court 3 booked', body: 'Thu 26 Nov · 19:00–21:00 · gate 2433', sound: 'default', data: { ref: '2026-11-26@19:00' }, _contentAvailable: true }],
+    [{ to: PUSH_TOKEN, data: { refresh: 'state' }, _contentAvailable: true, priority: 'normal' }, { to: 'ExpoPushToken[b]', data: { refresh: 'state' }, _contentAvailable: true, priority: 'normal' }],
+    [{ to: PUSH_TOKEN, title: 'Your PC stayed awake', body: 'It did not go to sleep: busy.', sound: 'default' }],
+  ]);
+});
+
+test('a booking your PC sends again with something new in it wakes the app quietly, at most three times in six hours', async () => {
+  const t = makeBot(`${TUE}T22:00:10Z`);
+  const phone = await linkPhone(t);
+  await ask(t, phone, 'push', { token: PUSH_TOKEN });
+  const booked = (extra = {}) => t.app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, end: 1080, ...extra });
+  await booked();
+  await settle();
+  assert.deepEqual(t.pushes.map(p => [p.title, p.wake]), [['Court 3 booked', true]]);
+  t.tg.clear();
+  // The same again changes nothing: nothing goes. With its gate code now: no card and no note, but the app is woken, with no words.
+  await booked();
+  await settle();
+  assert.equal(t.pushes.length, 1);
+  await booked({ gate: '2433' });
+  await settle();
+  assert.deepEqual([t.tg.calls.length, stateOf(t, phone).notes.length, stateOf(t, phone).results[0].gate], [0, 1, '2433']);
+  assert.deepEqual(t.pushes.slice(1), [{ tokens: [PUSH_TOKEN], wake: true, data: { refresh: 'state' } }]);
+  assert.ok(t.logs.includes('Woke the app for its widgets: 2026-11-24@16:00 was sent again, changed.'));
+  // Two more; the fourth in six hours is left to the app's own refresh in the background.
+  for (const gate of ['2434', '2435', '2436']) { t.clock.t += 60 * 1000; await booked({ gate }); }
+  await settle();
+  assert.equal(t.pushes.length, 4);
+  assert.ok(t.logs.includes('The app was not woken for its widgets (3 quiet wakes in six hours already): 2026-11-24@16:00 was sent again, changed.'));
+  assert.equal(stateOf(t, phone).results[0].gate, '2436');                                   // kept all the same
+  // Six hours after the first, one goes again.
+  t.clock.t = at(`${TUE}T22:00:10Z`) + 6 * 60 * 60 * 1000;
+  await booked({ gate: '2437' });
+  await settle();
+  assert.equal(t.pushes.length, 5);
+  // A "not booked" after it leaves the booking standing: nothing changed, nothing goes. Nor with no phone asking for notifications.
+  await t.app.resultFromAgent({ id: '2026-11-24@16:00', status: 'none', end: 1080 });
+  await ask(t, phone, 'push', { token: null });
+  t.clock.t += 6 * 60 * 60 * 1000;
+  await booked({ gate: '2438' });
+  await settle();
+  assert.equal(t.pushes.length, 5);
 });
 
 test('a push token is never written in the log; a phone Expo no longer knows stays linked but gets no more notifications', async () => {
