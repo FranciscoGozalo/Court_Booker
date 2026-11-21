@@ -1454,7 +1454,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // many as it may; `allowance`: because of the weekly allowance, lib/allowance.js), { already:
   // true } when that venue, date and time are on the list, or { added: true }. Kelvingrove's go on
   // its own list, as they always have (`once`); every other venue's on theirs (`onceAway`, 2.10).
-  // `auth` (2.10.1): the app's signature for it, kept to hand to your PC (never shown or logged).
+  // `auth` (2.10.1): the app's signature for it, kept to hand to your PC (never logged; shown back
+  // to the app since 2.11, which checks it itself).
   // A one-off already on the list keeps its hours; a signature sent with it again takes the place
   // of the one it had. `courts` (2.11): 1, or 2 at Glasgow Club (lib/appapi.js has checked it).
   // Sent again with another number of courts, a one-off takes it, with the signature sent along
@@ -2422,15 +2423,17 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       later: releases.slice(1).map(releaseOf),
       open: open.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end })),
       plan: [1, 2, 3, 4, 5, 6, 0].map(i => DAY_KEYS[i]).filter(k => state.plan[k]).map(k => ({ day: k, start: state.plan[k].start, hours: state.plan[k].hours })),
+      // `auth` (2.11): the signature the app sent, or null, so that an app from 2.11 checks it against
+      // the card's pay key itself. It is no secret: only the app and your PC can make one.
       weekly: state.weekly.map(w => ({ id: w.id, venue: w.venue, type: w.type, day: w.day, start: w.start, hours: w.hours, end: slotEnd(w.start, w.hours), on: w.on, next: w.on ? nextOf(w, t) : null, signed: !!w.auth,
-        courts: courtsOf(w) })),                                       // 2.11: 1, or 2 at Glasgow Club
+        courts: courtsOf(w), auth: w.auth || null })),                 // 2.11: courts 1, or 2 at Glasgow Club
       once: [...state.once.map(o => ({ ...o, venue: V.SCHEDULED, type: 'outdoor' })), ...state.onceAway]
         .filter(o => londonInstant(civilOf(o.date), o.start) > t)
         .sort((a, b) => (a.date === b.date ? a.start - b.start || V.VENUE_KEYS.indexOf(a.venue) - V.VENUE_KEYS.indexOf(b.venue) : a.date < b.date ? -1 : 1))
         .map(o => {
           const opens = opensAtFor(o.venue, civilOf(o.date), c);
           return { id: V.resultId(o.venue, o.date, o.start), venue: o.venue, type: o.type, date: o.date, start: o.start, hours: o.hours, end: slotEnd(o.start, o.hours), opensAt: opens, open: opens <= t, signed: !!o.auth,
-            courts: courtsOf(o) };                                       // 2.11: 1, or 2 at Glasgow Club
+            courts: courtsOf(o), auth: o.auth || null };                 // 2.11: as in weekly
         }),
       order: state.order.slice(),
       results,

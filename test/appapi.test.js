@@ -722,12 +722,12 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
     plan: [{ day: 'tue', start: 960, hours: 2 }, { day: 'thu', start: 1140, hours: 1 }],
     // 2.10: the same, as weekly entries (Kelvingrove's), each with the day it is next booked for and when that opens.
     weekly: [
-      { id: 'f7de6e62', venue: 'kelvingrove', type: 'outdoor', day: 'tue', start: 960, hours: 2, end: 1080, on: true, next: { date: '2026-11-24', opensAt: at('2026-11-17T22:00:00Z') }, signed: false, courts: 1 },
-      { id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 1, end: 1200, on: true, next: { date: '2026-11-26', opensAt: at('2026-11-19T22:00:00Z') }, signed: false, courts: 1 },
+      { id: 'f7de6e62', venue: 'kelvingrove', type: 'outdoor', day: 'tue', start: 960, hours: 2, end: 1080, on: true, next: { date: '2026-11-24', opensAt: at('2026-11-17T22:00:00Z') }, signed: false, courts: 1, auth: null },
+      { id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 1, end: 1200, on: true, next: { date: '2026-11-26', opensAt: at('2026-11-19T22:00:00Z') }, signed: false, courts: 1, auth: null },
     ],
     once: [
-      { id: '2026-11-20@19:00', date: FRI, start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-13T22:00:00Z'), open: true, venue: 'kelvingrove', type: 'outdoor', signed: false, courts: 1 },
-      { id: '2026-11-27@10:00', date: '2026-11-27', start: 600, hours: 1, end: 660, opensAt: at('2026-11-20T22:00:00Z'), open: false, venue: 'kelvingrove', type: 'outdoor', signed: false, courts: 1 },
+      { id: '2026-11-20@19:00', date: FRI, start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-13T22:00:00Z'), open: true, venue: 'kelvingrove', type: 'outdoor', signed: false, courts: 1, auth: null },
+      { id: '2026-11-27@10:00', date: '2026-11-27', start: 600, hours: 1, end: 660, opensAt: at('2026-11-20T22:00:00Z'), open: false, venue: 'kelvingrove', type: 'outdoor', signed: false, courts: 1, auth: null },
     ],
     order: [3, 4, 5, 2, 1, 6],
     // Today and later first, soonest first; then what is past, newest first.
@@ -953,7 +953,7 @@ test('a one-off date from the app is the same as /book: added, already there, or
   let r = await ask(t, phone, 'once', { date: '2026-11-25', start: 1140, hours: 2 });
   assert.equal(r.status, 200);
   assert.deepEqual(Object.keys(r.body), ['ok', 'etag', 'state']);
-  assert.deepEqual(r.body.state.once, [{ id: '2026-11-25@19:00', venue: 'kelvingrove', type: 'outdoor', date: '2026-11-25', start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-18T22:00:00Z'), open: false, signed: false, courts: 1 }]);
+  assert.deepEqual(r.body.state.once, [{ id: '2026-11-25@19:00', venue: 'kelvingrove', type: 'outdoor', date: '2026-11-25', start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-18T22:00:00Z'), open: false, signed: false, courts: 1, auth: null }]);
   assert.equal(r.body.etag, t.app.appState(phone.device).etag);
   assert.deepEqual(t.store.load().once, [{ date: '2026-11-25', start: 1140, hours: 2 }]);
   assert.deepEqual(t.app.state.once, (await inTelegram(NOON, {}, '/book 25 nov 19:00 2h')).state.once);

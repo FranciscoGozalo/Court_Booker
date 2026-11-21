@@ -21,7 +21,9 @@ Everything else adds no new power.
 
 This file describes the API as built in version 2.11.0 (`api: 3`; 2.11.0 added two courts at once at Glasgow Club, by fields
 only: `courts` on `POST /app/hold` and in `hold` (with `courtNames` and `prices`), and `courts` on weekly bookings, one-off
-dates and results, and in the signature's words for two courts (see "Two courts at once (2.11)"); 2.10.4 added `ref` to each note, the result it is about, and the
+dates and results, and in the signature's words for two courts (see "Two courts at once (2.11)"); and each weekly booking's
+and one-off date's signature itself, `weekly[].auth` and `once[].auth`, which an app from 2.11 checks against the card's pay
+key instead of signing anything afresh by itself (see "Signed bookings"); 2.10.4 added `ref` to each note, the result it is about, and the
 same as `data.ref` on its notification (see "Notes and notifications"); 2.10.3 changed no field's shape: a Glasgow Club court
 held and paid for now also shows in `results`, a hold's `pay` order may ask your PC to use the security code it keeps (see
 "The sealed box"), and many sentences are shorter: `pc.line`, the hold's `lines`, a look's `note`, and the `why` of many
@@ -162,8 +164,8 @@ state = {
   later:   [ the same, for the releases after it (up to 3) ],
   open:    [ { id, date, start, end } ],             // one-off dates already open, which the PC books at its next run
   plan:    [ { day: "mon".."sun", start, hours } ],  // Kelvingrove's weekly bookings, one a day (api 2's view of weekly)
-  weekly:  [ { id, venue, type, day, start, hours, end, on, next, signed, courts } ],     // weekly bookings at every venue (api 3); courts (2.11): 1 or 2
-  once:    [ { id, venue, type, date, start, hours, end, opensAt, open, signed, courts } ],   // one-off dates still ahead, at every venue
+  weekly:  [ { id, venue, type, day, start, hours, end, on, next, signed, courts, auth } ],     // weekly bookings at every venue (api 3); courts (2.11): 1 or 2; auth (2.11): the signature, or null
+  once:    [ { id, venue, type, date, start, hours, end, opensAt, open, signed, courts, auth } ],   // one-off dates still ahead, at every venue
   order:   [3, 6, 1, 2, 4, 5],
   results: [ { id, venue, status: "booked" | "none" | "failed", date, start, end, court, gate, why, at, past, type, price, paid, courts } ],   // soonest upcoming first, then past ones newest first
   run:     null | { stage: "started" | "ready" | "trouble", at, why },    // tonight's run, as the PC reports it
@@ -358,14 +360,17 @@ Club). `end`: `start` plus the hours. `on`: an entry switched off is kept, and n
 `next`: `{ date, opensAt }`, the date it is booked for next and when that day opens (ms), or null
 when it is off. One venue, day and start once; several entries on a day are fine. The parks' count
 toward the weekly allowance; Glasgow Club's do not. `signed` (2.10.1): whether the bot keeps the
-app's signature for it (see "Signed bookings"); never the signature itself. `courts` (2.11): how many
-courts it books at once, 1, or 2 at Glasgow Club (always 1 at the parks); see "Two courts at once (2.11)".
+app's signature for it (see "Signed bookings"); kept as it was, for apps before 2.11. `auth` (2.11):
+that signature itself, the 32 lowercase hex characters as the app sent them, or null when it has
+none: an app from 2.11 checks it against the card's pay key itself, and re-signs nothing by itself.
+`courts` (2.11): how many courts it books at once, 1, or 2 at Glasgow Club (always 1 at the parks);
+see "Two courts at once (2.11)".
 
 **`once`**: the one-off dates whose start is still ahead (one that has started is left out, though
 the bot keeps it until midnight), at every venue (api 3), by date, start and venue. `id` as above;
 `venue` and `type` as in `weekly` (`"kelvingrove"`, `"outdoor"` for Kelvingrove's); `end` is `start`
 plus the hours; `opensAt` is when that day opens for booking at that venue; `open` is whether it has.
-`signed` (2.10.1) and `courts` (2.11) as in `weekly`.
+`signed` (2.10.1), `auth` (2.11) and `courts` (2.11) as in `weekly`.
 
 **`results`**: what the PC reported, kept for 60 days. First those dated today or later, soonest
 first; then the past ones, newest first. `past`: the date is before today (UK).
@@ -831,7 +836,8 @@ change of courts is signed afresh by the app (Face ID).
 card, or when automatic payments are switched on), one to 30 at a time: weekly bookings by their
 `id` (8 hex characters), one-off dates by theirs as `state.once` gives them (`"gorbals/2026-11-25@18:00"`;
 Kelvingrove's `"2026-11-25@18:00"`). All or nothing: one that is no longer on the list refuses the
-lot, and nothing changes.
+lot, and nothing changes. It stays for apps before 2.11, which use it; an app from 2.11 re-signs
+nothing by itself (it checks `weekly[].auth` and `once[].auth`), though it may still use it.
 
 - 400 "To sign bookings, send items: [{ id, auth }], one to 30 of them, each a weekly booking's or a one-off date's id and its 32 hex characters." (also for an id twice)
 - 409 "That weekly booking is no longer on your list (<id>). Nothing was changed." (or "That one-off date ...")
@@ -1241,11 +1247,18 @@ anything you did not save in your app.
   `court-broker/once/v1|gorbals|indoor|2026-11-25|1080|1` → `7e8fea3af1d796d60bf594483ef7a054`;
   and for two courts `court-broker/weekly/v2|gorbals|indoor|wed|1080|1|2` → `775461b248015a591db102a1d095807d`;
   `court-broker/once/v2|gorbals|indoor|2026-11-25|1080|1|2` → `f12b7ca19d33d2b217aa219c5be3fa95`.
-- The app sends it with `POST /app/weekly`, `/app/weekly/change` and `/app/once` (`auth`), and signs
-  everything afresh with `POST /app/weekly/auth` when the card changes (the signatures go with the old
-  pay key) or automatic payments are switched on. The state says `signed` for each; Kelvingrove's and
+- The app sends it with `POST /app/weekly`, `/app/weekly/change` and `/app/once` (`auth`). Apps
+  before 2.11 also sign everything afresh with `POST /app/weekly/auth` when the card changes (the
+  signatures go with the old pay key) or automatic payments are switched on; that request stays, for
+  them. The state says `signed` for each (kept for apps before 2.11) and, since 2.11, the signature
+  itself (`weekly[].auth`, `once[].auth`: the 32 hex characters as the app sent them, or null). It is
+  no secret: only the app and your PC, which have the pay key, can make one, and showing it lets
+  nobody else make another. An app from 2.11 re-signs nothing by itself: it checks each paid booking's
+  `auth` against the card's pay key, with the words above, and asks the owner to save (and so sign)
+  any that does not match again. Kelvingrove's and
   the other parks' are kept too, though nothing is paid there. The one-line `/backup` leaves them out, as it does the
-  linked phones: after a start from it, `signed` is false until the app signs again.
+  linked phones: after a start from it, `signed` is false and `auth` null until the app signs again.
+  The bot's log and Telegram never show one.
 - The PC checks it before it takes a court, with the pay key of the card it keeps, over the job's own
   venue, type, start and hours (and, 2.11, `courts`: v1 or v2 by it), and the weekday of its date (`from: "weekly"`) or its date
   (`from: "once"`). A job at its midnight goes with its weekly booking's signature when there is one,
@@ -1274,7 +1287,7 @@ The shapes, side by side:
 | app → bot | `POST /app/hold/order` (pay) | `amount: hold.price` | `amount: hold.price`, the total |
 | bot → app | `state.results[]` | `court: "3"`, `courts: null` (or `[3]` when the PC names it so) | one result for the slot: `court: "3 & 4"`, `courts: [3, 4]`, `price` the total, `paid` |
 | app → bot | `POST /app/weekly`, `/change`, `/app/once` | `courts` left out, or `1` | `courts: 2`, signed with the v2 words |
-| bot → app | `state.weekly[]`, `state.once[]` | `courts: 1` | `courts: 2` |
+| bot → app | `state.weekly[]`, `state.once[]` | `courts: 1`, `auth` (v1 words) or null | `courts: 2`, `auth` (v2 words) or null |
 | bot → PC | `GET /agent/jobs` (Glasgow Club's) | `courts: 1` | `courts: 2`, `auth` over the v2 words |
 | PC → bot | `POST /agent/result` | `court`, as before | `court: "3 & 4"` (or `3`), `courts: [3, 4]`, `price` the total |
 | PC → bot | `POST /agent/progress` (`stage: "bank"`) | `court` | `court: 3, courts: [3, 4]`, `price` the total |
