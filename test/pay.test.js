@@ -493,7 +493,7 @@ test('every refusal of Pay, in its own words, and a price that is not the one yo
   await pcPing(t);                                                                           // a card kept again
   // The PC's word for this court.
   t.beat({ pay: 'off', payWhy: 'that would be more than 2 payments from this PC today (GLASGOW_PAY_PER_DAY)' });
-  assert.deepEqual(await pay(), refused(409, 'Your PC cannot pay for this court: that would be more than 2 payments from this PC today (GLASGOW_PAY_PER_DAY).'));
+  assert.deepEqual(await pay(), refused(409, 'Your PC cannot pay for this court: that would be more than 2 payments from this PC today.'));          // its setting's name left out (2.12)
   t.beat();
   // The PC has gone quiet.
   t.clock.t += 75000;

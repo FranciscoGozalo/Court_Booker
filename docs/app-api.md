@@ -26,7 +26,7 @@ Everything else adds no new power.
 
 This file describes the API as built in version 2.13.0 (`api: 3`; 2.13 makes Telegram optional, by addition only:
 `state.telegram`, `POST /app/pair/code`, `POST /app/unpair/other` and the PC's `POST /agent/pair` (see "Who is asking");
-2.12 adds `pc.clubRun`; it signs Book now at Glasgow Club
+2.12 adds `pc.clubRun` and `glasgow.tried`; it signs Book now at Glasgow Club
 in words of its own, `court-broker/now/v1`, with the courts and the minute the app signed (`stamp`, required on
 `POST /app/glasgow/book` and handed on in the ping's `glasgowBook`), and shows the app each weekly booking's and one-off
 date's signature only by its sum, `weekly[].authSum` and `once[].authSum`, in place of `auth` (see "Signed bookings" and
@@ -195,7 +195,8 @@ state = {
               release: { daysAhead: 7, at }, paid, allowance } ],                // every venue, in a fixed order
   clubspark: { linked, days: { first, last }, quietUntil, lookNo, bookNo,  // the parks on ClubSpark
                reads: { used, max: 6, nextAt }, book: null | book },
-  glasgow: { linked, pcBooks, bookNo, payMax, book: null | glasgowBook },  // 2.11.3: Book now at Glasgow Club
+  glasgow: { linked, pcBooks, bookNo, payMax, book: null | glasgowBook,   // 2.11.3: Book now at Glasgow Club
+             tried: [ { id, venue, type, date, start, why } ] },           // 2.12: slots it refuses: Pay pressed, or may have been
   allowance: [ { week, sessions, hours, plannedSessions, plannedHours, maxSessions: 7, maxHours: 14 } ],   // this week, then next
   paused: false,
   kept: "disk" | "variable" | "no",
@@ -346,6 +347,18 @@ screens and flow are the parks'; only paying differs. See "Book now at Glasgow C
   asking for Face ID, so nothing is signed that could not be sent.
 - `payMax`: your PC's price cap a court, as its last ping said ("£30.00", its `GLASGOW_AUTO_PAY_MAX`),
   or null when no ping since the bot started has said it. The app shows it in the confirm.
+- `tried` (2.12): the Glasgow Club slots still to come that `POST /app/glasgow/book` refuses because
+  Pay was pressed for them, or may have been (a result kept with `paid` true or `"maybe"` and not
+  booked, from the midnight run or a Book now, or a Book now that has just ended so): your PC pays for
+  each slot once at most. Soonest first; `[]` when there is none. Each: `id` (the slot's result id,
+  "gorbals/2026-11-20@18:00"), `venue`, `type` (as kept: at Scotstoun, one id covers its indoor and
+  outdoor courts, and either is refused), `date`, `start`, and `why`, the very sentence the request
+  is refused with ("Your PC may already have paid for Gorbals on Fri 20 Nov at 18:00. Check Bookings
+  on Glasgow Club’s site and your banking app."). As with `bookNo`, the app looks here before it
+  asks for Face ID: for a slot listed (by `id`, or by `venue`, `date` and `start`, of either court
+  type) it says `why` and signs nothing. The way round, once you have looked under Bookings and in
+  your banking app, is a hold (not refused for it) or Glasgow Club's site (see "Known limits of Book
+  now at Glasgow Club"). An app older than 2.12 ignores it, and is refused after Face ID as before.
 - `book`: the booking being followed, or the last one, kept in memory only (null after a restart):
   - `id`: 12 hex characters. `venue`, `type`, `centre` (g, s or o), `venueName` ("Gorbals",
     "Scotstoun", "Scotstoun outdoor"). `date`, `start`, `end`, `hours` (always 1).
@@ -353,7 +366,13 @@ screens and flow are the parks'; only paying differs. See "Book now at Glasgow C
     or "Courts 3 & 4".
   - `stage`: `"asked"` → `"starting"` (Chrome is up on your PC) → `"signed-in"` → `"paying"` (it had
     this bot's go-ahead) → `"approve"` (your bank wants the payment approved in its app). It only
-    moves forwards and stays where it was when the booking ends.
+    moves forwards and stays where it was when the booking ends, but for one step (2.12): from
+    `"approve"` it is `"paying"` again once your PC no longer waits for the approval, so that the
+    app's "Approve … in your bank’s app." goes when you have approved, not only with the result. That
+    is when your PC's next word (a beat, every 30 seconds) says `paying` again (the approval came, or
+    the bank's check went from its page, and it waits for Glasgow Club's answer), or five minutes
+    after its first `approve` (as long as your PC waits for an approval). Its word says `approve` again
+    within those five minutes (the check came back): `"approve"` again. Your bank is asked about only once.
   - `live`: true while under way; the same as `ended === null`.
   - `ended`: your PC's result, `"booked"`, `"failed"` or `"none"`; `"refused"` (your PC did not
     start it), `"gone"` (its tool went without a result), `"quit"` (its tool stopped without one);
@@ -366,7 +385,8 @@ screens and flow are the parks'; only paying differs. See "Book now at Glasgow C
   - `at`: when it was asked for. `heardAt`: when your PC last said anything about it.
   - `line`: one plain sentence for the moment: "Asking your PC to book it." / "Starting Chrome on
     your PC…" / "Signing in to Glasgow Club…" / "Signed in. Booking Court 3…" / "Paying £23.00…" /
-    "Approve £23.00 in your bank’s app." / "No word from your PC for over a minute." /
+    "Approve £23.00 in your bank’s app." (while `stage` is `"approve"`; "Paying £23.00…" again after
+    it) / "No word from your PC for over a minute." /
     "Booked: Court 3. Paid £23.00." / "Not booked: <why>."
 
 **`allowance`**: Glasgow Life Tennis's weekly allowance, this week and then next: at most 7
@@ -489,6 +509,23 @@ app older than 2.11 shows as it is), `price` the total paid for both (`"£46.00"
 court that names it in a list keeps that too (`courts: [3]`, `court: "3"`); one that does not, or a
 park's, has `courts: null`. A result that is not booked has none: its `why` says what happened ("It
 didn’t work: Only 1 of 2 courts was free, so none was taken. Nothing was paid.", in your PC's words).
+
+**Your PC's reasons, in plain words (2.12).** Your PC's booker gives its reasons as they read on the
+PC: a line of its `.env`, a setting's name, a file under `logs\` or `vault\`, an option of one of its
+tools ("DRY_RUN is on in .env on your PC, so it took no court"). Wherever this bot passes one on to
+you (Telegram, a note and its notification, `results[].why`, `glasgow.bookNo`, `glasgow.book.why` and
+`line`, a park's Book now, a hold's `lines` and Pay refusals, the card's and automatic payments'
+`why`, `run.why`, a look's refusal, "Your PC stayed awake") it says it in plain words instead, and never names `.env`, a setting or a file: "your
+PC is set to try without booking (dry run), so it took no court"; "your PC is set to make no
+payments" (`GLASGOW_PAY_PER_DAY` 0); "that would be more than 2 payments from this PC today"; "your PC
+could not check how many payments it has made today" (its note of payments unreadable: its advice to
+put that file right is for the PC alone); "your PC could not read its own settings"; "your PC has no
+Glasgow Club login to sign in with"; "(the Glasgow Club login on your PC may be out of date)"; "its
+card store would not load"; and so on (`lib/messages.js`, `pcWords`). Anything else of that kind is
+left out: a part in brackets that names it, or the rest of a sentence from the part where it begins
+("the booking tool would not start: --book-now …" is "the booking tool would not start"); a reason
+with nothing left is "something on your PC needs looking at there". The bot's own log keeps your PC's
+exact words, and so does your PC's log. A result kept by an older bot is said in plain words too.
 Its card in Telegram reads "Booked · Courts 3 & 4", and its note "Courts 3 & 4 booked".
 A Glasgow Club court held and then booked (2.10.3: paid from the app, by the PC with its card, or
 in Chrome on the PC and then "I have paid") is a result too, as the midnight run's would be for the
@@ -850,7 +887,7 @@ without "It didn’t work: "):
 
 - "It didn’t work: court 1 was no longer free for that time (not free at 18:00 any more), and your PC takes no other court." (or "(free at 18:00, but only until 19:00)")
 - "It didn’t work: your PC did not start it: <its reason>." (its own limits, or a hold under way)
-- "It didn’t work: <your PC's reason>." Among them: "ClubSpark asked for payment; nothing was booked or paid"; "after "Confirm", ClubSpark went on to a payment page, where your PC paid nothing: check ClubSpark for it"; "DRY_RUN is on in .env on your PC, so it stopped before booking (court 3 was free, Free)"; "ClubSpark showed a "Just a moment" page, so your PC stopped there" (or "ClubSpark's booking sheet never showed, …", "ClubSpark refused a request (HTTP 403), …"); "Chrome could not start (…)"; a sign-in that did not go through; "queenspark has no court 9"; "it could not reach the bot just before booking (…), so it booked nothing"; "this PC went to sleep while booking, so it stopped". Once this bot has given the go-ahead, anything that went wrong (but a court gone, or a stop at a payment step) ends "… It was booking when that happened: check ClubSpark for it", whether your PC's words say so or not.
+- "It didn’t work: <your PC's reason>." Among them: "ClubSpark asked for payment; nothing was booked or paid"; "after "Confirm", ClubSpark went on to a payment page, where your PC paid nothing: check ClubSpark for it"; "your PC is set to try without booking (dry run), so it stopped before booking (court 3 was free, Free)" (2.12: in plain words, see "Your PC's reasons" under `results`); "ClubSpark showed a "Just a moment" page, so your PC stopped there" (or "ClubSpark's booking sheet never showed, …", "ClubSpark refused a request (HTTP 403), …"); "Chrome could not start (…)"; a sign-in that did not go through; "queenspark has no court 9"; "it could not reach the bot just before booking (…), so it booked nothing"; "this PC went to sleep while booking, so it stopped". Once this bot has given the go-ahead, anything that went wrong (but a court gone, or a stop at a payment step) ends "… It was booking when that happened: check ClubSpark for it", whether your PC's words say so or not.
 - "It didn’t work: your PC's booking stopped before it booked anything (<why>)." or "… stopped while it was booking court 3: check ClubSpark for it."
 - "It didn’t work: ClubSpark had turned your PC away, so it was not handed to your PC and nothing was booked." (or "your PC's nightly booking run was near, so …")
 - "It didn’t work: your PC did not collect it in time, so nothing was booked."
@@ -1256,13 +1293,13 @@ not reach it: nothing was pressed, and Pay may be asked for again. The checks co
 - 409 "Your PC is forgetting its card."
 - 409 "Your new card has not reached your PC yet. Try again in a moment."
 - 409 "There is no card on your PC. Add one in the app first."
-- 409 "Your PC cannot pay for this court: <the PC's reason>." The PC's reasons: "no card is kept on
-  this PC", "the card kept on this PC has expired", "this PC has no card key yet (the PC link makes
-  it when it starts)", "the payment page does not have the three card boxes I know", "that would be
-  more than 2 payments from this PC today (GLASGOW_PAY_PER_DAY)", "GLASGOW_PAY_PER_DAY in .env is 0,
-  so no payment is made from this PC", "BOT_URL in the .env file on your PC is not an https address,
-  and an order to pay is only taken from a bot reached over https", and the PC's own note of
-  payments made being unreadable.
+- 409 "Your PC cannot pay for this court: <the PC's reason>." The PC's reasons (in plain words since
+  2.12, see "Your PC's reasons" under `results`): "no card is kept on this PC", "the card kept on
+  this PC has expired", "this PC has no card key yet (the PC link makes it when it starts)", "the
+  payment page does not have the three card boxes I know", "that would be more than 2 payments from
+  this PC today", "your PC is set to make no payments", "your PC does not reach me at a secure
+  (https) address, and an order to pay is only taken from a bot reached over https", and "your PC
+  could not check how many payments it has made today".
 - 409 "Your PC has not said that it can pay for this court." (its booker is older than 2.9)
 - 409 "Your PC didn’t say both courts are in your basket, so it isn’t asked to pay." (2.11: a hold of two courts whose note from the basket did not name both; a PC whose booker is older than 2.11 holds the first alone, at that court's price)
 - 409 "Your PC could not read the price, so it cannot pay for this court."
@@ -1568,7 +1605,8 @@ the state, with `glasgow.book` at stage `"asked"`; from then on it moves in the 
   date and start, of either court type (Scotstoun's indoor and outdoor share a result's id); a slot
   whose Pay was pressed, or may have been, of either court type (a result kept for it with `paid`
   true or `"maybe"`, from the midnight run or a Book now, or a Book now that has just ended so and
-  whose result is still on its way: your PC pays for each slot once at most); a look
+  whose result is still on its way: your PC pays for each slot once at most; the state lists those
+  slots in `glasgow.tried`, with this very refusal, since 2.12); a look
   showing the app every court asked for free at that start in the last 15 minutes (as for a hold);
   then the guards in `glasgow.bookNo`, in the order below.
 
@@ -1598,14 +1636,26 @@ the state, with `glasgow.book` at stage `"asked"`; from then on it moves in the 
   6. "Not available 21:25–00:30 tonight, around the midnight booking." (on a night your PC books at
      Glasgow Club: its run is up from 21:25 until half an hour after midnight) or "Not available
      21:25–22:15, around the nightly booking." (every night)
-  7. "Not available until the nightly booking has finished."
+  7. "Not available until the midnight booking has finished." (2.12: past that window, while your PC's
+     run for Glasgow Club's midnight may still be paying: this bot has heard from it for that midnight,
+     its 23:50 run starting, or the run signing in at Glasgow Club for midnight, or your bank's approval
+     for one of its payments (kept on disk, so a restart changes nothing), and it has not yet said how
+     each of that midnight's bookings went; an hour after midnight at most, as long as this bot waits
+     for them. A run not heard for that midnight at all, the PC asleep say, is not known to be going:
+     the window in 6 is all there is. Before, Book now was taken from 00:30 while a booker older than
+     2.12 (whose one run starts at 21:55) could still be paying at midnight, and so after a restart of
+     the bot.) Else "Not available
+     until the nightly booking has finished." (tonight's run, as `run` shows it, has not said how
+     every booking went)
   8. "Glasgow Club was checking visitors from your home connection. Not available until 13:00."
   9. "That’s 6 sign-ins to Glasgow Club in an hour. Next at 13:00." (holds and Book now together)
   10. "Update the booker on your PC." (its pings do not say `glasgowBook`; the app holds instead)
-  11. "Your PC can’t pay just now: <its reason>." (from its ping, read fresh from its `.env` each
-      time: "GLASGOW_PAY_PER_DAY in .env is 0", its daily limit used up, a cap that does not read,
-      no card kept, the card expired, DRY_RUN on), or "Your PC hasn’t said yet whether it can pay.
-      Try again in a minute." (no ping has said its cap since the bot started)
+  11. "Your PC can’t pay just now: <its reason>." (from its ping, which reads its `.env` afresh each
+      time; in plain words since 2.12, starting "it" for your PC: "Your PC can’t pay just now: it is
+      set to try without booking (dry run).", "…: it is set to make no payments.", "…: that would be
+      more than 2 payments from this PC today.", a cap that does not read, "…: this PC keeps no
+      card.", "…: the card kept on this PC has expired."), or "Your PC hasn’t said yet whether it can
+      pay. Try again in a minute." (no ping has said its cap since the bot started)
   12. "There is no card on your PC. Add one in the app first."
   13. "Turn on Pay Automatically first." (also while an off is on its way to your PC)
   14. "Your new card has not reached your PC yet. Try again in a moment." / "Pay Automatically has
@@ -1631,12 +1681,22 @@ Automatically off is always taken: it stops this booking at its go-ahead, if it 
 | `starting` (its tool is up) | stage, heard | `{ ok: true }` |
 | `signed-in` | stage | `{ ok: true }` |
 | `paying` `{ price, courts }` (about to press Pay) | the checks below | `{ ok: true, go: true }`, else `{ ok: true, stop: true }` |
-| any stage with `beat: true` (every 30 seconds while it runs) | heard, nothing more | `{ ok: true }` |
+| any stage with `beat: true` (every 30 seconds while it runs) | heard, nothing more (but below) | `{ ok: true }` |
 | `approve` `{ price, court, courts }` | stage; your bank's approval said once (Telegram, a note, a push) | `{ ok: true }` |
+| `paying` or `approve` with `beat: true` | heard; after `approve`, whether it still waits for the approval (`glasgow.book.stage`, 2.12) | `{ ok: true }` |
 | `refused` `{ why }` (its link would not start it) | ends `"refused"` | `{ ok: true }` |
 | `gone` `{ why?, pressed?, kind? }` (its link: the tool has gone) | ends `"gone"`, unless a result came | `{ ok: true }` |
 | `quit` `{ why, pressed? }` (its tool stopped) | ends `"quit"`, unless a result came | `{ ok: true }` |
+| any step but an ending, for a booking this bot is not following (any more) | nothing | `{ ok: true, stop: true }` (with `unknown: true` for one it does not know) |
 
+- **Stop, for a booking not followed** (2.12): a booking that has ended here (whichever way), one
+  given up on, or one this bot does not know (it restarted since) gets `stop` at every step but an
+  ending (`refused`, `gone`, `quit`, which are heard as above and need no answer), beats included,
+  so that your PC goes no further. Its tool reads it on `starting` (a late one: collected, then slow
+  to start, and over here at 90 seconds as `"nostart"`) and signs in to nothing, so no court is
+  taken and given back; and on `paying`, as below. After Pay is pressed it can undo nothing, and
+  changes nothing. The step moves nothing here. (Until 2.12 only `paying` got `stop`, and every other
+  step `{ ok: true }`: a late `starting` signed in and took the courts, then gave them back at Pay.)
 - **The go-ahead** (`go: true`) is given only to a booking this bot still follows, for exactly the
   courts it asked for, at a price (the total) no more than your PC's cap from its pings (`max`) times
   the number of courts, while its pings say it can pay, keeps a card and keeps Pay Automatically on,
@@ -1644,7 +1704,13 @@ Automatically off is always taken: it stops this booking at its go-ahead, if it 
   bot does not know (it restarted since), a booking that does not match. Your PC presses nothing
   without `go: true`, and with `stop` it takes the courts out of the basket again, pays nothing and
   sends a failed result, whose `why` this bot then gives in its own words ("Pay Automatically was
-  turned off, so I told your PC not to pay", "£31.00 is over your PC's cap of £30.00, so …").
+  turned off, so I told your PC not to pay", "£31.00 is over your PC's cap of £30.00, so …"), in place
+  of your PC's reason ("the bot did not give the go-ahead to pay …"). What your PC said besides of the
+  basket stands with them (2.12; before, this bot's words replaced it all): "… so I told your PC not to
+  pay. The court was taken out of your basket again", or "… A court may still be in your basket,
+  unpaid: an unpaid court lapses by itself" (its "It may still be …" named: "The court may still
+  be …", "The courts …" for two), or that the basket holds something it does not recognise. `paid` and
+  `price` are your PC's, as with every result.
 - A route without its handler answers 404, as an older bot does: never anything that could read as
   a go (`index.js` builds the server with every handler: `serverFor`).
 - `kind: "challenge"` (Glasgow Club checked visitors from home): an hour of quiet for holds and
@@ -1664,14 +1730,14 @@ your banking app and under Bookings on Glasgow Club's site.").
 
 | Ending | `paid` | `why` |
 | --- | --- | --- |
-| `notsent` | false | "<why>, so it was not handed to your PC" ("Glasgow Club was checking visitors from your home connection", "your PC's nightly booking run was near", "your PC was holding a court at Glasgow Club", "your PC was booking a park court", "your PC no longer said it books Glasgow Club", "your PC could not pay just then (<its reason>)") |
+| `notsent` | false | "<why>, so it was not handed to your PC" ("Glasgow Club was checking visitors from your home connection", "your PC's nightly booking run was near", "your PC was holding a court at Glasgow Club", "your PC was booking a park court", "your PC no longer said it books Glasgow Club", "your PC could not pay just then (<its reason>)", or "…: <its reason>" when its reason has brackets of its own; its reason in plain words since 2.12) |
 | `nopickup` (25 s) | false | "your PC did not collect it in time" |
 | `nostart` (90 s, no word at all) | false | "your PC collected it but did not start on it" |
-| `refused` | false | "your PC did not start it: <its reason>" |
+| `refused` | false | "your PC did not start it: <its reason>" (in plain words since 2.12) |
 | `silent` (4 min), before the go-ahead | false | "no word from your PC for four minutes, so I stopped following it. It pays nothing without my go-ahead" |
 | `timeout` (30 min), before the go-ahead | false | "your PC was still at it half an hour after it took the booking, so I stopped following it. It pays nothing without my go-ahead" |
 | `gone` / `quit`, before the go-ahead | false | "your PC's booking stopped before paying (<why>)" |
-| any of these, after a stop | false | "<why it was stopped>, so I told your PC not to pay" |
+| any of these, after a stop | false | "<why it was stopped>, so I told your PC not to pay" (your PC's own result after a stop, nothing paid: the same, then what it said of the basket, 2.12) |
 | `gone` / `quit`, after the go-ahead, no press noted | false | "your PC stopped before Pay was pressed (<why>). An unpaid court lapses by itself" |
 | `gone` / `quit`, after the go-ahead, a press noted (or may have been) | `"maybe"` | "your PC's booking stopped (<why>) while it was paying for Court 3" |
 | `silent`, after the go-ahead | `"maybe"` | "no word from your PC while it was paying for Court 3" |
@@ -1704,7 +1770,7 @@ to Hold.
 | old | new | new | No `glasgowBook` in the ping: `pcBooks` false, so the app holds; nothing is ever handed over. |
 | new | old | new | No `glasgow` in the state: Hold. |
 | PC rolled back | new | new | Its first ping clears `pcBooks` before anything is handed over. |
-| any | bot restarted mid-booking | new | The booking is lost here. Your PC's `paying` gets `stop` (unknown), so nothing is paid, and its failed result comes. After a go-ahead, its result comes as usual. |
+| any | bot restarted mid-booking | new | The booking is lost here. Your PC's next step gets `stop` (unknown): a `starting` signs in to nothing; a `paying` presses nothing, and its failed result comes. After a go-ahead, its result comes as usual. |
 
 **Book now's own words (2.12).** The app, this bot and your PC's booker change together: Book now
 works again once all three are on 2.12, and until then nothing is paid on a signature made for
@@ -1727,7 +1793,9 @@ something else. With each part older than 2.12:
   already booked …"), and a slot your PC once started to pay for (a key typed, even if it then stopped
   before Pay) is refused by your PC after that ("your PC has paid, or tried to pay, for this slot
   before …"). One this bot knows Pay was pressed for, or may have been, is refused here first, before
-  anything reaches your PC ("Your PC may already have paid for …"). For those, once you have looked
+  anything reaches your PC ("Your PC may already have paid for …"), and listed in `glasgow.tried`
+  (2.12) so that the app can say so before Face ID. One your PC only typed a key for, and did not
+  press Pay, is not known here as such, and is refused by your PC alone. For those, once you have looked
   under Bookings and in your banking app, hold the court in Telegram, or book on Glasgow Club's site.
 - A Book now and a hold count together toward the six sign-ins an hour, but a hold refused for it
   still says "That’s 6 holds in an hour."
