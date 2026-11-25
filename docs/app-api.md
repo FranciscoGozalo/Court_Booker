@@ -24,7 +24,9 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.12.0 (`api: 3`; 2.12 adds `pc.clubRun`; it signs Book now at Glasgow Club
+This file describes the API as built in version 2.13.0 (`api: 3`; 2.13 makes Telegram optional, by addition only:
+`state.telegram`, `POST /app/pair/code`, `POST /app/unpair/other` and the PC's `POST /agent/pair` (see "Who is asking");
+2.12 adds `pc.clubRun`; it signs Book now at Glasgow Club
 in words of its own, `court-broker/now/v1`, with the courts and the minute the app signed (`stamp`, required on
 `POST /app/glasgow/book` and handed on in the ping's `glasgowBook`), and shows the app each weekly booking's and one-off
 date's signature only by its sum, `weekly[].authSum` and `once[].authSum`, in place of `auth` (see "Signed bookings" and
@@ -97,6 +99,18 @@ CORS headers: the API is meant for the phone app, not for a page in a browser.
   out. Someone who asks without stopping can still see the moment a code is waiting and spend it
   (see "Known limits"). When a phone is linked the bot says so in Telegram. `/app forget` in
   Telegram unlinks every phone and cancels a code that is waiting.
+- Pairing without Telegram (2.13): the same code comes from a phone linked already (`POST
+  /app/pair/code`, below) or from the owner's PC (`POST /agent/pair`, signed by the PC's key, or with
+  `AGENT_TOKEN`: `node book.js --pair-phone`), so a phone can be linked with Telegram off. Each
+  takes the place of any code waiting, as a new `/app` does. `{ forget: true }` to `/agent/pair`
+  unlinks every phone first (the answer's `forgot` says how many), as `/app forget` does. A phone
+  linked while another was linked already is a note to every phone (`info`, "Phone linked": "<name>
+  can now reach your bot. Not yours? Unlink it in Settings."), and its notification, with Telegram on
+  or off; the first phone has no one to tell.
+- Telegram off (2.13): a bot started without `TELEGRAM_BOT_TOKEN` and with no owner answers to the
+  app alone: its owner is `0`, which no Telegram chat is, and phones are linked for it. With
+  `TELEGRAM_CHAT_ID` set later, that chat takes it over, and the phones stay linked. A bot that had
+  an owner in Telegram keeps it with Telegram off, and its phones with it.
 
 Answers every request can get:
 
@@ -122,7 +136,7 @@ week's 7 sessions and 14 hours, one card on its way to the PC at a time, and one
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.12.0", api: 3 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.13.0", api: 3 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -143,6 +157,16 @@ why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this 
 - The same right code sent twice at once links one phone; the other is told `none`.
 
 `POST /app/unpair {}` → `{ ok: true }`: forgets the phone that asked. Its token is then no use.
+
+`POST /app/unpair/other { id }` (2.13) → the state, with that phone forgotten: another phone, by its
+`id` in `state.devices`. `400 { why: "To unlink another phone, send its id, as the state's devices
+list it." }` for an id not of that form, and `404 { why: "That phone is not linked." }` for one that
+is not linked, or for the phone asking (that is `/app/unpair`). Telegram's `/app forget`, for one.
+
+`POST /app/pair/code {}` (2.13) → the state, and `pair: { code, until, minutes, linked, max }`: a code
+for linking another phone, the same as `/app` gives in Telegram (`until`: when it runs out, ms;
+`minutes`: 10; `linked`: the phones linked now; `max`: 5). It takes the place of any code waiting.
+A bot older than 2.13 answers `404`.
 
 `GET /app/state?have=<etag>&wait=<0..25>` → `{ ok: true, etag, state }`. With `have` equal to the
 current etag the answer waits up to `wait` seconds for a change and then, if there was none, is
@@ -219,7 +243,9 @@ glasgowBook = { id, venue, venueName, type, centre, date, start, end, hours: 1, 
 
 ### The state, field by field
 
-**`now`**: the bot's clock. **`bot`**: its version.
+**`now`**: the bot's clock. **`bot`**: its version. **`telegram`** (2.13): false when Telegram is
+off (no `TELEGRAM_BOT_TOKEN`) and the app is the way in; then nothing is said in Telegram, and words
+that send the owner there (`/app`, `/backup`) are no use. Missing before 2.13: Telegram was on.
 
 **`venue`**: Kelvingrove's fixed facts. `first` and `last` are the earliest start and the latest end
 that Telegram's buttons offer (09:00 and 21:00); `lengths` the hours a booking can last; `releaseMin`
@@ -1797,8 +1823,8 @@ phone's push token: the phone stays linked, and gets notifications again once th
   What looks showed the app, a waiting pairing code and the run's stage are lost with a restart too.
 - A phone's token does not expire. It stops working when the phone unlinks itself, when
   `/app forget` is sent, or when the bot comes to answer to another chat.
-- Telegram can only unlink every phone at once (`/app forget`). One phone can only be unlinked
-  from that phone (`POST /app/unpair`).
+- Telegram can only unlink every phone at once (`/app forget`). One phone is unlinked from itself
+  (`POST /app/unpair`) or, since 2.13, from another (`POST /app/unpair/other`).
 - Someone who calls `/app/pair` without stopping sees the moment a code is waiting (the answer
   turns from `none` to `wrong`) and can spend it with five wrong tries, or, over two codes, use up
   the ten tries in ten minutes, so the owner's code is refused for up to ten minutes. They get no

@@ -1,14 +1,16 @@
 'use strict';
-// Court booker: a Telegram bot that keeps your Kelvingrove booking requests. At each release
+// Court booker: the bot behind the iPhone app (and, if you like, a Telegram bot) that keeps your
+// booking requests. At each release
 // your PC at home signs in to ClubSpark and books (Cloudflare turns Railway away), reports
 // back here, and the bot sends you the court, the time and the gate code on a banner card.
 // For Glasgow Club's indoor courts (Gorbals, Scotstoun) it shows what is free, has your PC put
 // one in your basket when you tap Hold, and leaves the paying to you; from the app (2.11.3) your PC
 // books one there now and pays for it, as it books a park now.
-// Needs Node 20 or later, TELEGRAM_BOT_TOKEN, and AGENT_TOKEN for your PC. See README.md.
+// Needs Node 20 or later, and AGENT_PUBLIC_KEY (or AGENT_TOKEN) for your PC. Telegram is optional
+// (2.13): without TELEGRAM_BOT_TOKEN the bot says nothing there, and the app is the way in. See README.md.
 
 const { createApp, VERSION } = require('./app');
-const { createTelegram } = require('./lib/telegram');
+const { createTelegram, createQuietTelegram } = require('./lib/telegram');
 const { createStore } = require('./lib/store');
 const { createServer, readPublicKey } = require('./lib/server');
 const { clockAt, londonWall } = require('./lib/time');
@@ -42,7 +44,7 @@ const COMMANDS = [
 function serverFor(app, { token = '', publicKey = null, log = () => {}, ...extra } = {}) {
   const appApi = { hello: app.appHello, pair: app.appPair, auth: app.appAuth, state: app.appState, ask: app.appAsk };
   return createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onLook: app.lookFromAgent, onHold: app.holdFromAgent, onProgress: app.progressFromAgent, picture: app.picture, token, publicKey, log, appApi,
-    onClubSpark: app.clubSparkFromAgent, onGlasgowBook: app.glasgowBookFromAgent, ...extra });
+    onClubSpark: app.clubSparkFromAgent, onGlasgowBook: app.glasgowBookFromAgent, onPair: app.pairFromAgent, ...extra });
 }
 
 // The whole bot depends on knowing UK time, so check this server can work it out.
@@ -62,16 +64,14 @@ async function main() {
   }
   log(`UK time is ${clockAt(Date.now())}.`);
 
+  // Telegram is optional (2.13). Without its token the bot says nothing there and reads nothing from it:
+  // the app is the way in, its notes and notifications say what Telegram would have.
   const token = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
-  if (!token) {
-    log('TELEGRAM_BOT_TOKEN is missing. Get a token from @BotFather in Telegram and add it under Variables in Railway.');
-    await sleep(60000);   // slow the restart loop so the log stays readable
-    process.exit(1);
-  }
+  if (!token) log('TELEGRAM_BOT_TOKEN is not set, so Telegram is off: the iPhone app is the way in.');
 
   const dataDir = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data';
   const store = createStore(dataDir, { log });
-  const tg = createTelegram(token, { apiUrl: process.env.TELEGRAM_API_URL || undefined });
+  const tg = token ? createTelegram(token, { apiUrl: process.env.TELEGRAM_API_URL || undefined }) : createQuietTelegram();
 
   // Your PC reaches the bot over HTTP and proves who it is by signing with its own key
   // (AGENT_PUBLIC_KEY holds the public half) or with a shared AGENT_TOKEN. With neither, the
@@ -87,6 +87,10 @@ async function main() {
   // The endpoint your PC talks to. Also answers a plain /health, which lets Railway give the
   // service a public domain. The iPhone app comes in by the same server, under /app/, with its
   // own tokens (docs/app-api.md), so it is there only where this is.
+  if (!linked && !token) {
+    // Neither Telegram nor the app (which comes in by your PC's door) could reach a bot like this.
+    log('Telegram is off and your PC is not linked, so nothing can reach this bot. Add AGENT_PUBLIC_KEY (or AGENT_TOKEN) under Variables in Railway.');
+  }
   if (linked) {
     const server = serverFor(app, { token: agentToken, publicKey, log });
     const port = Number(process.env.PORT) || 8080;
@@ -96,7 +100,7 @@ async function main() {
     log('Neither AGENT_PUBLIC_KEY nor AGENT_TOKEN is set, so your PC cannot collect bookings. Add one under Variables in Railway.');
   }
 
-  try {
+  if (token) try {
     const me = await tg.call('getMe');
     log(`Signed in to Telegram as @${me.username}`);
     await tg.call('deleteWebhook', { drop_pending_updates: false });
@@ -109,7 +113,7 @@ async function main() {
       process.exit(1);
     }
   }
-  if (app.kept() === 'no') log('Settings are NOT kept across restarts. Add a Railway volume mounted at /data, or send the bot /backup.');
+  if (app.kept() === 'no') log(`Settings are NOT kept across restarts. Add a Railway volume mounted at /data${token ? ', or send the bot /backup' : ''}.`);
   await app.announce();
   // Can this server read Glasgow Club's free indoor courts? One look, said in the log; the
   // rest of the start-up does not wait for it.
@@ -133,9 +137,10 @@ async function main() {
   process.on('SIGINT', stop);
   process.on('unhandledRejection', e => log('Unhandled error:', e && e.message ? e.message : e));
 
-  // Read messages from Telegram as they arrive (long polling).
+  // Read messages from Telegram as they arrive (long polling). With Telegram off there is nothing to read:
+  // the server and the timers keep the bot going.
   let offset = 0, pause = 1000;
-  while (!stopping) {
+  while (token && !stopping) {
     try {
       const updates = await tg.getUpdates(offset, 50);
       pause = 1000;

@@ -1,6 +1,6 @@
 # Court booker
 
-A small Telegram bot for Kelvingrove Park Tennis Courts. You tell it what you want to play, every week or on single dates, and it gets them booked. When each day opens for booking, your PC at home signs in to ClubSpark and books the first free court in your order. The bot then sends you a card with the court, the time and the **gate code**.
+A small bot for Kelvingrove Park Tennis Courts, behind the iPhone app (and, if you like, a Telegram chat). You tell it what you want to play, every week or on single dates, and it gets them booked. When each day opens for booking, your PC at home signs in to ClubSpark and books the first free court in your order. The bot then sends you a card with the court, the time and the **gate code**.
 
 The work is split in two because ClubSpark sits behind Cloudflare, which turns cloud servers like Railway away:
 
@@ -12,6 +12,8 @@ Your ClubSpark password stays on your PC. The bot never sees it and never touche
 It also finds free **courts at Gorbals and Scotstoun** (Glasgow Club: indoor, and at Scotstoun outdoor too), and can have your PC put one in your basket for you to pay for; see [Indoor courts](#indoor-courts-glasgow-club).
 
 There is an **iPhone app** too, which does the same things as the Telegram chat, and can also have your PC pay for a court it holds; see [The iPhone app](#the-iphone-app).
+
+**Telegram is optional (version 2.13).** Without `TELEGRAM_BOT_TOKEN` the bot says nothing in Telegram and reads nothing from it: the app is the way in, and what the bot would tell you unprompted comes as the app's notes and notifications, as it always has. See [Without Telegram](#without-telegram-version-213).
 
 From version 2.10 the app can also set weekly bookings and one-off dates at the other parks and at Glasgow Club. Your PC books them on its nightly run, and at Glasgow Club pays for them by itself if you switch automatic payments on; see [Weekly bookings at any venue](#weekly-bookings-at-any-venue-version-2101).
 
@@ -128,7 +130,7 @@ While the dot is green, the same place on the menu has **Sleep my PC** (and ther
 
 The app (the separate Court_Booker_App repository) is another way in to the same bot. It shows what the Telegram chat shows: your weekly and one-off bookings, the next booking run, what was booked and the gate codes, your PC's dot, the free indoor courts and a court being held. And it asks for the same things: book or remove a date, set a weekday, court order, pause, wake or sleep your PC, hold an indoor court. Each request is carried out by the same code as the Telegram command or button, with the same checks and the same words when the answer is no. **The app adds two powers**. One is paying for a court your PC holds, with the card your PC keeps (see **Pay from the app** above): Telegram cannot, since only the app has the card's security code. The other is Glasgow Life's parks, their free courts and a court booked now (below): a phone you link can have your PC book there at most 4 times an hour, only a court the app was shown free in the last 15 minutes, within the weekly allowance, and never one that costs money. Since version 2.10 it adds a third: weekly bookings and one-off dates at any venue, with automatic payments at Glasgow Club (below); and since 2.11.3, Book now at Glasgow Club, paid by your PC, as at a park (below). Everything else the app does, you can already do in the chat.
 
-- **Link a phone:** send `/app`. The bot answers with a six-digit code (and its own address, if the app asks where the bot is). Type the code into the app within 10 minutes. It works once, five wrong tries cancel it, and a new `/app` replaces it. The bot tells you in Telegram when a phone has been linked. Up to five phones can be linked.
+- **Link a phone:** send `/app` (or, with Telegram off, see [Without Telegram](#without-telegram-version-213)). The bot answers with a six-digit code (and its own address, if the app asks where the bot is). Type the code into the app within 10 minutes. It works once, five wrong tries cancel it, and a new `/app` replaces it. The bot tells you in Telegram when a phone has been linked. Up to five phones can be linked.
 - **Unlink:** `/app forget` unlinks every phone at once; the app can also unlink its own phone. A phone is linked for the chat that owns the bot: if the bot ever comes to answer to another chat (`TELEGRAM_CHAT_ID` set or changed), phones linked for the old one are unlinked when it starts. `/status` says how many phones are linked, when any are.
 - **What it cannot overdo:** the app may have Glasgow Club's sheet read afresh 12 times a minute; it may ask for a hold only on a court it was shown free in the last 15 minutes (as Telegram only offers Hold under a court on a sheet it has just shown); and one phone may keep four requests waiting for news at once. Pay and the parks have bounds of their own (above, and below).
 - **What is kept:** the app proves itself with a long random token it is given once, when it pairs. The bot keeps only a fingerprint of it (its SHA-256) in the settings file, so the file opens no door, and the one-line `/backup` leaves the phones out (and, since 2.10.1, the app's signatures for your bookings: after a start from it, the app signs them again). Without a Railway volume the links are lost at each restart, and `/app` says so.
@@ -189,13 +191,25 @@ NODE_PATH="<kelvingrove-court-booker folder>/node_modules" node art/make-banners
 
 If Telegram ever refuses a picture, the message goes out as plain text instead.
 
+## Without Telegram (version 2.13)
+
+Take `TELEGRAM_BOT_TOKEN` out of the variables in Railway (it restarts the bot), and Telegram is off. Everything else stays as it was:
+
+- **The bookings** are made as ever, at each release, by your PC. Everything the bot tells you unprompted (a court booked or not, trouble before a booking, your PC not answering, how a hold ended) is a note in the app and a notification, as before.
+- **The owner:** a bot that answered to your Telegram chat keeps answering to it (the settings file, or `TELEGRAM_CHAT_ID`), so the phones linked to it stay linked. A bot set up without Telegram, with no owner yet, answers to the app alone, and no `/start` can claim it if Telegram is switched on again later; `TELEGRAM_CHAT_ID` can (send the bot `/id` to learn yours), and the phones linked meanwhile stay linked.
+- **Linking a phone** (`/app` in Telegram, before): **Link Another iPhone** in the app's Settings, on a phone linked already, or `node book.js --pair-phone` on your PC (booker 2.13), which the bot answers only for your PC's own signed request. Either gives the same six-digit code `/app` gives: good for 10 minutes, once, and five wrong tries cancel it. Each phone linked is said to the phones linked before it, in a note and a notification, so a phone linked without you is seen.
+- **Unlinking** (`/app forget`, before): a phone unlinks another in the app's Settings, or itself; `node book.js --pair-phone --unlink-phones` on your PC unlinks every phone, then gives a code for linking yours again (for a phone lost).
+- **Not in the app:** `/backup` (keep a Railway volume at `/data` instead), and `/status`'s clock check against Telegram's. Both are back when Telegram is.
+
+With the token back, Telegram is back as it was.
+
 ## Variables
 
 | Variable | Needed | What it is |
 | --- | --- | --- |
-| `TELEGRAM_BOT_TOKEN` | Yes | The token from @BotFather. |
+| `TELEGRAM_BOT_TOKEN` | No (2.13) | The token from @BotFather. Without it, Telegram is off and the app is the way in. |
 | `AGENT_PUBLIC_KEY` | Yes, to link your PC | The public key the PC prints with `node book.js --make-key`. (Or `AGENT_TOKEN`: a long random line, the same here and in the PC's `.env`.) |
-| `TELEGRAM_CHAT_ID` | Recommended | Your chat ID. Locks the bot to you. |
+| `TELEGRAM_CHAT_ID` | Recommended with Telegram | Your chat ID. Locks the bot to you. |
 | `COURT_SETTINGS` | If no volume | The line from `/backup`. |
 | `COURT_PLAN` | No | Weekly Kelvingrove bookings to start from, for example `thu 19:00 2h, fri 19:00 2h`. |
 | `COURT_ORDER` | No | A court order to start from, for example `3 4 5 2 1 6`. |

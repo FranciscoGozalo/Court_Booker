@@ -69,7 +69,7 @@ async function seeFree(t, phone, centre = 'g', date = FRI) {
   assert.equal(r.status, 200, JSON.stringify(r.body));
   return r.body.look;
 }
-const STATE_KEYS = ['now', 'bot', 'venue', 'venues', 'clubspark', 'glasgow', 'allowance', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'weekly', 'once', 'order', 'results', 'run', 'indoor', 'card', 'hold', 'notes', 'devices'];
+const STATE_KEYS = ['now', 'bot', 'telegram', 'venue', 'venues', 'clubspark', 'glasgow', 'allowance', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'weekly', 'once', 'order', 'results', 'run', 'indoor', 'card', 'hold', 'notes', 'devices'];
 const HOLD_KEYS = ['id', 'startedBy', 'centre', 'centreName', 'date', 'start', 'end', 'court', 'courtName', 'courts', 'courtNames', 'stage', 'live', 'ended', 'price', 'prices', 'until', 'heardAt', 'title', 'lines', 'can', 'links'];
 // The state as a phone is shown it. Whenever it is looked at here, it is also checked to be
 // whole: the contract's fields and no others, and nothing that JSON would drop on the way.
@@ -485,7 +485,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.12.0', api: 3 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.13.0', api: 3 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -742,7 +742,8 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.12.0',
+    bot: '2.13.0',
+    telegram: true,
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
     venues: venuesOn(TUE),
     // Nothing stands in the way of a look or Book now at a park: the PC is awake, and it is midday.
@@ -799,7 +800,11 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
     },
     card: null,
     hold: null,
-    notes: [{ id: 'aa11bb22cc', at: at('2026-11-12T22:00:10Z'), kind: 'booked', title: 'Court 3 booked', body: 'Thu 19 Nov · 19:00–20:00 · gate 2433', ref: null }],
+    notes: [
+      // 2.13: a second phone linked is said to the first, so one linked without you is seen.
+      { id: state.notes[0].id, at: at(NOON), kind: 'info', title: 'Phone linked', body: 'iPad can now reach your bot. Not yours? Unlink it in Settings.', ref: null },
+      { id: 'aa11bb22cc', at: at('2026-11-12T22:00:10Z'), kind: 'booked', title: 'Court 3 booked', body: 'Thu 19 Nov · 19:00–20:00 · gate 2433', ref: null },
+    ],
     devices: [
       { id: phone.id, name: 'Francisco\'s iPhone', at: at(NOON), seenAt: at(NOON), me: true },
       { id: other.id, name: 'iPad', at: at(NOON), seenAt: at(NOON), me: false },
@@ -1708,6 +1713,10 @@ test('a court booked, or not, is a note and a notification, in the card\'s own f
   const a = await linkPhone(t, 'A'), b = await linkPhone(t, 'B'), c = await linkPhone(t, 'C');
   await ask(t, a, 'push', { token: PUSH_TOKEN });
   await ask(t, c, 'push', { token: 'ExpoPushToken[second-phone]' });
+  // B and C linked were notes for the phones before them (2.13), and pushed to none: no phone had a token yet.
+  assert.deepEqual(stateOf(t, b).notes.map(n => [n.kind, n.title, n.body]), [['info', 'Phone linked', 'C can now reach your bot. Not yours? Unlink it in Settings.'], ['info', 'Phone linked', 'B can now reach your bot. Not yours? Unlink it in Settings.']]);
+  assert.deepEqual(t.pushes, []);
+  t.app.state.notes = [];
   t.tg.clear();
   assert.deepEqual(await t.app.resultFromAgent({ id: '2026-11-24@16:00', status: 'booked', court: 3, gate: '2433', end: 1080 }), { ok: true });
   assert.equal(t.tg.last().text, '<b>Booked · Court 3</b>\nTue 24 Nov · 16:00–18:00\nGate code: <code>2433</code>  (tap to copy)');

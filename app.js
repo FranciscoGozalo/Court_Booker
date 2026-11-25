@@ -32,7 +32,7 @@ const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 const GB = require('./lib/glasgowbook');
 
-const VERSION = '2.12.0';
+const VERSION = '2.13.0';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -48,6 +48,9 @@ const NO_WORD_MS = 8 * 60 * 1000;          // a run that started should have rep
 const NO_WORD_FOR_MS = 60 * 60 * 1000;     // ...and after this the bot stops watching for it
 const PRE_210_COPY = 'state.pre-2.10.json';         // the settings as a bot older than 2.10 kept them (see createApp)
 const NO_WORD_CLUB_MS = 25 * 60 * 1000;    // a Glasgow Club booking (paid, perhaps with your bank's approval) by this long after its midnight
+// The owner of a bot that has only ever answered to the iPhone app (2.13: started with Telegram off and no owner):
+// no Telegram chat's id is 0, so no /start can claim it later; TELEGRAM_CHAT_ID can (see createApp).
+const APP_OWNER = 0;
 const GONE = ['test', 'free', 'signin', 'style', 'lead', 'warn', 'go', 'code'];   // link-alert commands from version 1
 // Said to a button, and to the app, that asks for an indoor day or time which is not on offer.
 const DAY_GONE = 'That day is no longer on offer. Pick again.';
@@ -55,7 +58,7 @@ const TIME_GONE = 'That time is no longer on offer. Pick again.';
 // Said to the app when it asks to hold a court that no look showed it free in the last 15 minutes.
 const LIST_OLD = 'That list is old. Read the day again, then hold a court.';
 // What the iPhone app can ask for (POST /app/<name>, docs/app-api.md).
-const APP_ASKS = ['unpair', 'once', 'once/remove', 'plan', 'plan/remove', 'weekly', 'weekly/change', 'weekly/on', 'weekly/remove', 'weekly/auth', 'order', 'pause', 'pc/sleep', 'pc/wake',
+const APP_ASKS = ['unpair', 'unpair/other', 'pair/code', 'once', 'once/remove', 'plan', 'plan/remove', 'weekly', 'weekly/change', 'weekly/on', 'weekly/remove', 'weekly/auth', 'order', 'pause', 'pc/sleep', 'pc/wake',
   'indoor/look', 'hold', 'hold/order', 'card', 'card/forget', 'card/auto', 'card/auto/off', 'push'];
 
 // The banner pictures (made by art/make-banners.cjs): the menu card in three versions, one for
@@ -227,7 +230,8 @@ function readBackup(text) {
 // answer when it is asked to read Glasgow Club's sheet, and `pcHoldMs` how long it gets to
 // collect a court to hold. `push` sends a notification to the phones linked to the app
 // (lib/push.js: Expo's push service); tests swap it out too. `retryMs`: how long before a message
-// that must not be lost (see strangerNote) is tried again when Telegram will not take it.
+// that must not be lost (see strangerNote) is tried again when Telegram will not take it. `tg` with
+// `quiet` set (lib/telegram.js createQuietTelegram, 2.13): Telegram is off, and the app is the way in.
 function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000, pcHoldMs = 25000, push = null, retryMs = 3000 }) {
   const indoor = glasgow || G.createGlasgowClub({ now, log });
   const pushOut = push || createExpoPush({ log });
@@ -243,8 +247,22 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const state = loadState(stored ?? fromVariable, env);
   const variableLine = fromVariable ? backupLine(loadState(fromVariable, env)) : null;
   const save = () => store.save(state);
+  const quiet = !!(tg && tg.quiet);                     // Telegram is off (2.13)
   const envOwner = intIn(env.TELEGRAM_CHAT_ID, -1e15, 1e15);
   const owner = () => envOwner ?? state.owner;
+  // With Telegram off and no owner yet, the bot answers to the app alone (APP_OWNER), and books for it. A
+  // bot that had an owner in Telegram keeps that owner, and the phones linked for it, with Telegram off.
+  // TELEGRAM_CHAT_ID (yours, on Railway) takes over a bot that answered to the app alone, with its phones.
+  if (quiet && envOwner === null && state.owner === null) {
+    state.owner = APP_OWNER; save();
+    log('This bot answers to the iPhone app alone (Telegram is off).');
+  }
+  if (envOwner !== null && envOwner !== APP_OWNER && state.owner === APP_OWNER) {
+    state.owner = envOwner;
+    for (const d of state.apps) if (d.owner === APP_OWNER) d.owner = envOwner;
+    save();
+    log('TELEGRAM_CHAT_ID now names the owner of this bot, which answered to the app alone: the phones linked to it stay linked.');
+  }
   // A phone is linked to the app for one Telegram chat: the bot's owner at the time. One that
   // was linked while the bot answered to another chat (the settings file was someone else's, or
   // TELEGRAM_CHAT_ID was) does not outlive the owner taking the bot back: it is dropped here.
@@ -2482,6 +2500,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
 
   // A quiet note on start-up, so a deploy can be seen to have worked.
   async function announce() {
+    if (quiet) {
+      const n = state.apps.length;
+      log(`Telegram is off (no TELEGRAM_BOT_TOKEN): the iPhone app is the way in. ${n ? `${n === 1 ? 'One phone is' : `${n} phones are`} linked.` : 'No phone is linked yet: on your PC, node book.js --pair-phone gives a code for the app.'}`);
+      return;
+    }
     const chat = owner();
     if (chat === null) { log('No owner yet. Open the bot in Telegram and send /start.'); return; }
     const pc = linked ? '' : '\nYour PC cannot reach me yet: set AGENT_TOKEN in Railway (see the README).';
@@ -2528,13 +2551,36 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     pairing.use();
     save();
     log(`A phone was linked to the app: ${device.name}.`);
+    // Said to the phones linked already (2.13), so a phone linked without you is seen, and unlinked
+    // from Settings, with Telegram off as well as on. The first phone has no one to tell.
+    if (state.apps.length > 1) note('info', 'Phone linked', `${A.plain(device.name)} can now reach your bot. Not yours? Unlink it in Settings.`);
     const chat = owner();
-    if (chat !== null) {
+    if (chat !== null && !quiet) {
       say(chat, `<b>Phone linked</b>\n${M.esc(device.name)} can now do what you do here, pay for a court your PC holds with the card your PC keeps, and book a court at Glasgow Life's parks now (at most 4 an hour, only one it was shown free in the last 15 minutes, never one that costs money). /app forget unlinks every phone.`)
         .catch(e => log(`Could not say that a phone was linked: ${e.message}`));
     }
     return { status: 200, body: { ok: true, token, device: { id: device.id, name: device.name } } };
   }
+
+  // A code for linking another phone (2.13): the code /app gives in Telegram, for a phone linked already
+  // (POST /app/pair/code) or for your PC (POST /agent/pair, signed: node book.js --pair-phone), so a phone can be
+  // linked with Telegram off. It takes the place of any code waiting, and is good once, for ten minutes, as one from
+  // /app is. `forget` (your PC alone): every phone is unlinked first, for a phone lost, or one that is not yours.
+  function pairIssue(by, { forget = false } = {}) {
+    const t = now();
+    let forgot = 0;
+    if (forget) {
+      forgot = state.apps.length;
+      state.apps = [];
+      save();
+      if (forgot) log(`Unlinked ${forgot === 1 ? 'the phone' : `all ${forgot} phones`} linked to the app (asked by ${by}).`);
+    }
+    const { code, until } = pairing.issue(t);
+    log(`A code for linking a phone was given to ${by}.`);
+    return { code, until, minutes: Math.round(A.PAIR_TTL_MS / 60000), linked: state.apps.length, max: A.MAX_DEVICES, ...(forget ? { forgot } : {}) };
+  }
+  // POST /agent/pair: { forget: true } unlinks every phone first; anything else is only a code.
+  const pairFromAgent = body => pairIssue('your PC', { forget: !!(body && typeof body === 'object' && body.forget === true) });
 
   // The phone a token belongs to, as { id, name }, or null. When it was last heard from is
   // noted at most once a minute: that is part of the state, and so of its etag.
@@ -2610,6 +2656,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const noWake = wakeBlocker(t), noSleep = sleepNo(t), noHold = holdBlocker(t), line = UI.pcLine(x);
     return {
       now: t, bot: VERSION,
+      telegram: !quiet,                                                // 2.13: false when Telegram is off and the app is the way in
       venue: { name: 'Kelvingrove Park', short: 'KP', first: UI.FIRST_START, last: UI.LAST_END, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin, daysAhead, maxAheadDays: MAX_AHEAD_DAYS },
       venues: V.venueList(G.SHEETS, iso(today), G.sheetUrl, { daysAhead, releaseMin }),          // every venue and its court types (lib/venues.js)
       clubspark: cs.view(t),                                           // the parks: looks and Book now (lib/clubspark.js)
@@ -2718,7 +2765,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const read = { once: A.readOnce, 'once/remove': A.readOnceRemove, plan: A.readPlan, 'plan/remove': A.readPlanRemove, order: A.readOrder, pause: A.readPause,
       weekly: A.readWeekly, 'weekly/change': A.readWeeklyChange, 'weekly/on': A.readWeeklyOn, 'weekly/remove': A.readWeeklyRemove, 'weekly/auth': A.readWeeklyAuth,
       'indoor/look': A.readLook, hold: A.readHold, 'hold/order': A.readHoldOrder, card: A.readCard, 'card/forget': A.readForget,
-      'card/auto': A.readAuto, 'card/auto/off': A.readAutoOff, push: A.readPush }[name];
+      'card/auto': A.readAuto, 'card/auto/off': A.readAutoOff, push: A.readPush, 'unpair/other': A.readUnpairOther }[name];
     const v = read ? read(body) : {};
     if (v.why) return no(400, v.why);
     log(`From the app: ${name}`);
@@ -2727,6 +2774,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         state.apps = state.apps.filter(d => d !== me); save();
         log(`A phone unlinked itself from the app: ${me.name}.`);
         return { status: 200, body: { ok: true } };
+      case 'unpair/other': {                         // 2.13: another phone, from this one (Telegram's /app forget, for one)
+        const other = state.apps.find(d => d.id === v.id && d !== me);
+        if (!other) return no(404, 'That phone is not linked.');
+        state.apps = state.apps.filter(d => d !== other); save();
+        log(`A phone was unlinked from the app by another (${me.name}): ${other.name}.`);
+        return done();
+      }
+      case 'pair/code':                              // 2.13: a code for linking another phone
+        return done({ pair: pairIssue(`a linked phone (${me.name})`) });
       case 'once': {
         const r = addOnce(v.date, v.start, v.hours, t, v.venue, v.type, v.auth || null, v.courts || 1);
         if (r.no) return no(r.full || r.allowance || r.taken ? 409 : 400, r.no);
@@ -2822,7 +2878,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   return {
     clubSparkFromAgent: cs.fromAgent, glasgowBookFromAgent: raw => gb.fromPc(raw),
     handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, holdFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures,
-    appHello, appPair, appAuth, appState, appAsk, sealedHeld,
+    appHello, appPair, appAuth, appState, appAsk, sealedHeld, pairFromAgent, quiet,
   };
 }
 
