@@ -340,7 +340,13 @@ screens and flow are the parks'; only paying differs. See "Book now at Glasgow C
     or "Courts 3 & 4".
   - `stage`: `"asked"` → `"starting"` (Chrome is up on your PC) → `"signed-in"` → `"paying"` (it had
     this bot's go-ahead) → `"approve"` (your bank wants the payment approved in its app). It only
-    moves forwards and stays where it was when the booking ends.
+    moves forwards and stays where it was when the booking ends, but for one step (2.12): from
+    `"approve"` it is `"paying"` again once your PC no longer waits for the approval, so that the
+    app's "Approve … in your bank’s app." goes when you have approved, not only with the result. That
+    is when your PC's next word (a beat, every 30 seconds) says `paying` again (the approval came, or
+    the bank's check went from its page, and it waits for Glasgow Club's answer), or five minutes
+    after its first `approve` (as long as your PC waits for an approval). Its word says `approve` again
+    within those five minutes (the check came back): `"approve"` again. Your bank is asked about only once.
   - `live`: true while under way; the same as `ended === null`.
   - `ended`: your PC's result, `"booked"`, `"failed"` or `"none"`; `"refused"` (your PC did not
     start it), `"gone"` (its tool went without a result), `"quit"` (its tool stopped without one);
@@ -353,7 +359,8 @@ screens and flow are the parks'; only paying differs. See "Book now at Glasgow C
   - `at`: when it was asked for. `heardAt`: when your PC last said anything about it.
   - `line`: one plain sentence for the moment: "Asking your PC to book it." / "Starting Chrome on
     your PC…" / "Signing in to Glasgow Club…" / "Signed in. Booking Court 3…" / "Paying £23.00…" /
-    "Approve £23.00 in your bank’s app." / "No word from your PC for over a minute." /
+    "Approve £23.00 in your bank’s app." (while `stage` is `"approve"`; "Paying £23.00…" again after
+    it) / "No word from your PC for over a minute." /
     "Booked: Court 3. Paid £23.00." / "Not booked: <why>."
 
 **`allowance`**: Glasgow Life Tennis's weekly allowance, this week and then next: at most 7
@@ -1638,8 +1645,9 @@ Automatically off is always taken: it stops this booking at its go-ahead, if it 
 | `starting` (its tool is up) | stage, heard | `{ ok: true }` |
 | `signed-in` | stage | `{ ok: true }` |
 | `paying` `{ price, courts }` (about to press Pay) | the checks below | `{ ok: true, go: true }`, else `{ ok: true, stop: true }` |
-| any stage with `beat: true` (every 30 seconds while it runs) | heard, nothing more | `{ ok: true }` |
+| any stage with `beat: true` (every 30 seconds while it runs) | heard, nothing more (but below) | `{ ok: true }` |
 | `approve` `{ price, court, courts }` | stage; your bank's approval said once (Telegram, a note, a push) | `{ ok: true }` |
+| `paying` or `approve` with `beat: true` | heard; after `approve`, whether it still waits for the approval (`glasgow.book.stage`, 2.12) | `{ ok: true }` |
 | `refused` `{ why }` (its link would not start it) | ends `"refused"` | `{ ok: true }` |
 | `gone` `{ why?, pressed?, kind? }` (its link: the tool has gone) | ends `"gone"`, unless a result came | `{ ok: true }` |
 | `quit` `{ why, pressed? }` (its tool stopped) | ends `"quit"`, unless a result came | `{ ok: true }` |

@@ -616,6 +616,54 @@ test('over HTTP, with the server built as index.js builds it: the ping carries B
 
 // ---------- liveness, and your bank ----------
 
+test('"Approve … in your bank’s app." goes once your PC no longer waits for it: its next word says "paying" again (the approval came), or its five minutes for it are up; said in Telegram once', async () => {
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  const { id } = await started(t, phone);
+  assert.deepEqual(pcSays(t, { id, stage: 'paying', price: '£23.00', courts: [3] }), { ok: true, go: true });
+  const book = () => stateOf(t, phone).glasgow.book;
+  const APPROVE = ['approve', 'Approve £23.00 in your bank’s app.'], PAYING = ['paying', 'Paying £23.00…'];
+  // A beat while it presses Pay; then your bank's check, and beats while it waits for you.
+  t.clock.t += 30000;
+  pcSays(t, { id, stage: 'paying', beat: true });
+  assert.deepEqual([book().stage, book().line], PAYING);
+  t.clock.t += 5000;
+  pcSays(t, { id, stage: 'approve', price: '£23.00', court: 3, courts: [3] });
+  const asked = t.clock.t;
+  assert.deepEqual([book().stage, book().line], APPROVE);
+  for (let i = 0; i < 3; i++) {
+    t.clock.t += 30000;
+    assert.deepEqual(pcSays(t, { id, stage: 'approve', beat: true }), { ok: true });
+    assert.deepEqual([book().stage, book().line, book().live], [...APPROVE, true]);
+  }
+  // You approved: its next word is "paying" again, while it waits for Glasgow Club's answer.
+  t.clock.t += 30000;
+  assert.deepEqual(pcSays(t, { id, stage: 'paying', beat: true }), { ok: true });
+  assert.deepEqual([book().stage, book().line, book().live, book().price], [...PAYING, true, '£23.00']);
+  // Your bank's check back on its page (it may come and go): asked again, within its five minutes.
+  t.clock.t += 30000;
+  pcSays(t, { id, stage: 'approve', beat: true });
+  assert.deepEqual([book().stage, book().line], APPROVE);
+  // Five minutes from the first "approve": your PC waits no longer, whatever its beats say.
+  t.clock.t = asked + GB.APPROVE_MS - 30000;
+  pcSays(t, { id, stage: 'approve', beat: true });
+  t.clock.t = asked + GB.APPROVE_MS - 1;
+  assert.deepEqual([book().stage, book().line], APPROVE);
+  t.clock.t = asked + GB.APPROVE_MS;
+  assert.deepEqual([book().stage, book().line, book().live], [...PAYING, true]);
+  t.clock.t += 20000;
+  pcSays(t, { id, stage: 'approve', beat: true });
+  assert.deepEqual([book().stage, book().line], PAYING);
+  // Your bank was asked about once, in Telegram, a note and a push, however often the check came back.
+  await settle();
+  assert.equal(t.tg.calls.filter(c => /^<b>Approve the payment in your bank's app<\/b>/.test(c.text || '')).length, 1);
+  // Then the result, as ever.
+  await t.app.resultFromAgent(resultOf());
+  await settle();
+  assert.deepEqual([book().ended, book().line], ['booked', 'Booked: Court 3. Paid £23.00.']);
+  assert.equal(GB.APPROVE_MS, 5 * 60000);
+});
+
 test('beats keep it alive through a slow sign-in and basket (three minutes before "paying"); a beat of any stage is only heard; with no word at all it is over at four minutes, and nothing was paid', async () => {
   const t = makeBot();
   const phone = await linkPhone(t);
