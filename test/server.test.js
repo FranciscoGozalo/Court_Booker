@@ -178,6 +178,17 @@ test('a note about a hold needs the token, and its answer carries your order bac
   });
 });
 
+test('the jobs ask passes on when Glasgow Club\'s own run starts on the PC (booker 2.12): 22:00 to 23:59 only', async () => {
+  const seen = [];
+  const handlers = { getJobs: (from, o) => { seen.push(o.clubRun); return { jobs: [] }; }, onResult: async () => ({ ok: true }) };
+  await withServer(handlers, async base => {
+    for (const q of ['', '?run=1&venues=1&clubRun=1430', '?clubRun=99', '?clubRun=1440', '?clubRun=23:50', '?clubRun=1320']) {
+      assert.equal((await fetch(`${base}/agent/jobs${q}`, { headers: auth })).status, 200);
+    }
+  });
+  assert.deepEqual(seen, [null, 1430, null, null, null, 1320]);
+});
+
 test('the ping says whether its booker takes Book now at Glasgow Club (2.11.3): an object is passed on as `book`, anything else is nothing', async () => {
   const got = [];
   await withServer({ getJobs: () => ({}), onResult: async () => ({ ok: true }), onPing: (from, said) => { got.push(said); return {}; } }, async base => {

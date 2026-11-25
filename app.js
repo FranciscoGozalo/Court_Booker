@@ -32,7 +32,7 @@ const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 const GB = require('./lib/glasgowbook');
 
-const VERSION = '2.11.3';
+const VERSION = '2.12.0';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -156,7 +156,7 @@ function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, weekly: [], once: [], onceAway: [], order: [1, 2, 3, 4, 5, 6], paused: false,
     results: {}, sent: {}, pics: {}, lastSeen: null, lastRun: null, home: null,
-    apps: [], notes: [], pcCard: null, pcBooks: false,
+    apps: [], notes: [], pcCard: null, pcBooks: false, pcClubRun: null,
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -188,6 +188,9 @@ function loadState(raw, env = {}) {
       // Whether your PC's last ping said its booker takes Book now at Glasgow Club (2.11.3), so a bot
       // just restarted shows the app Book there, not Hold, before the PC's first ping.
       state.pcBooks = raw.pcBooks === true;
+      // When your PC's booker starts Glasgow Club's own run (2.12: 1430, 23:50), as it last said; null
+      // for a booker that books Glasgow Club from its 21:55 run.
+      state.pcClubRun = Number.isInteger(raw.pcClubRun) ? raw.pcClubRun : null;
     }
     for (const kind of KINDS) {                                   // what Telegram calls each picture, once it has it
       const p = raw.pics && raw.pics[kind];
@@ -413,9 +416,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   const waiters = new Set();                          // pings waiting for something to do
   const CLUB_SLEEP_GUARD_MS = 60 * 60 * 1000;         // ...an hour before Glasgow Club's midnight...
   const CLUB_SLEEP_AFTER_MS = 30 * 60 * 1000;         // ...and half an hour after it (its payments take minutes)
+  // With Glasgow Club's own run on your PC (booker 2.12, at 23:50), the PC may sleep until five minutes
+  // before that run: the run's own task wakes it. Before 2.12 the 21:55 run stays awake to midnight.
+  const clubSleepGuard = () => (Number.isInteger(state.pcClubRun) ? (24 * 60 - state.pcClubRun + 5) * 60000 : CLUB_SLEEP_GUARD_MS);
   function sleepBlocker(t) {
     if (state.paused || owner() === null) return null;
-    const club = releaseAround(t, cfg(), CLUB_SLEEP_GUARD_MS, CLUB_SLEEP_AFTER_MS, true);
+    const club = releaseAround(t, cfg(), clubSleepGuard(), CLUB_SLEEP_AFTER_MS, true);
     if (club) return club;
     const [rel] = upcoming(t, cfg(), 1);
     return rel && t >= rel.releaseAt - SLEEP_GUARD_MS ? rel : null;
@@ -1908,9 +1914,15 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // `venues`: the PC's booker books every venue (2.10: it asks with ?venues=1). One that does not
   // is handed Kelvingrove's jobs alone, as it always was: it would book any other at Kelvingrove.
   // Each of those others then has a result that says why, once.
-  function jobsForAgent(from = {}, { run, venues = false } = {}) {
+  function jobsForAgent(from = {}, { run, venues = false, clubRun = null } = {}) {
     const t = now();
     const starting = run !== false;
+    // Booker 2.12 says when Glasgow Club's own run starts (23:50); an older one says nothing.
+    const club = Number.isInteger(clubRun) ? clubRun : null;
+    if (club !== state.pcClubRun) {
+      state.pcClubRun = club;
+      log(club === null ? 'Your PC books Glasgow Club from its 21:55 run.' : `Your PC books Glasgow Club from a run of its own at ${hhmm(club)}.`);
+    }
     state.lastSeen = t;
     if (starting) state.lastRun = t;
     if (starting) runNote = { stage: 'started', at: t, why: null };
@@ -2377,6 +2389,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   async function checkAhead(t, chat) {
     const rel = releaseAround(t, cfg(), PREFLIGHT_MS, -MISSING_MS);
     if (!rel) return;
+    // Glasgow Club's own run on your PC (booker 2.12): its task wakes the PC at 23:50, so the PC is
+    // asleep before then by design. It is looked for three minutes after that run should have
+    // started, not twenty minutes before midnight.
+    if (rel.club && Number.isInteger(state.pcClubRun) && t < rel.releaseAt - (24 * 60 - state.pcClubRun - 3) * 60000) return;
     const key = `pre:${rel.releaseAt}`, warned = `prewarn:${rel.releaseAt}`;
     const tried = state.sent[key];
     if (!tried) {
@@ -2411,7 +2427,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const rel = missingFor(t, cfg(), state.lastRun);
     if (!rel) return;
     const awake = pcState(t) === 'awake';
-    await warnOnce(`missing:${rel.releaseAt}`, t, () => M.missingText(cfg(), rel, awake), text => sendCard(chat, 'home-offline', text, UI.afterMissing()),
+    await warnOnce(`missing:${rel.releaseAt}`, t, () => M.missingText(cfg(), { ...rel, clubRun: state.pcClubRun }, awake), text => sendCard(chat, 'home-offline', text, UI.afterMissing()),
       `Warned that the booking run has not started for ${label(rel.playDate)}${awake ? ' (the PC is awake)' : ''}`);
   }
 
@@ -2608,6 +2624,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         state: x.pc, linked, seenAt: state.lastSeen, line: line ? A.plain(line) : null,
         canWake: !noWake, wakeWhy: noWake ? noWake.toast : null, canSleep: !noSleep, sleepWhy: noSleep,
         sleepAsked: sleepAsk !== null && t - sleepAsk <= SLEEP_ASK_MS ? sleepAsk : null, wokeAt, cardKey,
+        // 2.12: the minute Glasgow Club's own run starts on your PC (1430, 23:50): requests for the coming
+        // midnight are taken until then. Null: its 21:55 run takes them, so until 21:55.
+        clubRun: Number.isInteger(state.pcClubRun) ? state.pcClubRun : null,
       },
       release: releases.length ? releaseOf(releases[0]) : null,
       later: releases.slice(1).map(releaseOf),

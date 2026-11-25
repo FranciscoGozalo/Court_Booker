@@ -92,6 +92,27 @@ test('no sleeping in the half hour before a booking, or when the PC is not awake
   assert.match(tg.last().text, /Already asleep\./);
 });
 
+test('Glasgow Club at midnight: no sleeping from 23:00; with your PC\'s own run at 23:50 (booker 2.12), Sleep is fine until 23:45', async () => {
+  const weekly = [{ id: 'aaaaaaa3', venue: 'gorbals', type: 'indoor', day: 'wed', start: 1080, hours: 1, on: true }];  // Wed 25 Nov opens at the midnight after Tuesday
+  const { app, tg, clock } = makeApp(`${TUE}T23:10:00Z`, { owner: OWNER, weekly });
+  await app.pingFromAgent({});
+  await app.handleUpdate(say(OWNER, '/sleep'));
+  assert.match(tg.last().text, /Staying awake for the 00:00 booking\./);              // an older booker stays awake to midnight
+  // The booker says it runs Glasgow Club at 23:50 (any jobs call, a look too): the PC may sleep till then.
+  app.jobsForAgent({}, { run: false, venues: true, clubRun: 1430 });
+  await app.handleUpdate(say(OWNER, '/sleep'));
+  assert.match(tg.last().text, /Sleep sent at 23:10/);
+  clock.t = at(`${TUE}T23:46:00Z`);
+  await app.pingFromAgent({});
+  await app.handleUpdate(say(OWNER, '/sleep'));
+  assert.match(tg.last().text, /Staying awake for the 00:00 booking\./);              // from 23:45, five minutes before its run
+  // A booker that says nothing again (gone back to an older one): an hour before, as before.
+  app.jobsForAgent({}, { run: false, venues: true });
+  clock.t = at(`${TUE}T23:10:00Z`);
+  await app.handleUpdate(say(OWNER, '/sleep'));
+  assert.match(tg.last().text, /Staying awake for the 00:00 booking\./);
+});
+
 test('the server passes { wait } through and answers when the app does', async () => {
   const got = [];
   const server = createServer({ token: 'a-long-random-line-for-testing-only', getJobs: () => ({}), onResult: async () => ({ ok: true }),
