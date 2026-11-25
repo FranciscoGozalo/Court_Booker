@@ -24,7 +24,7 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.12.0 (`api: 3`; 2.12 adds `pc.clubRun`; it signs Book now at Glasgow Club
+This file describes the API as built in version 2.12.0 (`api: 3`; 2.12 adds `pc.clubRun` and `glasgow.tried`; it signs Book now at Glasgow Club
 in words of its own, `court-broker/now/v1`, with the courts and the minute the app signed (`stamp`, required on
 `POST /app/glasgow/book` and handed on in the ping's `glasgowBook`), and shows the app each weekly booking's and one-off
 date's signature only by its sum, `weekly[].authSum` and `once[].authSum`, in place of `auth` (see "Signed bookings" and
@@ -171,7 +171,8 @@ state = {
               release: { daysAhead: 7, at }, paid, allowance } ],                // every venue, in a fixed order
   clubspark: { linked, days: { first, last }, quietUntil, lookNo, bookNo,  // the parks on ClubSpark
                reads: { used, max: 6, nextAt }, book: null | book },
-  glasgow: { linked, pcBooks, bookNo, payMax, book: null | glasgowBook },  // 2.11.3: Book now at Glasgow Club
+  glasgow: { linked, pcBooks, bookNo, payMax, book: null | glasgowBook,   // 2.11.3: Book now at Glasgow Club
+             tried: [ { id, venue, type, date, start, why } ] },           // 2.12: slots it refuses: Pay pressed, or may have been
   allowance: [ { week, sessions, hours, plannedSessions, plannedHours, maxSessions: 7, maxHours: 14 } ],   // this week, then next
   paused: false,
   kept: "disk" | "variable" | "no",
@@ -320,6 +321,18 @@ screens and flow are the parks'; only paying differs. See "Book now at Glasgow C
   asking for Face ID, so nothing is signed that could not be sent.
 - `payMax`: your PC's price cap a court, as its last ping said ("£30.00", its `GLASGOW_AUTO_PAY_MAX`),
   or null when no ping since the bot started has said it. The app shows it in the confirm.
+- `tried` (2.12): the Glasgow Club slots still to come that `POST /app/glasgow/book` refuses because
+  Pay was pressed for them, or may have been (a result kept with `paid` true or `"maybe"` and not
+  booked, from the midnight run or a Book now, or a Book now that has just ended so): your PC pays for
+  each slot once at most. Soonest first; `[]` when there is none. Each: `id` (the slot's result id,
+  "gorbals/2026-11-20@18:00"), `venue`, `type` (as kept: at Scotstoun, one id covers its indoor and
+  outdoor courts, and either is refused), `date`, `start`, and `why`, the very sentence the request
+  is refused with ("Your PC may already have paid for Gorbals on Fri 20 Nov at 18:00. Check Bookings
+  on Glasgow Club’s site and your banking app."). As with `bookNo`, the app looks here before it
+  asks for Face ID: for a slot listed (by `id`, or by `venue`, `date` and `start`, of either court
+  type) it says `why` and signs nothing. The way round, once you have looked under Bookings and in
+  your banking app, is a hold (not refused for it) or Glasgow Club's site (see "Known limits of Book
+  now at Glasgow Club"). An app older than 2.12 ignores it, and is refused after Face ID as before.
 - `book`: the booking being followed, or the last one, kept in memory only (null after a restart):
   - `id`: 12 hex characters. `venue`, `type`, `centre` (g, s or o), `venueName` ("Gorbals",
     "Scotstoun", "Scotstoun outdoor"). `date`, `start`, `end`, `hours` (always 1).
@@ -1542,7 +1555,8 @@ the state, with `glasgow.book` at stage `"asked"`; from then on it moves in the 
   date and start, of either court type (Scotstoun's indoor and outdoor share a result's id); a slot
   whose Pay was pressed, or may have been, of either court type (a result kept for it with `paid`
   true or `"maybe"`, from the midnight run or a Book now, or a Book now that has just ended so and
-  whose result is still on its way: your PC pays for each slot once at most); a look
+  whose result is still on its way: your PC pays for each slot once at most; the state lists those
+  slots in `glasgow.tried`, with this very refusal, since 2.12); a look
   showing the app every court asked for free at that start in the last 15 minutes (as for a hold);
   then the guards in `glasgow.bookNo`, in the order below.
 
@@ -1710,7 +1724,9 @@ something else. With each part older than 2.12:
   already booked …"), and a slot your PC once started to pay for (a key typed, even if it then stopped
   before Pay) is refused by your PC after that ("your PC has paid, or tried to pay, for this slot
   before …"). One this bot knows Pay was pressed for, or may have been, is refused here first, before
-  anything reaches your PC ("Your PC may already have paid for …"). For those, once you have looked
+  anything reaches your PC ("Your PC may already have paid for …"), and listed in `glasgow.tried`
+  (2.12) so that the app can say so before Face ID. One your PC only typed a key for, and did not
+  press Pay, is not known here as such, and is refused by your PC alone. For those, once you have looked
   under Bookings and in your banking app, hold the court in Telegram, or book on Glasgow Club's site.
 - A Book now and a hold count together toward the six sign-ins an hour, but a hold refused for it
   still says "That’s 6 holds in an hour."

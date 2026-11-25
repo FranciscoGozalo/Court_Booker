@@ -2616,7 +2616,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       // Book now at Glasgow Club (2.11.3, lib/glasgowbook.js). `pcBooks`: your PC's booker takes it (else
       // the app holds); `bookNo`: why none can start now; `payMax`: your PC's price cap a court, as its
       // last ping said ("£30.00"), or null; `book`: the booking being followed, or the last one.
-      glasgow: { linked, pcBooks: state.pcBooks === true, bookNo: gb.blocker(t), payMax: pcBook ? pcBook.max : null, book: gb.view(t) },
+      // `tried` (2.12): the slots still to come it refuses because Pay was pressed for them, or may
+      // have been, each with the sentence it is refused with, for the app to say before Face ID.
+      glasgow: { linked, pcBooks: state.pcBooks === true, bookNo: gb.blocker(t), payMax: pcBook ? pcBook.max : null, book: gb.view(t), tried: gb.tried(t) },
       allowance: W.weeks(c, state.results, t),                         // this week and next (lib/allowance.js)
       paused: state.paused,
       kept: kept(),

@@ -748,7 +748,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
     // Nothing stands in the way of a look or Book now at a park: the PC is awake, and it is midday.
     clubspark: { linked: true, days: { first: TUE, last: '2026-11-23' }, quietUntil: null, lookNo: null, bookNo: null, reads: { used: 0, max: 6, nextAt: null }, book: null },
     // Book now at Glasgow Club (2.11.3): this PC has not said its booker takes it, so the app holds there.
-    glasgow: { linked: true, pcBooks: false, bookNo: 'Update the booker on your PC.', payMax: null, book: null },
+    glasgow: { linked: true, pcBooks: false, bookNo: 'Update the booker on your PC.', payMax: null, book: null, tried: [] },
     // This week: Thursday's 19:00 booked, Friday's two hours still to book. Next week: Tuesday and Thursday every week, and Friday the 27th.
     allowance: [
       { week: '2026-11-16', sessions: 1, hours: 1, plannedSessions: 1, plannedHours: 2, maxSessions: 7, maxHours: 14 },
