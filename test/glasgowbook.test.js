@@ -512,18 +512,19 @@ test('the go-ahead only for the booking still followed: exactly its courts, at n
   // Off asked for in the app: never refused while it books, and it stops this one at once.
   const off = await goWith({ price: '£23.00', courts: [3] }, { before: async (t, phone) => { assert.equal((await ask(t, phone, 'card/auto/off')).status, 200); } });
   assert.deepEqual(off.answer, STOP);
-  // Its result then says why your PC did not pay, in this bot's words: nothing was paid.
+  // Its result then says why your PC did not pay, in this bot's words, with what your PC said of the basket: nothing was paid.
   await off.t.app.resultFromAgent(notPaidOf('your PC did not pay: the bot did not give the go-ahead to pay (it had stopped following this booking). The court was taken out of your basket again'));
   await settle();
   const s = stateOf(off.t, off.phone);
-  assert.deepEqual([s.results[0].why, s.results[0].paid], ['It didn’t work: Pay Automatically was turned off, so I told your PC not to pay. Nothing was paid.', false]);
-  assert.deepEqual([s.glasgow.book.ended, s.glasgow.book.line], ['failed', 'Not booked: Pay Automatically was turned off, so I told your PC not to pay. Nothing was paid.']);
+  const offWhy = 'Pay Automatically was turned off, so I told your PC not to pay. The court was taken out of your basket again';
+  assert.deepEqual([s.results[0].why, s.results[0].paid], [`It didn’t work: ${offWhy}. Nothing was paid.`, false]);
+  assert.deepEqual([s.glasgow.book.ended, s.glasgow.book.line], ['failed', `Not booked: ${offWhy}. Nothing was paid.`]);
   assert.match(off.t.logs.join('\n'), /no go-ahead to pay for Gorbals 2026-11-20 18:00 court 3: Pay Automatically was turned off/);
   // The same result sent again (its answer was lost on the way) is kept in the same words, once.
   const cards = off.t.tg.calls.length;
   await off.t.app.resultFromAgent(notPaidOf('your PC did not pay: the bot did not give the go-ahead to pay (it had stopped following this booking). The court was taken out of your basket again'));
   await settle();
-  assert.deepEqual([off.t.app.state.results[RID].why, off.t.tg.calls.length], ['Pay Automatically was turned off, so I told your PC not to pay', cards]);
+  assert.deepEqual([off.t.app.state.results[RID].why, off.t.tg.calls.length], [offWhy, cards]);
   // A stop for the price says the price and the cap; and the PC's own word "gone" after a stop says the same.
   const over = await goWith({ price: '£31.00', courts: [3] });
   pcSays(over.t, { id: over.id, stage: 'gone', why: 'the booking tool stopped with code 7' });
@@ -539,6 +540,42 @@ test('the go-ahead only for the booking still followed: exactly its courts, at n
   assert.deepEqual(again.t.app.glasgowBookFromAgent(null), { ok: true, stop: true, unknown: true });
   const ended = await goWith({ price: '£23.00', courts: [3] }, { before: t => { t.clock.t += 4 * MIN; return t.app.tick(); } });
   assert.deepEqual(ended.answer, STOP);
+});
+
+test('told to stop, your PC\'s result says why in this bot\'s words, and keeps what your PC said of the basket (a court that may still be there) and of the payment', async () => {
+  const stopThen = async (result, { body = BODY, paying = { price: '£31.00', courts: [3] } } = {}) => {
+    const t = makeBot();
+    const phone = await linkPhone(t);
+    const { id } = await started(t, phone, body);
+    assert.deepEqual(pcSays(t, { id, stage: 'paying', ...paying }), { ok: true, stop: true });
+    t.tg.clear();
+    await t.app.resultFromAgent(result);
+    await settle();
+    const s = stateOf(t, phone);
+    return { why: s.results[0].why, paid: s.results[0].paid, price: s.results[0].price, line: s.glasgow.book.line, card: t.tg.calls[0].text.split('\n')[1] };
+  };
+  const OVER = '£31.00 is over your PC\'s cap of £30.00, so I told your PC not to pay';
+  const NO_GO = 'your PC did not pay: the bot did not give the go-ahead to pay (it had stopped following this booking)';
+  // A court that would not go out of the basket again: said, in Courts, the card, and the app's line.
+  let e = await stopThen(notPaidOf(`${NO_GO}. A court may still be in your basket, unpaid: an unpaid court lapses by itself`));
+  const maybeIn = `It didn’t work: ${OVER}. A court may still be in your basket, unpaid: an unpaid court lapses by itself. Nothing was paid.`;
+  assert.deepEqual([e.why, e.card, e.line, e.paid], [maybeIn, maybeIn, `Not booked: ${maybeIn.slice('It didn’t work: '.length)}`, false]);
+  // "It" (the court) and "They" (two courts) are named, once your PC's reason before them is gone.
+  e = await stopThen(notPaidOf(`${NO_GO}. It may still be in your basket, unpaid: an unpaid court lapses by itself`));
+  assert.equal(e.why, `It didn’t work: ${OVER}. The court may still be in your basket, unpaid: an unpaid court lapses by itself. Nothing was paid.`);
+  e = await stopThen(notPaidOf(`${NO_GO}. They may still be in your basket, unpaid: an unpaid court lapses by itself`), { body: TWO, paying: { price: '£62.00', courts: [3, 4] } });
+  assert.equal(e.why, 'It didn’t work: £62.00 is over your PC\'s cap of £30.00 a court, so I told your PC not to pay. The courts may still be in your basket, unpaid: an unpaid court lapses by itself. Nothing was paid.');
+  // Something else in the basket your PC does not recognise; and the price it said, kept with the result.
+  e = await stopThen(notPaidOf(`${NO_GO}. Your basket still holds something your PC does not recognise as this booking's courts: a court may be in it under other words, unpaid (an unpaid court lapses by itself)`));
+  assert.equal(e.why, `It didn’t work: ${OVER}. Your basket still holds something your PC does not recognise as this booking's courts: a court may be in it under other words, unpaid (an unpaid court lapses by itself). Nothing was paid.`);
+  e = await stopThen({ ...notPaidOf(`${NO_GO}. The court was taken out of your basket again`), price: '£31.00' });
+  assert.deepEqual([e.why, e.price], [`It didn’t work: ${OVER}. The court was taken out of your basket again. Nothing was paid.`, '£31.00']);
+  // Nothing said of the basket: this bot's words alone, as before. Pay pressed after all (it never is
+  // after a stop): your PC's own words stand, with what was paid.
+  e = await stopThen(notPaidOf(NO_GO));
+  assert.equal(e.why, `It didn’t work: ${OVER}. Nothing was paid.`);
+  e = await stopThen(maybeOf());
+  assert.deepEqual([e.why.startsWith(`It didn’t work: ${PRESSED_WHY}.`), e.paid], [true, 'maybe']);
 });
 
 test('over HTTP, with the server built as index.js builds it: the ping carries Book now and hands the order over, the steps reach the follower, "paying" gets the go-ahead, and the result is the follower\'s', async () => {

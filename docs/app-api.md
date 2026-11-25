@@ -1660,7 +1660,13 @@ Automatically off is always taken: it stops this booking at its go-ahead, if it 
   bot does not know (it restarted since), a booking that does not match. Your PC presses nothing
   without `go: true`, and with `stop` it takes the courts out of the basket again, pays nothing and
   sends a failed result, whose `why` this bot then gives in its own words ("Pay Automatically was
-  turned off, so I told your PC not to pay", "£31.00 is over your PC's cap of £30.00, so …").
+  turned off, so I told your PC not to pay", "£31.00 is over your PC's cap of £30.00, so …"), in place
+  of your PC's reason ("the bot did not give the go-ahead to pay …"). What your PC said besides of the
+  basket stands with them (2.12; before, this bot's words replaced it all): "… so I told your PC not to
+  pay. The court was taken out of your basket again", or "… A court may still be in your basket,
+  unpaid: an unpaid court lapses by itself" (its "It may still be …" named: "The court may still
+  be …", "The courts …" for two), or that the basket holds something it does not recognise. `paid` and
+  `price` are your PC's, as with every result.
 - A route without its handler answers 404, as an older bot does: never anything that could read as
   a go (`index.js` builds the server with every handler: `serverFor`).
 - `kind: "challenge"` (Glasgow Club checked visitors from home): an hour of quiet for holds and
@@ -1687,7 +1693,7 @@ your banking app and under Bookings on Glasgow Club's site.").
 | `silent` (4 min), before the go-ahead | false | "no word from your PC for four minutes, so I stopped following it. It pays nothing without my go-ahead" |
 | `timeout` (30 min), before the go-ahead | false | "your PC was still at it half an hour after it took the booking, so I stopped following it. It pays nothing without my go-ahead" |
 | `gone` / `quit`, before the go-ahead | false | "your PC's booking stopped before paying (<why>)" |
-| any of these, after a stop | false | "<why it was stopped>, so I told your PC not to pay" |
+| any of these, after a stop | false | "<why it was stopped>, so I told your PC not to pay" (your PC's own result after a stop, nothing paid: the same, then what it said of the basket, 2.12) |
 | `gone` / `quit`, after the go-ahead, no press noted | false | "your PC stopped before Pay was pressed (<why>). An unpaid court lapses by itself" |
 | `gone` / `quit`, after the go-ahead, a press noted (or may have been) | `"maybe"` | "your PC's booking stopped (<why>) while it was paying for Court 3" |
 | `silent`, after the go-ahead | `"maybe"` | "no word from your PC while it was paying for Court 3" |
