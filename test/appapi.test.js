@@ -215,9 +215,10 @@ test('the etag is a fingerprint of the state without the clock', () => {
 
 test('Book now at Glasgow Club (2.11.3): what the request must look like, with a plain sentence when it does not', () => {
   const AUTH = 'c019d5fd3bab087b5a29d9b76c6c69a7';
-  const ok = { venue: 'gorbals', type: 'indoor', date: FRI, start: 1080, hours: 1, court: 3, auth: AUTH };
+  const STAMP = 29915280;                                     // 2026-11-17 12:00 UTC, in whole minutes since 1970
+  const ok = { venue: 'gorbals', type: 'indoor', date: FRI, start: 1080, hours: 1, court: 3, auth: AUTH, stamp: STAMP };
   // One court; `courts` with it, or not; `hours` 1, or left out; Gorbals' type, or left out (it has one).
-  const one = { venue: 'gorbals', type: 'indoor', centre: 'g', date: FRI, start: 1080, courts: [3], auth: AUTH };
+  const one = { venue: 'gorbals', type: 'indoor', centre: 'g', date: FRI, start: 1080, courts: [3], auth: AUTH, stamp: STAMP };
   assert.deepEqual(A.readGlasgowBook(ok), one);
   assert.deepEqual(A.readGlasgowBook({ ...ok, courts: [3] }), one);
   const { type, hours, ...bare } = ok;
@@ -241,6 +242,11 @@ test('Book now at Glasgow Club (2.11.3): what the request must look like, with a
   why({ ...ok, courts: [3, 4, 5] }, 'At most 2 courts at once.');
   // It is paid: it must come signed, always.
   for (const auth of [undefined, null, '', 'C019D5FD3BAB087B5A29D9B76C6C69A7', `${AUTH}0`, AUTH.slice(1)]) why({ ...ok, auth }, 'Book now at Glasgow Club is paid: it must be signed in the app.');
+  // The minute it was signed (2.12), a whole number: an app without it is older than this bot's words.
+  // Whether it is fresh is lib/glasgowbook.js's to say, by the bot's clock.
+  for (const stamp of [undefined, null, '29915280', 29915280.5, NaN, Infinity, [STAMP], {}]) why({ ...ok, stamp }, 'Update the app to use Book now at Glasgow Club.');
+  assert.equal(A.WHY.glasgowStamp, 'Update the app to use Book now at Glasgow Club.');
+  assert.equal(A.readGlasgowBook({ ...ok, stamp: 0 }).stamp, 0);
 });
 
 test('what each request must look like, with a plain sentence when it does not', () => {
@@ -766,12 +772,12 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
     plan: [{ day: 'tue', start: 960, hours: 2 }, { day: 'thu', start: 1140, hours: 1 }],
     // 2.10: the same, as weekly entries (Kelvingrove's), each with the day it is next booked for and when that opens.
     weekly: [
-      { id: 'f7de6e62', venue: 'kelvingrove', type: 'outdoor', day: 'tue', start: 960, hours: 2, end: 1080, on: true, next: { date: '2026-11-24', opensAt: at('2026-11-17T22:00:00Z') }, signed: false, courts: 1, auth: null },
-      { id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 1, end: 1200, on: true, next: { date: '2026-11-26', opensAt: at('2026-11-19T22:00:00Z') }, signed: false, courts: 1, auth: null },
+      { id: 'f7de6e62', venue: 'kelvingrove', type: 'outdoor', day: 'tue', start: 960, hours: 2, end: 1080, on: true, next: { date: '2026-11-24', opensAt: at('2026-11-17T22:00:00Z') }, signed: false, courts: 1, authSum: null },
+      { id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 1, end: 1200, on: true, next: { date: '2026-11-26', opensAt: at('2026-11-19T22:00:00Z') }, signed: false, courts: 1, authSum: null },
     ],
     once: [
-      { id: '2026-11-20@19:00', date: FRI, start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-13T22:00:00Z'), open: true, venue: 'kelvingrove', type: 'outdoor', signed: false, courts: 1, auth: null },
-      { id: '2026-11-27@10:00', date: '2026-11-27', start: 600, hours: 1, end: 660, opensAt: at('2026-11-20T22:00:00Z'), open: false, venue: 'kelvingrove', type: 'outdoor', signed: false, courts: 1, auth: null },
+      { id: '2026-11-20@19:00', date: FRI, start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-13T22:00:00Z'), open: true, venue: 'kelvingrove', type: 'outdoor', signed: false, courts: 1, authSum: null },
+      { id: '2026-11-27@10:00', date: '2026-11-27', start: 600, hours: 1, end: 660, opensAt: at('2026-11-20T22:00:00Z'), open: false, venue: 'kelvingrove', type: 'outdoor', signed: false, courts: 1, authSum: null },
     ],
     order: [3, 4, 5, 2, 1, 6],
     // Today and later first, soonest first; then what is past, newest first.
@@ -997,7 +1003,7 @@ test('a one-off date from the app is the same as /book: added, already there, or
   let r = await ask(t, phone, 'once', { date: '2026-11-25', start: 1140, hours: 2 });
   assert.equal(r.status, 200);
   assert.deepEqual(Object.keys(r.body), ['ok', 'etag', 'state']);
-  assert.deepEqual(r.body.state.once, [{ id: '2026-11-25@19:00', venue: 'kelvingrove', type: 'outdoor', date: '2026-11-25', start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-18T22:00:00Z'), open: false, signed: false, courts: 1, auth: null }]);
+  assert.deepEqual(r.body.state.once, [{ id: '2026-11-25@19:00', venue: 'kelvingrove', type: 'outdoor', date: '2026-11-25', start: 1140, hours: 2, end: 1260, opensAt: at('2026-11-18T22:00:00Z'), open: false, signed: false, courts: 1, authSum: null }]);
   assert.equal(r.body.etag, t.app.appState(phone.device).etag);
   assert.deepEqual(t.store.load().once, [{ date: '2026-11-25', start: 1140, hours: 2 }]);
   assert.deepEqual(t.app.state.once, (await inTelegram(NOON, {}, '/book 25 nov 19:00 2h')).state.once);

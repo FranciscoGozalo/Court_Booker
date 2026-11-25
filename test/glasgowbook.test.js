@@ -64,7 +64,10 @@ async function linkPhone(t) {
 // here at a cap of £30.00 a court. `book: null` is a booker older than 2.11.3.
 const pcPing = (t, { wait = 0, card = {}, book = { max: '£30.00' } } = {}) =>
   t.app.pingFromAgent(HOME, { wait, card: { key: KEY, has: true, kept: VISA, auto: true, ...card }, book });
-const ask = (t, phone, name, body = {}) => t.app.appAsk(phone.device, name, body);
+// The app stamps each Book now with the minute it signed it (2.12, `stamp`): here, the minute on the
+// bot's own clock, unless the body says otherwise (`stamp: undefined` reads as a body without one).
+const stampOf = ms => Math.floor(ms / MIN);
+const ask = (t, phone, name, body = {}) => t.app.appAsk(phone.device, name, name === 'glasgow/book' && !('stamp' in body) ? { ...body, stamp: stampOf(t.clock.t) } : body);
 const refused = (status, why) => ({ status, body: { ok: false, why } });
 const stateOf = (t, phone) => t.app.appState(phone.device).state;
 const pcSays = (t, raw) => t.app.glasgowBookFromAgent(raw);
@@ -121,9 +124,9 @@ test('Book now at Glasgow Club, end to end: asked, collected once with its signa
     stage: 'asked', live: true, ended: null, why: null, price: null, paid: null, at: t.clock.t, heardAt: t.clock.t, line: 'Asking your PC to book it.',
   });
   assert.equal(asked.body.state.glasgow.bookNo, 'Your PC is already booking a court.');
-  // Handed over once, in the order's shape, with the signature; never again, and not kept here.
+  // Handed over once, in the order's shape, with the signature and the minute it was signed; never again, and not kept here.
   assert.match(id, /^[0-9a-f]{12}$/);
-  assert.deepEqual(order, { ok: true, glasgowBook: { id, key: 'g', date: FRI, start: 1080, courts: [3], auth: AUTH } });
+  assert.deepEqual(order, { ok: true, glasgowBook: { id, key: 'g', date: FRI, start: 1080, courts: [3], auth: AUTH, stamp: stampOf(at(NOON)) } });
   assert.deepEqual(await pcPing(t), { ok: true });
   const book = () => stateOf(t, phone).glasgow.book;
   assert.equal(book().line, 'Starting Chrome on your PC…');
@@ -199,7 +202,7 @@ test('what stands in the way, in order: each sentence as the one before it is cl
   const env = clearEnv();
   const gb = GB.createGlasgowBook(depsOf(env));
   assert.equal(gb.blocker(env.t), null);
-  assert.equal(await gb.appAsk(BODY, () => 'asked'), 'asked');
+  assert.equal(await gb.appAsk({ ...BODY, stamp: stampOf(env.t) }, () => 'asked'), 'asked');
   // Everything at once in the way, then cleared one at a time.
   Object.assign(env, { holdLive: true, csLive: true, awake: false, night: 'Not available 21:25–22:15, around the nightly booking.', run: true, quiet: at(NOON) + 30 * MIN,
     starts: Array.from({ length: 6 }, (_, i) => at(NOON) - 50 * MIN + i * MIN), books: false, why: 'GLASGOW_PAY_PER_DAY in .env is 0.', max: null, kept: false, auto: false, asking: null });
@@ -353,6 +356,81 @@ test('the day, the time, a booking kept already (either court type at Scotstoun)
   assert.equal((await collected(f, phoneF)).asked.status, 200);
 });
 
+// ---------- the stamp (2.12) ----------
+
+const OLD_APP = 'Update the app to use Book now at Glasgow Club.';
+const TOO_LONG = 'That took too long. Try again.';
+const CLOCK_AHEAD = 'Your phone’s clock is ahead. Set it to the right time, then try again.';
+
+test('the stamp (2.12): an ask without one, or with one that is not a whole number of minutes, is from an app older than Book now\'s own words: refused, and nothing is started or handed over', async () => {
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  await pcPing(t);
+  await seeFree(t, phone);
+  const now = stampOf(t.clock.t);
+  for (const stamp of [undefined, null, String(now), now + 0.5, NaN, [now]]) {
+    assert.deepEqual(await ask(t, phone, 'glasgow/book', { ...BODY, stamp }), refused(400, OLD_APP), String(stamp));
+  }
+  assert.deepEqual(await ask(t, phone, 'glasgow/book', { ...BODY, auth: undefined, stamp: undefined }), refused(400, 'Book now at Glasgow Club is paid: it must be signed in the app.'));
+  const s = stateOf(t, phone);
+  assert.deepEqual([s.glasgow.book, s.glasgow.bookNo], [null, null]);
+  assert.deepEqual(await pcPing(t), { ok: true });                                               // nothing to collect
+  assert.ok(!t.logs.some(l => /Book now at Glasgow Club asked for/.test(l)));
+});
+
+test('the stamp (2.12): signed more than five minutes before the bot\'s clock, or more than two minutes after it, is refused in plain words before anything else, and nothing is started; at the edges it is taken; a good one is handed to your PC with the order as the app sent it', async () => {
+  // At the edges, by the bot's clock (whole minutes: 12:00:30 is half a minute past the stamp 12:00).
+  const answer = async (t, stamp, body = BODY) => {
+    const env = { ...clearEnv(), t };
+    const gb = GB.createGlasgowBook(depsOf(env));
+    const r = await gb.appAsk({ ...body, stamp }, () => 'asked');
+    return r === 'asked' ? { r, order: gb.takeOrder(env.t) } : { r };
+  };
+  const noon = stampOf(at(NOON));
+  const cases = [
+    [at(NOON), noon - 5, 'asked'], [at(NOON), noon - 6, TOO_LONG], [at(NOON), noon + 2, 'asked'], [at(NOON), noon + 3, CLOCK_AHEAD],
+    [at(NOON) + 30000, noon - 4, 'asked'], [at(NOON) + 30000, noon - 5, TOO_LONG], [at(NOON) + 30000, noon + 2, 'asked'], [at(NOON) + 30000, noon + 3, CLOCK_AHEAD],
+    [at(NOON) + 5 * MIN, noon, 'asked'], [at(NOON) + 5 * MIN + 1, noon, TOO_LONG],
+    [at(NOON), 0, TOO_LONG], [at(NOON), -noon, TOO_LONG], [at(NOON), 1e15, CLOCK_AHEAD],
+  ];
+  for (const [t, stamp, want] of cases) {
+    const { r, order } = await answer(t, stamp);
+    const label = `${new Date(t).toISOString()} with ${stamp}`;
+    if (want === 'asked') {
+      assert.equal(r, 'asked', label);
+      assert.equal(order.glasgowBook.stamp, stamp, label);                                           // as the app sent it, not this bot's minute
+    } else assert.deepEqual(r, refused(400, want), label);
+  }
+  assert.deepEqual([GB.STAMP_OLD_MS, GB.STAMP_AHEAD_MS], [5 * MIN, 2 * MIN]);
+  assert.deepEqual([GB.STAMP_OLD, GB.STAMP_AHEAD], [TOO_LONG, CLOCK_AHEAD]);
+  // Before anything else: a stale stamp on a day gone is refused for the stamp.
+  assert.deepEqual((await answer(at(NOON), noon - 6, { ...BODY, date: '2026-11-16' })).r, refused(400, TOO_LONG));
+  // In the bot: the owner took too long over Face ID, or the phone's clock is fast. Refused, nothing
+  // started, no sign-in counted; then asked again, signed afresh, it goes, and the order carries that stamp.
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  await pcPing(t);
+  await seeFree(t, phone);
+  const signed = stampOf(t.clock.t);
+  t.clock.t += 5 * MIN + 1000;
+  await pcPing(t);
+  for (let i = 0; i < 7; i++) assert.deepEqual(await ask(t, phone, 'glasgow/book', { ...BODY, stamp: signed }), refused(400, TOO_LONG));
+  assert.deepEqual(await ask(t, phone, 'glasgow/book', { ...BODY, stamp: stampOf(t.clock.t) + 3 }), refused(400, CLOCK_AHEAD));
+  let s = stateOf(t, phone);
+  assert.deepEqual([s.glasgow.book, s.glasgow.bookNo], [null, null]);
+  assert.deepEqual(await pcPing(t), { ok: true });                                               // nothing to collect
+  const again = stampOf(t.clock.t);
+  const ping = pcPing(t, { wait: 5 });
+  assert.equal((await ask(t, phone, 'glasgow/book', { ...BODY, stamp: again })).status, 200);
+  const order = await ping;
+  assert.deepEqual(order, { ok: true, glasgowBook: { id: order.glasgowBook.id, key: 'g', date: FRI, start: 1080, courts: [3], auth: AUTH, stamp: again } });
+  // Handed over once, with its signature; neither is handed over again, nor is either in the state or the log.
+  assert.deepEqual(await pcPing(t), { ok: true });
+  s = stateOf(t, phone);
+  assert.ok(!JSON.stringify(s).includes(AUTH) && !('stamp' in s.glasgow.book));
+  assert.ok(!t.logs.join('\n').includes(AUTH));
+});
+
 // ---------- the hand-over ----------
 
 test('a booking waiting for your PC\'s ping is looked at again before it is handed over; if anything came round meanwhile it is not, and nothing was paid', async () => {
@@ -367,7 +445,7 @@ test('a booking waiting for your PC\'s ping is looked at again before it is hand
   for (const [name, change, why] of cases) {
     const env = clearEnv(), kept = [];
     const gb = GB.createGlasgowBook(depsOf(env, { record: async r => { kept.push(r); } }));
-    assert.equal(await gb.appAsk(BODY, () => 'asked'), 'asked', name);
+    assert.equal(await gb.appAsk({ ...BODY, stamp: stampOf(env.t) }, () => 'asked'), 'asked', name);
     change(env);
     assert.equal(gb.takeOrder(env.t), null, name);
     assert.equal(gb.takeOrder(env.t), null, name);
@@ -477,12 +555,15 @@ test('over HTTP, with the server built as index.js builds it: the ping carries B
     assert.deepEqual(await post('/agent/ping', pingBody), { status: 200, json: { ok: true } });
     assert.equal((await post('/app/indoor/look', { centre: 'g', date: FRI }, phone.token)).status, 200);
     const ping = post('/agent/ping', { ...pingBody, wait: 5 });
-    const asked = await post('/app/glasgow/book', BODY, phone.token);
+    // An app older than 2.12 sends no stamp: refused, and nothing is started.
+    assert.deepEqual(await post('/app/glasgow/book', BODY, phone.token), { status: 400, json: { ok: false, why: 'Update the app to use Book now at Glasgow Club.' } });
+    const stamp = stampOf(t.clock.t) - 1;                                                         // signed the minute before
+    const asked = await post('/app/glasgow/book', { ...BODY, stamp }, phone.token);
     assert.equal(asked.status, 200);
     assert.equal(asked.json.state.glasgow.book.stage, 'asked');
     const order = (await ping).json;
     const id = order.glasgowBook.id;
-    assert.deepEqual(order, { ok: true, glasgowBook: { id, key: 'g', date: FRI, start: 1080, courts: [3], auth: AUTH } });
+    assert.deepEqual(order, { ok: true, glasgowBook: { id, key: 'g', date: FRI, start: 1080, courts: [3], auth: AUTH, stamp } });
     assert.deepEqual(await post('/agent/glasgow/book', { id, stage: 'starting' }), { status: 200, json: { ok: true } });
     assert.deepEqual(await post('/agent/glasgow/book', { id, stage: 'signed-in', beat: true }), { status: 200, json: { ok: true } });
     assert.deepEqual(await post('/agent/glasgow/book', { id, stage: 'paying', price: '£23.00', courts: [3] }), { status: 200, json: { ok: true, go: true } });

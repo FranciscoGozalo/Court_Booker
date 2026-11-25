@@ -17,13 +17,18 @@ Two things are the app's alone:
   money: bookings are free with the owner's annual pass, and at any price or payment step your PC
   stops and says so.
 - Book now at Glasgow Club (2.11.3, `POST /app/glasgow/book`; see "Book now at Glasgow Club"): the
-  parks' Book now, paid by your PC with the card and code it keeps, only for a slot the app signed
-  with Face ID, at no more than your PC's own cap a court, and only once this bot says go. It adds
-  no payment the app could not already have your PC make at midnight with the same signature.
+  parks' Book now, paid by your PC with the card and code it keeps, only for a slot and courts the
+  app signed with Face ID moments before, at no more than your PC's own cap a court, and only once
+  this bot says go. Since 2.12 it is signed in words of its own, with the courts and the minute it
+  was signed in them, so no other signature will do for it, nor its signature for anything else.
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.11.3 (`api: 3`; 2.11.3 adds Book now at Glasgow Club, by addition only:
+This file describes the API as built in version 2.12.0 (`api: 3`; 2.12 adds `pc.clubRun`; it signs Book now at Glasgow Club
+in words of its own, `court-broker/now/v1`, with the courts and the minute the app signed (`stamp`, required on
+`POST /app/glasgow/book` and handed on in the ping's `glasgowBook`), and shows the app each weekly booking's and one-off
+date's signature only by its sum, `weekly[].authSum` and `once[].authSum`, in place of `auth` (see "Signed bookings" and
+"Book now at Glasgow Club"); 2.11.3 adds Book now at Glasgow Club, by addition only:
 `POST /app/glasgow/book`, `state.glasgow`, the ping's `glasgowBook` and `POST /agent/glasgow/book` (see "Book now at
 Glasgow Club"); 2.11.2 adds `later` to an indoor look: the courts free on
 a day's sheet that Glasgow Club has not opened for booking yet, with when it opens, so that the app can schedule a Glasgow Club
@@ -33,7 +38,7 @@ restart of the bot, adds `card.said`, and shows "no card" as a card with no bran
 nothing is known yet (see `card`); 2.11.0 added two courts at once at Glasgow Club, by fields
 only: `courts` on `POST /app/hold` and in `hold` (with `courtNames` and `prices`), and `courts` on weekly bookings, one-off
 dates and results, and in the signature's words for two courts (see "Two courts at once (2.11)"); and each weekly booking's
-and one-off date's signature itself, `weekly[].auth` and `once[].auth`, which an app from 2.11 checks against the card's pay
+and one-off date's signature itself, `weekly[].auth` and `once[].auth` (its sum alone since 2.12), which an app from 2.11 checks against the card's pay
 key instead of signing anything afresh by itself (see "Signed bookings"); 2.10.4 added `ref` to each note, the result it is about, and the
 same as `data.ref` on its notification (see "Notes and notifications"); 2.10.3 changed no field's shape: a Glasgow Club court
 held and paid for now also shows in `results`, a hold's `pay` order may ask your PC to use the security code it keeps (see
@@ -117,7 +122,7 @@ week's 7 sessions and 14 hours, one card on its way to the PC at a time, and one
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.11.3", api: 3 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.12.0", api: 3 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -157,7 +162,7 @@ current etag the answer waits up to `wait` seconds for a change and then, if the
 
 ```
 state = {
-  now, bot: "2.11.3",
+  now, bot: "2.12.0",
   venue: { name: "Kelvingrove Park", short: "KP", first: 540, last: 1260, lengths: [1, 2],
            courts: [1,2,3,4,5,6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
   venues: [ { key, name, club: "clubspark" | "glasgow", types: ["outdoor"] | ["indoor"] | ["indoor", "outdoor"],
@@ -178,8 +183,8 @@ state = {
   later:   [ the same, for the releases after it (up to 3) ],
   open:    [ { id, date, start, end } ],             // one-off dates already open, which the PC books at its next run
   plan:    [ { day: "mon".."sun", start, hours } ],  // Kelvingrove's weekly bookings, one a day (api 2's view of weekly)
-  weekly:  [ { id, venue, type, day, start, hours, end, on, next, signed, courts, auth } ],     // weekly bookings at every venue (api 3); courts (2.11): 1 or 2; auth (2.11): the signature, or null
-  once:    [ { id, venue, type, date, start, hours, end, opensAt, open, signed, courts, auth } ],   // one-off dates still ahead, at every venue
+  weekly:  [ { id, venue, type, day, start, hours, end, on, next, signed, courts, authSum } ],     // weekly bookings at every venue (api 3); courts (2.11): 1 or 2; authSum (2.12): the signature's sum, or null
+  once:    [ { id, venue, type, date, start, hours, end, opensAt, open, signed, courts, authSum } ],   // one-off dates still ahead, at every venue
   order:   [3, 6, 1, 2, 4, 5],
   results: [ { id, venue, status: "booked" | "none" | "failed", date, start, end, court, gate, why, at, past, type, price, paid, courts } ],   // soonest upcoming first, then past ones newest first
   run:     null | { stage: "started" | "ready" | "trouble", at, why },    // tonight's run, as the PC reports it
@@ -417,9 +422,11 @@ Club). `end`: `start` plus the hours. `on`: an entry switched off is kept, and n
 `next`: `{ date, opensAt }`, the date it is booked for next and when that day opens (ms), or null
 when it is off. One venue, day and start once; several entries on a day are fine. The parks' count
 toward the weekly allowance; Glasgow Club's do not. `signed` (2.10.1): whether the bot keeps the
-app's signature for it (see "Signed bookings"); kept as it was, for apps before 2.11. `auth` (2.11):
-that signature itself, the 32 lowercase hex characters as the app sent them, or null when it has
-none: an app from 2.11 checks it against the card's pay key itself, and re-signs nothing by itself.
+app's signature for it (see "Signed bookings"); kept as it was, for apps before 2.11. `authSum` (2.12):
+that signature's sum, the first 16 lowercase hex characters of the SHA-512 of its 32 hex characters
+(as UTF-8), or null when it has none: the app makes the signature it expects with the card's pay key,
+sums it the same way and compares, and re-signs nothing by itself. It replaces `auth` (2.11), the
+signature itself, which the state no longer shows: see "Signed bookings" for why.
 `courts` (2.11): how many courts it books at once, 1, or 2 at Glasgow Club (always 1 at the parks);
 see "Two courts at once (2.11)".
 
@@ -427,7 +434,7 @@ see "Two courts at once (2.11)".
 the bot keeps it until midnight), at every venue (api 3), by date, start and venue. `id` as above;
 `venue` and `type` as in `weekly` (`"kelvingrove"`, `"outdoor"` for Kelvingrove's); `end` is `start`
 plus the hours; `opensAt` is when that day opens for booking at that venue; `open` is whether it has.
-`signed` (2.10.1), `auth` (2.11) and `courts` (2.11) as in `weekly`. Glasgow Club's are as the parks',
+`signed` (2.10.1), `authSum` (2.12) and `courts` (2.11) as in `weekly`. Glasgow Club's are as the parks',
 up to 90 days ahead (see "A one-off date at Glasgow Club" under `POST /app/once`).
 
 **`results`**: what the PC reported, kept for 60 days. First those dated today or later, soonest
@@ -688,7 +695,7 @@ is fine, and things as they stand refuse it (the same request may work later).
 | `POST /app/push` | | `{ token }`: this phone's Expo push token, or null to stop |
 | `POST /app/clubspark/look` | (app only) | `{ venue, date, fresh }` → `{ ok: true, look }` (no state): a park's free courts |
 | `POST /app/clubspark/book` | (app only) | `{ venue, date, start, hours, court }`: Book now at a park |
-| `POST /app/glasgow/book` | (app only, 2.11.3) | `{ venue, type, date, start, hours: 1, court, courts?, auth }`: Book now at Glasgow Club, paid by your PC |
+| `POST /app/glasgow/book` | (app only, 2.11.3) | `{ venue, type, date, start, hours: 1, court, courts?, auth, stamp }` (`stamp` 2.12): Book now at Glasgow Club, paid by your PC |
 
 ```
 look = { centre, date, at, by: "pc" | "bot", note, sheet,
@@ -966,7 +973,8 @@ card, or when automatic payments are switched on), one to 30 at a time: weekly b
 `id` (8 hex characters), one-off dates by theirs as `state.once` gives them (`"gorbals/2026-11-25@18:00"`;
 Kelvingrove's `"2026-11-25@18:00"`). All or nothing: one that is no longer on the list refuses the
 lot, and nothing changes. It stays for apps before 2.11, which use it; an app from 2.11 re-signs
-nothing by itself (it checks `weekly[].auth` and `once[].auth`), though it may still use it.
+nothing by itself (it checks each signature kept, by its sum since 2.12: `weekly[].authSum` and
+`once[].authSum`), though it may still use it.
 
 - 400 "To sign bookings, send items: [{ id, auth }], one to 30 of them, each a weekly booking's or a one-off date's id and its 32 hex characters." (also for an id twice)
 - 409 "That weekly booking is no longer on your list (<id>). Nothing was changed." (or "That one-off date ...")
@@ -1390,23 +1398,39 @@ anything you did not save in your app.
   two, nor the other way. A change of `courts` needs a new signature, which the app makes (with Face
   ID); the bot cannot make one, and keeps none that no longer fits (see `POST /app/weekly/change` and
   `POST /app/once`).
+- Book now at Glasgow Club (2.12): words of its own,
+  `court-broker/now/v1|<venue>|<type>|<date>|<start>|<hours>|<courts>|<stamp>`, where `courts` is the
+  court numbers themselves, lowest first, joined with `,` (`3`, or `3,4`), and `stamp` the whole
+  minutes since 1970 (UTC) when the app signed. So a one-off's signature is no good for a Book now,
+  nor a Book now's for a one-off, for other courts, or for a Book now asked for later. It is never
+  kept here (see "Book now at Glasgow Club").
 - Worked example: pay key 32 bytes of 0x5a (`WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=`);
   `court-broker/weekly/v1|gorbals|indoor|wed|1080|1` → `c019d5fd3bab087b5a29d9b76c6c69a7`;
   `court-broker/once/v1|gorbals|indoor|2026-11-25|1080|1` → `7e8fea3af1d796d60bf594483ef7a054`;
   and for two courts `court-broker/weekly/v2|gorbals|indoor|wed|1080|1|2` → `775461b248015a591db102a1d095807d`;
-  `court-broker/once/v2|gorbals|indoor|2026-11-25|1080|1|2` → `f12b7ca19d33d2b217aa219c5be3fa95`.
+  `court-broker/once/v2|gorbals|indoor|2026-11-25|1080|1|2` → `f12b7ca19d33d2b217aa219c5be3fa95`;
+  and Book now, signed at 12:00 UTC on 17 Nov 2026 (`stamp` 29915280),
+  `court-broker/now/v1|gorbals|indoor|2026-11-20|1080|1|3|29915280` → `2f97950c7f1228710e84f9117f398b51`;
+  `court-broker/now/v1|gorbals|indoor|2026-11-20|1080|1|3,4|29915280` → `18f0ca10bd92a6a3fc061dfbc5143561`.
+  The sum the state shows of the first (`authSum`, below): `c019d5fd3bab087b5a29d9b76c6c69a7` →
+  `e09aa503568e9b4b`.
 - The app sends it with `POST /app/weekly`, `/app/weekly/change` and `/app/once` (`auth`). Apps
   before 2.11 also sign everything afresh with `POST /app/weekly/auth` when the card changes (the
   signatures go with the old pay key) or automatic payments are switched on; that request stays, for
-  them. The state says `signed` for each (kept for apps before 2.11) and, since 2.11, the signature
-  itself (`weekly[].auth`, `once[].auth`: the 32 hex characters as the app sent them, or null). It is
-  no secret: only the app and your PC, which have the pay key, can make one, and showing it lets
-  nobody else make another. An app from 2.11 re-signs nothing by itself: it checks each paid booking's
-  `auth` against the card's pay key, with the words above, and asks the owner to save (and so sign)
-  any that does not match again. Kelvingrove's and
-  the other parks' are kept too, though nothing is paid there. The one-line `/backup` leaves them out, as it does the
-  linked phones: after a start from it, `signed` is false and `auth` null until the app signs again.
-  The bot's log and Telegram never show one.
+  them. The state says `signed` for each (kept for apps before 2.11) and, since 2.12, the signature's
+  sum (`weekly[].authSum`, `once[].authSum`: the first 16 lowercase hex characters of the SHA-512 of
+  the 32 hex characters as the app sent them, as UTF-8; or null). An app from 2.11 re-signs nothing
+  by itself: it makes each paid booking's signature with the card's pay key and the words above,
+  compares it with the one kept (from 2.12 by summing it the same way and comparing the sums), and
+  asks the owner to save (and so sign) any that does not match again.
+  Kelvingrove's and the other parks' are kept too, though nothing is paid there. The one-line `/backup`
+  leaves them out, as it does the linked phones: after a start from it, `signed` is false and `authSum`
+  null until the app signs again. The bot's log and Telegram never show one.
+- Why the sum and not the signature (2.12; 2.11 showed `auth` itself): a signature is what your PC
+  pays on, so it goes to your PC alone, with the job. Until 2.12 Book now was signed in a one-off's
+  words, without its courts or anything fresh, and your PC took a one-off's signature for a Book now
+  too; with every signature in the state, anyone holding a linked phone's token held what your PC
+  would pay on. The sum lets the app check a signature without anyone else being able to use it.
 - The PC checks it before it takes a court, with the pay key of the card it keeps, over the job's own
   venue, type, start and hours (and, 2.11, `courts`: v1 or v2 by it), and the weekday of its date (`from: "weekly"`) or its date
   (`from: "once"`). A job at its midnight goes with its weekly booking's signature when there is one,
@@ -1435,7 +1459,7 @@ The shapes, side by side:
 | app → bot | `POST /app/hold/order` (pay) | `amount: hold.price` (and `courts: [3]` from a 2.11 app) | `amount: hold.price`, the total, and `courts: [3, 4]` in plain: without it, 409 "Close and reopen the app to pay for two courts." |
 | bot → app | `state.results[]` | `court: "3"`, `courts: null` (or `[3]` when the PC names it so) | one result for the slot: `court: "3 & 4"`, `courts: [3, 4]`, `price` the total, `paid` |
 | app → bot | `POST /app/weekly`, `/change`, `/app/once` | `courts` left out, or `1` | `courts: 2`, signed with the v2 words |
-| bot → app | `state.weekly[]`, `state.once[]` | `courts: 1`, `auth` (v1 words) or null | `courts: 2`, `auth` (v2 words) or null |
+| bot → app | `state.weekly[]`, `state.once[]` | `courts: 1`, `authSum` (2.12; of a signature over the v1 words) or null | `courts: 2`, `authSum` (of one over the v2 words) or null |
 | bot → PC | `GET /agent/jobs` (Glasgow Club's) | `courts: 1` | `courts: 2`, `auth` over the v2 words |
 | PC → bot | `POST /agent/result` | `court`, as before | `court: "3 & 4"` (or `3`), `courts: [3, 4]`, `price` the total |
 | PC → bot | `POST /agent/progress` (`stage: "bank"`) | `court` | `court: 3, courts: [3, 4]`, `price` the total |
@@ -1487,7 +1511,7 @@ own code: the signature checked, the cap, one payment, the Bookings page checked
 
 ### The request
 
-**`POST /app/glasgow/book`** `{ venue, type, date, start, hours: 1, court, courts, auth }`. The answer is
+**`POST /app/glasgow/book`** `{ venue, type, date, start, hours: 1, court, courts, auth, stamp }`. The answer is
 the state, with `glasgow.book` at stage `"asked"`; from then on it moves in the state as your PC goes.
 
 - `venue`: `gorbals` or `scotstoun`; `type`: `indoor`, or `outdoor` at Scotstoun (Gorbals' may be left
@@ -1496,14 +1520,25 @@ the state, with `glasgow.book` at stage `"asked"`; from then on it moves in the 
 - `court`, `courts`: the courts to book, as for a hold: `courts` lowest first, the first of them
   `court`; `court` alone is one court. Exactly those courts are booked, or none: if any of them is not
   free when your PC looks, it takes none and says which (as at a park, it never takes another).
-- `auth` (required): the app's Face ID signature over `court-broker/once/v1|<venue>|<type>|<date>|<start>|1`,
-  or the v2 words `…|1|2` for two courts (see "Signed bookings"). Your PC rebuilds the words from the
-  order itself and refuses what does not verify. The court numbers are not signed: they can only
-  narrow what is taken, never add to it. Handed to your PC once, with the order, and never kept here
-  after that; never in the log, the settings or Telegram.
+- `auth` (required): the app's Face ID signature over Book now's own words (2.12),
+  `court-broker/now/v1|<venue>|<type>|<date>|<start>|1|<courts>|<stamp>`: `courts` the court numbers
+  asked for, lowest first, joined with `,` (`3`, or `3,4`), and `stamp` as below (see "Signed bookings"
+  for the signature and a worked example). Your PC rebuilds the words from the order itself and refuses
+  what does not verify, so a signature made for anything else (a one-off, other courts, an earlier
+  Book now) is no good for it. Until 2.12 these were a one-off's words, `court-broker/once/v1|…|1` (or
+  v2 for two courts), with no court numbers and nothing fresh in them: your PC took any one-off's
+  signature as a Book now. The bot cannot make or check a signature (it has no pay key). Handed to
+  your PC once, with the order, and never kept here after that; never in the log, the settings or Telegram.
+- `stamp` (required, 2.12): the whole minutes since 1970 (UTC) when the app signed, a whole number, as
+  in the words, so it cannot be changed on the way without the signature failing. This bot takes it
+  only if, by its own clock, it is no more than 5 minutes before now and no more than 2 minutes after.
+  Handed to your PC with the order (`glasgowBook.stamp`), which needs it to rebuild the words, and
+  kept here no longer than `auth`. An app that sends none is older than these words: it is refused,
+  and nothing is started.
 - It is never kept as a one-off (not in `once`, never among the jobs at 21:55), so no later run can
   pay for it.
-- The checks come in this order: the shape; the day; the time; a booking kept already for that venue,
+- The checks come in this order: the shape (with `auth` and `stamp`); the stamp, by this bot's clock;
+  the day; the time; a booking kept already for that venue,
   date and start, of either court type (Scotstoun's indoor and outdoor share a result's id); a slot
   whose Pay was pressed, or may have been, of either court type (a result kept for it with `paid`
   true or `"maybe"`, from the midnight run or a Book now, or a Book now that has just ended so and
@@ -1517,6 +1552,11 @@ the state, with `glasgow.book` at stage `"asked"`; from then on it moves in the 
 - 400 "Glasgow Club courts are booked an hour at a time." / "Slots start on the hour. Try a time like 19:00." / "Scotstoun's outdoor courts are open from 08:00 to 18:00."
 - 400 "courts, when sent, must list court numbers, each once and lowest first, starting with court." / "At most 2 courts at once."
 - 400 "Book now at Glasgow Club is paid: it must be signed in the app."
+- 400 "Update the app to use Book now at Glasgow Club." (2.12: no `stamp`, or one that is not a whole number)
+- 400 "That took too long. Try again." (2.12: `stamp` more than 5 minutes before this bot's clock: Face ID
+  was left waiting, or the phone's clock is slow; the app signs afresh)
+- 400 "Your phone’s clock is ahead. Set it to the right time, then try again." (2.12: `stamp` more than
+  2 minutes after this bot's clock)
 - 400 "That day is no longer on offer. Pick again."
 - 400 "Not open yet: opens Sun 22 Nov at 00:00." (the app schedules those: `POST /app/once`)
 - 400 "That time is no longer on offer. Pick again."
@@ -1556,7 +1596,7 @@ Automatically off is always taken: it stops this booking at its go-ahead, if it 
 | Step | From → to | What |
 | --- | --- | --- |
 | Capability | PC → bot, every ping | `glasgowBook: { max: "£30.00", why? }`. Present: its booker takes Book now (`glasgow.pcBooks`); `max`: its cap a court; `why`: why it cannot pay just now. An older bot ignores it. |
-| Hand-over | bot → PC, the ping's answer | `{ glasgowBook: { id, key, date, start, courts, auth } }`, once, and only while this very ping says `glasgowBook` (read before anything is handed over). `key`: g, s or o. An older link ignores it, and the booking ends `"nostart"` at 90 seconds, with nothing booked. |
+| Hand-over | bot → PC, the ping's answer | `{ glasgowBook: { id, key, date, start, courts, auth, stamp } }`, once, and only while this very ping says `glasgowBook` (read before anything is handed over). `key`: g, s or o. `stamp` (2.12): the minute the app signed, as it sent it; your PC rebuilds the now/v1 words from `key` (its venue and type), `date`, `start`, an hour, `courts` and `stamp`. Neither `auth` nor `stamp` is kept here once handed over. An older link ignores it, and the booking ends `"nostart"` at 90 seconds, with nothing booked. |
 | Steps | PC → bot, `POST /agent/glasgow/book` | `{ id, stage, … }`, signed as every request of the PC's. Answers below. |
 | Result | PC → bot, `POST /agent/result` | `{ id: "gorbals/2026-11-20@18:00", date, start, end, type, status, court, courts, price, paid, why }`, as at midnight: the card, the note, the push, Courts. |
 
@@ -1640,6 +1680,20 @@ to Hold.
 | PC rolled back | new | new | Its first ping clears `pcBooks` before anything is handed over. |
 | any | bot restarted mid-booking | new | The booking is lost here. Your PC's `paying` gets `stop` (unknown), so nothing is paid, and its failed result comes. After a go-ahead, its result comes as usual. |
 
+**Book now's own words (2.12).** The app, this bot and your PC's booker change together: Book now
+works again once all three are on 2.12, and until then nothing is paid on a signature made for
+something else. With each part older than 2.12:
+
+- An app older than 2.12 sends no `stamp`: refused, "Update the app to use Book now at Glasgow Club.",
+  and nothing is handed over. Hold is as before.
+- A bot older than 2.12 (with a 2.12 app) hands the order over without `stamp`, so your PC has no
+  minute to rebuild the words with, and nothing it rebuilds verifies.
+- A booker older than 2.12 rebuilds a one-off's words, which a 2.12 app's signature does not match:
+  it refuses, and nothing is paid.
+- The state shows `authSum` in place of `auth`: an app older than 2.12 finds no `auth` in `weekly` and
+  `once`. What it makes of that is the app's own (it may take every paid booking as not matching and
+  ask for each to be saved again); update the app with this bot.
+
 ### Known limits of Book now at Glasgow Club
 
 - Each slot is paid for once at most (your PC's `vault/used.json`, shared with midnight, checked
@@ -1653,6 +1707,10 @@ to Hold.
   still says "That’s 6 holds in an hour."
 - What looks showed the app, and the booking being followed, are kept in memory only: after a restart
   of the bot, look again; your PC is told to stop a booking the bot no longer knows.
+- A Book now's signature (2.12) names its slot, its courts and the minute it was signed, and this bot
+  takes it only within minutes of that. A bot that is not what it should be can hand your PC only
+  the booking you asked for, as you asked for it; no signature of a weekly booking or one-off will do
+  in its place, and none is shown in the state for anyone to take.
 
 ## Notes and notifications
 
