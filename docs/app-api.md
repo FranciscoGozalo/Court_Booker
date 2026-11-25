@@ -1610,7 +1610,16 @@ Automatically off is always taken: it stops this booking at its go-ahead, if it 
 | `refused` `{ why }` (its link would not start it) | ends `"refused"` | `{ ok: true }` |
 | `gone` `{ why?, pressed?, kind? }` (its link: the tool has gone) | ends `"gone"`, unless a result came | `{ ok: true }` |
 | `quit` `{ why, pressed? }` (its tool stopped) | ends `"quit"`, unless a result came | `{ ok: true }` |
+| any step but an ending, for a booking this bot is not following (any more) | nothing | `{ ok: true, stop: true }` (with `unknown: true` for one it does not know) |
 
+- **Stop, for a booking not followed** (2.12): a booking that has ended here (whichever way), one
+  given up on, or one this bot does not know (it restarted since) gets `stop` at every step but an
+  ending (`refused`, `gone`, `quit`, which are heard as above and need no answer), beats included,
+  so that your PC goes no further. Its tool reads it on `starting` (a late one: collected, then slow
+  to start, and over here at 90 seconds as `"nostart"`) and signs in to nothing, so no court is
+  taken and given back; and on `paying`, as below. After Pay is pressed it can undo nothing, and
+  changes nothing. The step moves nothing here. (Until 2.12 only `paying` got `stop`, and every other
+  step `{ ok: true }`: a late `starting` signed in and took the courts, then gave them back at Pay.)
 - **The go-ahead** (`go: true`) is given only to a booking this bot still follows, for exactly the
   courts it asked for, at a price (the total) no more than your PC's cap from its pings (`max`) times
   the number of courts, while its pings say it can pay, keeps a card and keeps Pay Automatically on,
@@ -1678,7 +1687,7 @@ to Hold.
 | old | new | new | No `glasgowBook` in the ping: `pcBooks` false, so the app holds; nothing is ever handed over. |
 | new | old | new | No `glasgow` in the state: Hold. |
 | PC rolled back | new | new | Its first ping clears `pcBooks` before anything is handed over. |
-| any | bot restarted mid-booking | new | The booking is lost here. Your PC's `paying` gets `stop` (unknown), so nothing is paid, and its failed result comes. After a go-ahead, its result comes as usual. |
+| any | bot restarted mid-booking | new | The booking is lost here. Your PC's next step gets `stop` (unknown): a `starting` signs in to nothing; a `paying` presses nothing, and its failed result comes. After a go-ahead, its result comes as usual. |
 
 **Book now's own words (2.12).** The app, this bot and your PC's booker change together: Book now
 works again once all three are on 2.12, and until then nothing is paid on a signature made for

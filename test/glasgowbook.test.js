@@ -534,8 +534,9 @@ test('the go-ahead only for the booking still followed: exactly its courts, at n
   assert.deepEqual(pcSays(again.t, { id: again.id, stage: 'paying', price: '£23.00', courts: [3] }), GO);
   // A booking this bot does not know (it restarted since), or one that has ended: stop.
   assert.deepEqual(pcSays(again.t, { id: 'ffffffffffff', stage: 'paying', price: '£23.00', courts: [3] }), { ok: true, stop: true, unknown: true });
-  assert.deepEqual(pcSays(again.t, { id: 'ffffffffffff', stage: 'starting' }), { ok: true, unknown: true });
-  assert.deepEqual(again.t.app.glasgowBookFromAgent(null), { ok: true, unknown: true });
+  assert.deepEqual(pcSays(again.t, { id: 'ffffffffffff', stage: 'starting' }), { ok: true, stop: true, unknown: true });
+  assert.deepEqual(pcSays(again.t, { id: 'ffffffffffff', stage: 'gone', why: 'the booking tool stopped with code 7' }), { ok: true, unknown: true });
+  assert.deepEqual(again.t.app.glasgowBookFromAgent(null), { ok: true, stop: true, unknown: true });
   const ended = await goWith({ price: '£23.00', courts: [3] }, { before: t => { t.clock.t += 4 * MIN; return t.app.tick(); } });
   assert.deepEqual(ended.answer, STOP);
 });
@@ -742,7 +743,8 @@ test('your PC\'s result is the follower\'s first: it replaces an ending decided 
     assert.deepEqual([k.app.state.results[RID].status, k.app.state.results[RID].paid, stateOf(k, phoneK).glasgow.book.ended], [pc.status, pc.paid, pc.status]);
     assert.match(k.logs.join('\n'), /Result for gorbals\/2026-11-20@18:00 not kept over the one kept meanwhile/);
   }
-  // Silent after the go-ahead, then your PC is heard again: your bank wants it approved. Said all the same.
+  // Silent after the go-ahead, then your PC is heard again: your bank wants it approved. Said all the
+  // same (the stop, as to any step of a booking not followed any more, can undo no press).
   const g = makeBot();
   const phoneG = await linkPhone(g);
   const cg = await started(g, phoneG);
@@ -750,7 +752,7 @@ test('your PC\'s result is the follower\'s first: it replaces an ending decided 
   g.clock.t += 4 * MIN;
   await g.app.tick();
   g.tg.clear();
-  assert.deepEqual(pcSays(g, { id: cg.id, stage: 'approve', price: '£23.00', court: 3 }), { ok: true });
+  assert.deepEqual(pcSays(g, { id: cg.id, stage: 'approve', price: '£23.00', court: 3 }), { ok: true, stop: true });
   await settle();
   assert.deepEqual(g.tg.calls.map(c => c.text.split('\n')[0]), ['<b>Approve the payment in your bank\'s app</b>']);
   // Half an hour and more after it was collected, a result for that slot is no longer this booking's
@@ -965,6 +967,7 @@ test('the timers: not collected in 25 seconds, collected and never started in 90
   await b.app.tick();
   await settle();
   assert.deepEqual([stateOf(b, phoneB).glasgow.book.ended, stateOf(b, phoneB).results[0].why], ['nostart', 'It didn’t work: your PC collected it but did not start on it. Nothing was paid.']);
+  assert.deepEqual(pcSays(b, { id: cb.id, stage: 'starting' }), { ok: true, stop: true });                  // its tool, late: it goes no further
   assert.deepEqual(pcSays(b, { id: cb.id, stage: 'paying', price: '£23.00', courts: [3] }), { ok: true, stop: true });
   // A beat counts as a start, as any word from its tool does.
   const c = makeBot();
@@ -976,6 +979,56 @@ test('the timers: not collected in 25 seconds, collected and never started in 90
   await c.app.tick();
   assert.equal(stateOf(c, phoneC).glasgow.book.live, true);
   assert.deepEqual([GB.COLLECT_MS, GB.START_MS, GB.SILENT_MS, GB.LOST_MS, GB.MAX_RUN_MS].map(ms => ms / 1000), [25, 90, 75, 240, 1800]);
+});
+
+test('a booking this bot is not following any more (ended, or never had) is told to stop at every step but an ending, so a late "starting" signs in to nothing; the step moves nothing, and endings are heard as before', async () => {
+  // Collected, then no word for a minute and a half: over here ("nostart"). Its tool, slow to start, says "starting".
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  const { id } = await collected(t, phone);
+  t.clock.t += GB.START_MS;
+  await t.app.tick();
+  await settle();
+  const before = stateOf(t, phone);
+  assert.equal(before.glasgow.book.ended, 'nostart');
+  t.clock.t += 5000;
+  const STOP = { ok: true, stop: true };
+  assert.deepEqual(pcSays(t, { id, stage: 'starting' }), STOP);
+  assert.deepEqual(pcSays(t, { id, stage: 'starting', beat: true }), STOP);
+  assert.deepEqual(pcSays(t, { id, stage: 'signed-in' }), STOP);
+  assert.deepEqual(pcSays(t, { id, stage: 'paying', price: '£23.00', courts: [3] }), STOP);
+  await settle();
+  // Nothing moved: the booking as it ended, its result as it was kept, no card or note more.
+  const after = stateOf(t, phone);
+  assert.deepEqual([after.glasgow.book, after.results, after.notes.length], [{ ...before.glasgow.book, line: after.glasgow.book.line }, before.results, before.notes.length]);
+  assert.deepEqual([after.glasgow.book.stage, after.glasgow.book.heardAt], ['asked', before.glasgow.book.heardAt]);
+  // Its link's word that the tool has gone (it stopped, as told) is still heard, as your PC's own word over an ending assumed here.
+  assert.deepEqual(pcSays(t, { id, stage: 'gone' }), { ok: true });
+  assert.equal(stateOf(t, phone).glasgow.book.ended, 'gone');
+  assert.deepEqual(pcSays(t, { id, stage: 'starting' }), STOP);
+  // Silent before the go-ahead, then heard again: beats and steps alike are told to stop.
+  const u = makeBot();
+  const phoneU = await linkPhone(u);
+  const cu = await started(u, phoneU);
+  u.clock.t += GB.LOST_MS;
+  await u.app.tick();
+  assert.equal(stateOf(u, phoneU).glasgow.book.ended, 'silent');
+  assert.deepEqual(pcSays(u, { id: cu.id, stage: 'signed-in', beat: true }), STOP);
+  assert.deepEqual(pcSays(u, { id: cu.id, stage: 'signed-in' }), STOP);
+  // Booked: a late step of it is told to stop too, and the booking stands.
+  const b = makeBot();
+  const phoneB = await linkPhone(b);
+  const cb = await started(b, phoneB);
+  pcSays(b, { id: cb.id, stage: 'paying', price: '£23.00', courts: [3] });
+  await b.app.resultFromAgent(resultOf());
+  assert.deepEqual(pcSays(b, { id: cb.id, stage: 'paying', beat: true }), STOP);
+  assert.equal(stateOf(b, phoneB).glasgow.book.ended, 'booked');
+  // Never had here (it restarted since): stop, and that it does not know it; an ending only that.
+  for (const stage of ['starting', 'signed-in', 'paying', 'approve', 'whatever']) {
+    assert.deepEqual(pcSays(b, { id: 'ffffffffffff', stage }), { ok: true, stop: true, unknown: true }, stage);
+    assert.deepEqual(pcSays(b, { id: 'ffffffffffff', stage, beat: true }), { ok: true, stop: true, unknown: true }, stage);
+  }
+  for (const stage of ['refused', 'gone', 'quit']) assert.deepEqual(pcSays(b, { id: 'ffffffffffff', stage }), { ok: true, unknown: true }, stage);
 });
 
 // ---------- kept across a restart of the bot ----------
