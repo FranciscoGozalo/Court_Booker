@@ -31,8 +31,10 @@ const V = require('./lib/venues');
 const W = require('./lib/allowance');
 const CS = require('./lib/clubspark');
 const GB = require('./lib/glasgowbook');
+const AC = require('./lib/activity');
+const { mask: maskApns } = require('./lib/apns');
 
-const VERSION = '2.13.0';
+const VERSION = '2.14.0';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -59,7 +61,7 @@ const TIME_GONE = 'That time is no longer on offer. Pick again.';
 const LIST_OLD = 'That list is old. Read the day again, then hold a court.';
 // What the iPhone app can ask for (POST /app/<name>, docs/app-api.md).
 const APP_ASKS = ['unpair', 'unpair/other', 'pair/code', 'once', 'once/remove', 'plan', 'plan/remove', 'weekly', 'weekly/change', 'weekly/on', 'weekly/remove', 'weekly/auth', 'order', 'pause', 'pc/sleep', 'pc/wake',
-  'indoor/look', 'hold', 'hold/order', 'card', 'card/forget', 'card/auto', 'card/auto/off', 'push'];
+  'indoor/look', 'hold', 'hold/order', 'card', 'card/forget', 'card/auto', 'card/auto/off', 'push', 'widget/token', 'activity/token'];
 
 // The banner pictures (made by art/make-banners.cjs): the menu card in three versions, one for
 // each state of your PC (the coloured dot), and one each for a court booked and not booked.
@@ -159,7 +161,7 @@ function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, weekly: [], once: [], onceAway: [], order: [1, 2, 3, 4, 5, 6], paused: false,
     results: {}, sent: {}, pics: {}, lastSeen: null, lastRun: null, home: null,
-    apps: [], notes: [], pcCard: null, pcBooks: false, pcClubRun: null,
+    apps: [], notes: [], pcCard: null, pcBooks: false, pcClubRun: null, activitySent: {},
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -200,6 +202,12 @@ function loadState(raw, env = {}) {
       if (p && typeof p.hash === 'string' && typeof p.id === 'string') state.pics[kind] = { hash: p.hash, id: p.id };
     }
     state.apps = A.cleanApps(raw.apps);                           // the phones linked to the app: a hash of each one's token, never the token
+    // The court each phone was last sent for its Lock Screen (2.14: a Live Activity started by a push, or
+    // one the app said it started itself), so that a restart starts none twice: phone id -> result id.
+    // Only for phones still linked.
+    if (raw.v === STATE_VERSION && raw.activitySent && typeof raw.activitySent === 'object') {
+      for (const d of state.apps) { const court = A.refOf(raw.activitySent[d.id]); if (court) state.activitySent[d.id] = court; }
+    }
   } else {
     state.weekly = weeklyFromPlan(parsePlan(env.COURT_PLAN));
     state.plan = planOf(state.weekly);
@@ -232,7 +240,9 @@ function readBackup(text) {
 // (lib/push.js: Expo's push service); tests swap it out too. `retryMs`: how long before a message
 // that must not be lost (see strangerNote) is tried again when Telegram will not take it. `tg` with
 // `quiet` set (lib/telegram.js createQuietTelegram, 2.13): Telegram is off, and the app is the way in.
-function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000, pcHoldMs = 25000, push = null, retryMs = 3000 }) {
+// `apns` (2.14): Apple's push service, for today's court on the Lock Screen (lib/apns.js, made by
+// index.js from APNS_KEY and its ids), or null: those pushes are off. Tests swap it out.
+function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictures = loadPictures(), linked = true, wake = sendWake, glasgow = null, pcLookMs = 20000, pcHoldMs = 25000, push = null, retryMs = 3000, apns = null }) {
   const indoor = glasgow || G.createGlasgowClub({ now, log });
   const pushOut = push || createExpoPush({ log });
   const fromVariable = readBackup(env.COURT_SETTINGS);
@@ -2506,6 +2516,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       await checkHold(t);
       checkCard(t);
       checkAuto(t);
+      checkActivity(t);                               // today's court on the Lock Screen (2.14): not waited for
       await flushNotes(t);
       const chat = owner();
       if (chat === null || state.paused || !linked) return;
@@ -2549,6 +2560,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // (the app alone has the card's security code); and Glasgow Life's parks, read and booked now
   // (lib/clubspark.js), within its bounds: at most 4 bookings an hour, only a court a look showed
   // it free in the last 15 minutes, the weekly allowance, and never a court that costs money.
+  // With the app closed (2.14), the phone's widgets read the state by a token of their own (appWidget), and
+  // today's court is put on its Lock Screen by a push from here (checkActivity).
   const pairing = A.createPairing();
   const pairLimiter = A.createLimiter();
   const lookLimiter = A.createLimiter(A.LOOKS_PER_MIN, A.LOOKS_WINDOW_MS);      // fresh reads asked for through the app, all phones together
@@ -2617,6 +2630,23 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return { id: d.id, name: d.name };
   }
 
+  // GET /app/widget/state (2.14): the state for the iPhone's widgets, read with the app closed, by the
+  // phone's widget token (POST /app/widget/token). Exactly what GET /app/state gives that phone, at once:
+  // never a wait. The widget token opens this and nothing else. At most 120 reads an hour for each phone;
+  // a read does not count as the phone being heard from (`seenAt`), which is the app's own doing.
+  // Returns { status, body } for the server.
+  const widgetReads = new Map();                       // phone id -> its widget's reads in the last hour
+  function appWidget(token) {
+    const unpaired = { status: 401, body: { ok: false, why: 'unpaired' } };
+    const d = A.findWidget(state.apps, token);
+    if (!d || d.owner !== owner()) return unpaired;
+    for (const id of widgetReads.keys()) if (!state.apps.some(x => x.id === id)) widgetReads.delete(id);
+    if (!widgetReads.has(d.id)) widgetReads.set(d.id, A.createLimiter(A.WIDGET_READS, A.WIDGET_WINDOW_MS));
+    if (!widgetReads.get(d.id).allow(now())) return { status: 429, body: { ok: false, why: 'slow' } };
+    const s = appState(d);
+    return s ? { status: 200, body: { ok: true, etag: s.etag, state: s.state } } : unpaired;
+  }
+
   // How the PC's booking run stands, around a release: from half an hour before it to an hour
   // after, or until every booking of that release has been reported on. Otherwise null.
   function runNow(t) {
@@ -2663,27 +2693,36 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     return null;
   }
 
-  // Everything the app shows, as it stands now. `meId` is the phone that asks.
-  function buildState(meId) {
-    const t = now(), c = cfg(), x = ctx(), today = todayCivil(t);
-    const booking = !state.paused && owner() !== null;                   // while paused nothing is booked, so nothing is coming
-    const releases = booking ? upcoming(t, c, 4) : [];
-    const releaseOf = r => ({ at: r.releaseAt, night: iso(r.night), jobs: r.requests.map(j => ({ id: j.id, venue: j.venue || V.SCHEDULED, type: j.type || 'outdoor', date: j.date, start: j.start, end: j.end, from: j.kind })) });
-    const onceIds = new Set([...state.once.map(o => jobId(o.date, o.start)), ...state.onceAway.map(o => V.resultId(o.venue, o.date, o.start))]);
-    const open = booking ? jobsFor(t, c, state.results).filter(j => j.releaseAt <= t && onceIds.has(j.id)) : [];
+  // The results as the app is shown them: today's and later first, soonest first; then what is past,
+  // newest first. Today's court on the Lock Screen (2.14) is worked out from these too, as the app does.
+  function resultsView(t) {
+    const today = todayCivil(t);
     const byDay = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.start - b.start);
-    const results = Object.values(state.results).map(r => ({
+    return Object.values(state.results).map(r => ({
       id: r.id, venue: r.venue || V.SCHEDULED, status: r.status, date: r.date, start: r.start, end: r.end, court: r.court ?? null, gate: r.gate ?? null,
       why: r.status === 'booked' ? null : A.plain(M.failedWhy(r)), at: r.at, past: civilOf(r.date) < today,
       type: r.type || 'outdoor', price: r.price ?? null, paid: V.clubOf(r.venue) ? (r.paid ?? false) : null,
       courts: r.courts ? r.courts.slice() : null,                       // 2.11: the courts' numbers, when the result names them ([3, 4] for two at once)
     })).sort((a, b) => (a.past !== b.past ? (a.past ? 1 : -1) : a.past ? byDay(b, a) : byDay(a, b)));
+  }
+  const venuesView = t => V.venueList(G.SHEETS, iso(todayCivil(t)), G.sheetUrl, { daysAhead, releaseMin });          // every venue and its court types (lib/venues.js)
+
+  // Everything the app shows, as it stands now. `meId` is the phone that asks.
+  function buildState(meId) {
+    const t = now(), c = cfg(), x = ctx(), today = todayCivil(t);
+    const me = state.apps.find(d => d.id === meId) || null;
+    const booking = !state.paused && owner() !== null;                   // while paused nothing is booked, so nothing is coming
+    const releases = booking ? upcoming(t, c, 4) : [];
+    const releaseOf = r => ({ at: r.releaseAt, night: iso(r.night), jobs: r.requests.map(j => ({ id: j.id, venue: j.venue || V.SCHEDULED, type: j.type || 'outdoor', date: j.date, start: j.start, end: j.end, from: j.kind })) });
+    const onceIds = new Set([...state.once.map(o => jobId(o.date, o.start)), ...state.onceAway.map(o => V.resultId(o.venue, o.date, o.start))]);
+    const open = booking ? jobsFor(t, c, state.results).filter(j => j.releaseAt <= t && onceIds.has(j.id)) : [];
+    const results = resultsView(t);
     const noWake = wakeBlocker(t), noSleep = sleepNo(t), noHold = holdBlocker(t), line = UI.pcLine(x);
     return {
       now: t, bot: VERSION,
       telegram: !quiet,                                                // 2.13: false when Telegram is off and the app is the way in
       venue: { name: 'Kelvingrove Park', short: 'KP', first: UI.FIRST_START, last: UI.LAST_END, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin, daysAhead, maxAheadDays: MAX_AHEAD_DAYS },
-      venues: V.venueList(G.SHEETS, iso(today), G.sheetUrl, { daysAhead, releaseMin }),          // every venue and its court types (lib/venues.js)
+      venues: venuesView(t),                                           // every venue and its court types (lib/venues.js)
       clubspark: cs.view(t),                                           // the parks: looks and Book now (lib/clubspark.js)
       // Book now at Glasgow Club (2.11.3, lib/glasgowbook.js). `pcBooks`: your PC's booker takes it (else
       // the app holds); `bookNo`: why none can start now; `payMax`: your PC's price cap a court, as its
@@ -2730,6 +2769,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       hold: holdView(x),
       notes: state.notes.map(n => ({ id: n.id, at: n.at, kind: n.kind, title: n.title, body: n.body, ref: n.ref ?? null })),
       devices: state.apps.map(d => ({ id: d.id, name: d.name, at: d.at, seenAt: d.seenAt, me: d.id === meId })),
+      // Today's court on the Lock Screen (2.14). `push`: the bot can start it by a push, with the app closed
+      // (APNS_KEY and its ids are set); `start`: this phone gave its push-to-start token.
+      activity: { push: !!apns, start: !!(me && me.activityStart) },
     };
   }
   // The state for one phone with its fingerprint, { etag, state }, or null if that phone is no
@@ -2738,6 +2780,105 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (!device || !state.apps.some(d => d.id === device.id)) return null;
     const s = buildState(device.id);
     return { etag: A.etagOf(s), state: s };
+  }
+
+  // ---------- today's court on the Lock Screen, started by a push (2.14, lib/activity.js) ----------
+  // A Live Activity that iOS starts with the app closed, on a push from here by Apple's own service
+  // (`apns`, lib/apns.js; null: off). The court is the one the app itself would show (the first booked
+  // court not over yet, once it starts within eight hours), worked out from what the app is shown. Each
+  // phone that gave its push-to-start token is sent that court once (`state.activitySent`, kept on disk,
+  // so a restart sends none twice), and none for a court the app said it started itself. When the court
+  // changes (it is over, or another comes first), a card the app said it runs for the old one is ended,
+  // so a stale one leaves the Lock Screen. Looked at every 30 seconds at most, by the timer, and never
+  // waited for: a push can hold up nothing else. At most one try a minute for each phone and court, and
+  // five in all. Apple refusing the key itself (403) stops every push until the bot restarts.
+  const ACTIVITY_EVERY_MS = 30 * 1000;
+  const ACTIVITY_RETRY_MS = 60 * 1000;
+  const ACTIVITY_TRIES = 5;
+  let activityAt = null, activityBusy = false, apnsRefused = false;
+  const activityTries = new Map();                    // "<phone id> start|end <result id>" -> { at, fails }
+  const activityView = t => ({ results: resultsView(t), venues: venuesView(t), venue: { name: 'Kelvingrove Park' } });
+  function checkActivity(t) {
+    if (activityAt !== null && t >= activityAt && t - activityAt < ACTIVITY_EVERY_MS) return;
+    activityAt = t;
+    // A phone unlinked is forgotten here too (it may have gone by any of several ways).
+    const gone = Object.keys(state.activitySent).filter(id => !state.apps.some(d => d.id === id));
+    if (gone.length) { for (const id of gone) delete state.activitySent[id]; save(); }
+    for (const [key, x] of activityTries) if (t - x.at > 86400000) activityTries.delete(key);
+    if (!apns || apnsRefused || activityBusy || !state.apps.some(d => d.activityStart || d.activityUpdate)) return;
+    const view = activityView(t);
+    const want = AC.courtActivity(view, t);
+    const ahead = new Set(AC.courtsAhead(view, t).map(r => r.id));
+    const steps = [];
+    for (const d of state.apps) {
+      const old = d.activityUpdate;
+      // The court changed: another is shown now, or the old one is over, or no longer booked. (A court still
+      // ahead with none shown, more than eight hours off by this clock, is left to the app.)
+      if (old && (want ? want.key !== old.court : !ahead.has(old.court))) steps.push(() => endActivity(d, old, view, t));
+      if (want && d.activityStart && state.activitySent[d.id] !== want.key) steps.push(() => startActivity(d, want, t));
+    }
+    if (!steps.length) return;
+    activityBusy = true;
+    (async () => { for (const step of steps) if (!apnsRefused) await step(); })()
+      .catch(e => log(`A Live Activity could not be sent: ${maskApns((e && e.message) || e)}`))
+      .finally(() => { activityBusy = false; });
+  }
+  // One push to Apple: { status, reason }, never thrown.
+  async function apnsSend(token, payload) {
+    try {
+      const r = await apns.send(token, payload, { pushType: 'liveactivity', priority: 10 });
+      return r && typeof r === 'object' ? { status: Number(r.status) || 0, reason: r.reason ? maskApns(r.reason).slice(0, 80) : null } : { status: 0, reason: null };
+    } catch (e) { return { status: 0, reason: maskApns((e && e.message) || e).slice(0, 200) }; }
+  }
+  const apnsWords = told => (told.status ? `Apple answered ${told.status}${told.reason ? ` ${told.reason}` : ''}` : (told.reason || 'Apple could not be reached'));
+  const mayTry = (key, t) => { const x = activityTries.get(key); return !x || (x.fails < ACTIVITY_TRIES && (t < x.at || t - x.at >= ACTIVITY_RETRY_MS)); };
+  // A try that did not work, counted. True when it was the fifth: that court is given up on, and said so once.
+  function failedTry(key, t, told, what) {
+    const x = activityTries.get(key) || { at: t, fails: 0 };
+    x.at = t; x.fails++;
+    activityTries.set(key, x);
+    if (x.fails < ACTIVITY_TRIES) return false;
+    log(`Gave up trying to ${what} after ${ACTIVITY_TRIES} tries (${apnsWords(told)}).`);
+    return true;
+  }
+  // Apple refused the key itself (403: the key, its id or the team id is wrong, or the key was revoked).
+  function keyRefused(told) {
+    if (told.status !== 403) return false;
+    if (!apnsRefused) log(`Apple refused the key for Live Activities (${told.reason || 'no reason given'}): check APNS_KEY, APNS_KEY_ID and APNS_TEAM_ID on Railway. None is sent until the bot restarts.`);
+    apnsRefused = true;
+    return true;
+  }
+  // Apple no longer takes the token: 410 (the app is gone, or the token expired) or 400 BadDeviceToken.
+  const tokenGone = told => told.status === 410 || (told.status === 400 && told.reason === 'BadDeviceToken');
+  async function startActivity(d, want, t) {
+    const key = `${d.id} start ${want.key}`, token = d.activityStart;
+    if (!mayTry(key, t)) return;
+    const told = await apnsSend(token, AC.startPayload(want, t));
+    if (!state.apps.includes(d)) return;                                   // unlinked meanwhile
+    if (told.status === 200) {
+      state.activitySent[d.id] = want.key; activityTries.delete(key); save();
+      log(`Today's court is on the Lock Screen of ${d.name} (a Live Activity, started by a push).`);
+      return;
+    }
+    if (keyRefused(told)) return;
+    if (tokenGone(told)) {
+      if (d.activityStart === token) { d.activityStart = null; save(); }
+      log(`Apple no longer takes the token ${d.name} gave for starting Live Activities (${apnsWords(told)}): none is started there by push until the app gives a new one.`);
+      return;
+    }
+    failedTry(key, t, told, `put today's court on the Lock Screen of ${d.name}`);
+  }
+  async function endActivity(d, old, view, t) {
+    const key = `${d.id} end ${old.court}`;
+    if (!mayTry(key, t)) return;
+    // The words the card showed, to end it with, worked out again (null once its result has gone).
+    const r = view.results.find(x => x.id === old.court && x.status === 'booked');
+    const told = await apnsSend(old.token, AC.endPayload(r ? JSON.stringify(AC.activityOf(view, r).props) : null, t));
+    if (!state.apps.includes(d)) return;
+    const forget = () => { activityTries.delete(key); if (d.activityUpdate === old) { d.activityUpdate = null; save(); } };
+    if (told.status === 200 || tokenGone(told)) return forget();          // ended, or there is no such card any more
+    if (keyRefused(told)) return;
+    if (failedTry(key, t, told, `end the card for ${old.court} on the Lock Screen of ${d.name}`)) forget();
   }
 
   // A day's free indoor courts, for the app: what the day's card shows in Telegram, read the
@@ -2792,7 +2933,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const read = { once: A.readOnce, 'once/remove': A.readOnceRemove, plan: A.readPlan, 'plan/remove': A.readPlanRemove, order: A.readOrder, pause: A.readPause,
       weekly: A.readWeekly, 'weekly/change': A.readWeeklyChange, 'weekly/on': A.readWeeklyOn, 'weekly/remove': A.readWeeklyRemove, 'weekly/auth': A.readWeeklyAuth,
       'indoor/look': A.readLook, hold: A.readHold, 'hold/order': A.readHoldOrder, card: A.readCard, 'card/forget': A.readForget,
-      'card/auto': A.readAuto, 'card/auto/off': A.readAutoOff, push: A.readPush, 'unpair/other': A.readUnpairOther }[name];
+      'card/auto': A.readAuto, 'card/auto/off': A.readAutoOff, push: A.readPush, 'unpair/other': A.readUnpairOther,
+      'widget/token': A.readWidgetToken, 'activity/token': A.readActivityToken }[name];
     const v = read ? read(body) : {};
     if (v.why) return no(400, v.why);
     log(`From the app: ${name}`);
@@ -2897,6 +3039,23 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         if (v.token) for (const d of state.apps) if (d !== me && d.push === v.token) d.push = null;      // one phone, one entry: no notification twice
         me.push = v.token; save();
         return done();
+      case 'widget/token': {                         // 2.14: a token for this phone's widgets, which reads the state and nothing else
+        const { token, hash } = A.newToken();
+        me.widget = hash; save();                    // one at a time: a new one replaces the old, which opens nothing any more
+        return { status: 200, body: { ok: true, token } };
+      }
+      case 'activity/token':                         // 2.14: the tokens for today's court on the Lock Screen
+        if (v.kind === 'start') {
+          if (v.token) for (const d of state.apps) if (d !== me && d.activityStart === v.token) d.activityStart = null;      // one phone, one token
+          me.activityStart = v.token;
+        } else {
+          // An activity the app runs for a court: it started it itself, so no push starts another for that
+          // court; its token is what ends it from here, once the court shown is another.
+          me.activityUpdate = v.token ? { activity: v.activity, court: v.court, token: v.token } : null;
+          if (v.token) state.activitySent[me.id] = v.court;
+        }
+        save();
+        return done();
       default:
         return null;
     }
@@ -2905,7 +3064,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   return {
     clubSparkFromAgent: cs.fromAgent, glasgowBookFromAgent: raw => gb.fromPc(raw),
     handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, holdFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures,
-    appHello, appPair, appAuth, appState, appAsk, sealedHeld, pairFromAgent, quiet,
+    appHello, appPair, appAuth, appState, appAsk, appWidget, sealedHeld, pairFromAgent, quiet,
   };
 }
 

@@ -14,6 +14,7 @@ const { createTelegram, createQuietTelegram } = require('./lib/telegram');
 const { createStore } = require('./lib/store');
 const { createServer, readPublicKey } = require('./lib/server');
 const { clockAt, londonWall } = require('./lib/time');
+const { fromEnv } = require('./lib/apns');
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -42,7 +43,7 @@ const COMMANDS = [
 // route without its handler answers as an older bot would, never with a go-ahead. `extra`: the
 // server's other options (tests shorten its waits).
 function serverFor(app, { token = '', publicKey = null, log = () => {}, ...extra } = {}) {
-  const appApi = { hello: app.appHello, pair: app.appPair, auth: app.appAuth, state: app.appState, ask: app.appAsk };
+  const appApi = { hello: app.appHello, pair: app.appPair, auth: app.appAuth, state: app.appState, ask: app.appAsk, widget: app.appWidget };
   return createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onLook: app.lookFromAgent, onHold: app.holdFromAgent, onProgress: app.progressFromAgent, picture: app.picture, token, publicKey, log, appApi,
     onClubSpark: app.clubSparkFromAgent, onGlasgowBook: app.glasgowBookFromAgent, onPair: app.pairFromAgent, ...extra });
 }
@@ -80,7 +81,10 @@ async function main() {
   let publicKey = null;
   try { publicKey = readPublicKey(process.env.AGENT_PUBLIC_KEY); } catch (e) { log(`AGENT_PUBLIC_KEY could not be read: ${e.message}`); }
   const linked = !!(agentToken || publicKey);
-  const app = createApp({ tg, store, log, env: process.env, linked });
+  // Today's court on the iPhone's Lock Screen, started by a push with the app closed (2.14): Apple's own
+  // push service, with the key from APNS_KEY and its ids. Without them it is off, and the log says so once.
+  const apns = fromEnv(process.env, { log });
+  const app = createApp({ tg, store, log, env: process.env, linked, apns });
   log(`Settings file: ${store.file}`);
   if (!app.hasPictures) log('Some banner pictures are missing from assets/ (see art/make-banners.cjs), so cards will come as plain text.');
 

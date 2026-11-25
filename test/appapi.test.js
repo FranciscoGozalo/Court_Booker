@@ -69,7 +69,7 @@ async function seeFree(t, phone, centre = 'g', date = FRI) {
   assert.equal(r.status, 200, JSON.stringify(r.body));
   return r.body.look;
 }
-const STATE_KEYS = ['now', 'bot', 'telegram', 'venue', 'venues', 'clubspark', 'glasgow', 'allowance', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'weekly', 'once', 'order', 'results', 'run', 'indoor', 'card', 'hold', 'notes', 'devices'];
+const STATE_KEYS = ['now', 'bot', 'telegram', 'venue', 'venues', 'clubspark', 'glasgow', 'allowance', 'paused', 'kept', 'pc', 'release', 'later', 'open', 'plan', 'weekly', 'once', 'order', 'results', 'run', 'indoor', 'card', 'hold', 'notes', 'devices', 'activity'];
 const HOLD_KEYS = ['id', 'startedBy', 'centre', 'centreName', 'date', 'start', 'end', 'court', 'courtName', 'courts', 'courtNames', 'stage', 'live', 'ended', 'price', 'prices', 'until', 'heardAt', 'title', 'lines', 'can', 'links'];
 // The state as a phone is shown it. Whenever it is looked at here, it is also checked to be
 // whole: the contract's fields and no others, and nothing that JSON would drop on the way.
@@ -82,6 +82,8 @@ const stateOf = (t, phone) => {
   return state;
 };
 const refused = (status, why) => ({ status, body: { ok: false, why } });
+// What a phone is kept with beside its token's hash since 2.14: no widget token, and no Live Activity tokens yet.
+const NO_WIDGET = { widget: null, activityStart: null, activityUpdate: null };
 // Every venue as the state lists it on a day: the seven parks on ClubSpark, then Glasgow Club's two (Scotstoun indoor and outdoor).
 const PARK_ADDRESSES = [['drumchapel', 'Drumchapel Park', 'DrumchapelParkTennisCourts'], ['garrowhill', 'Garrowhill Park', 'GarrowhillPark'], ['kelvingrove', 'Kelvingrove Park', 'KelvingroveParkTennisCourts'],
   ['knightswood', 'Knightswood Park', 'KnightswoodParkTennisCourts'], ['maryhill', 'Maryhill Park', 'MaryhillParkTennisCourts'], ['queenspark', 'Queens Park', 'QueensParkTennisCourtsGlasgow'], ['victoriapark', 'Victoria Park', 'VictoriaParkTennis']];
@@ -357,14 +359,14 @@ test('settings saved before the app existed load as they were, and the state ver
   };
   const s = loadState(JSON.parse(JSON.stringify(old)));
   // 2.10: Kelvingrove's plan, one a day, is now weekly entries at any venue; the plan stays beside them.
-  assert.deepEqual(s, { ...old, apps: [], notes: [], onceAway: [], pcCard: null, pcBooks: false, pcClubRun: null, weekly: [{ id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 2, on: true }] });
+  assert.deepEqual(s, { ...old, apps: [], notes: [], onceAway: [], pcCard: null, pcBooks: false, pcClubRun: null, activitySent: {}, weekly: [{ id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 2, on: true }] });
   assert.equal(s.v, 4);
   assert.equal(loadState(null).v, 4);
   assert.deepEqual([loadState(null).apps, loadState(null).notes], [[], []]);
   // The one-line backup says nothing of the phones: a line that is copied about opens no door.
   const { hash } = A.newToken();
   const linked = loadState({ ...old, apps: [{ id: 'a1b2c3d4', name: 'iPhone', hash, at: 1, seenAt: 2, push: PUSH_TOKEN, owner: OWNER }], notes: [{ id: 'aa11bb22cc', at: 9, kind: 'booked', title: 'Court 3 booked', body: 'x' }] });
-  assert.deepEqual(linked.apps, [{ id: 'a1b2c3d4', name: 'iPhone', hash, at: 1, seenAt: 2, push: PUSH_TOKEN, owner: OWNER }]);
+  assert.deepEqual(linked.apps, [{ id: 'a1b2c3d4', name: 'iPhone', hash, at: 1, seenAt: 2, push: PUSH_TOKEN, owner: OWNER, ...NO_WIDGET }]);
   assert.deepEqual(linked.notes, [{ id: 'aa11bb22cc', at: 9, kind: 'booked', title: 'Court 3 booked', body: 'x', ref: null }]);       // kept before 2.10.4: about nothing in particular
   assert.deepEqual(Object.keys(JSON.parse(backupLine(linked))).sort(), ['once', 'onceAway', 'order', 'owner', 'plan', 'v', 'weekly']);
   assert.equal(JSON.parse(backupLine(linked)).v, 4);
@@ -375,7 +377,7 @@ test('settings saved before the app existed load as they were, and the state ver
 });
 
 test('whatever is in the saved file for the phones and the notes is made safe to use', () => {
-  const good = { id: 'a1b2c3d4', name: 'iPhone', hash: 'a'.repeat(64), at: 1, seenAt: 2, push: null, owner: OWNER };
+  const good = { id: 'a1b2c3d4', name: 'iPhone', hash: 'a'.repeat(64), at: 1, seenAt: 2, push: null, owner: OWNER, ...NO_WIDGET };
   const hash = n => String(n).repeat(64).slice(0, 64);
   for (const junk of [null, 'x', 7, {}, { 0: good }]) assert.deepEqual(loadState({ v: 4, apps: junk }).apps, []);
   const apps = loadState({ v: 4, apps: [
@@ -391,8 +393,8 @@ test('whatever is in the saved file for the phones and the notes is made safe to
   ] }).apps;
   assert.equal(apps.length, 5);                                              // five phones at most
   assert.deepEqual(apps[0], good);
-  assert.deepEqual(apps[1], { id: 'd1b2c3d4', name: '<b>Pat\'s</b> phone '.padEnd(40, 'x'), hash: hash(3), at: 0, seenAt: 0, push: null, owner: null });      // forty characters of a name, and only what a phone is kept as
-  assert.deepEqual(apps[2], { id: 'e1b2c3d4', name: 'iPhone', hash: hash(4), at: 5, seenAt: 5, push: PUSH_TOKEN, owner: null });      // whose it is: a chat's number, or not known
+  assert.deepEqual(apps[1], { id: 'd1b2c3d4', name: '<b>Pat\'s</b> phone '.padEnd(40, 'x'), hash: hash(3), at: 0, seenAt: 0, push: null, owner: null, ...NO_WIDGET });      // forty characters of a name, and only what a phone is kept as
+  assert.deepEqual(apps[2], { id: 'e1b2c3d4', name: 'iPhone', hash: hash(4), at: 5, seenAt: 5, push: PUSH_TOKEN, owner: null, ...NO_WIDGET });      // whose it is: a chat's number, or not known
   assert.deepEqual(apps.map(d => d.id), ['a1b2c3d4', 'd1b2c3d4', 'e1b2c3d4', 'f1b2c3d4', 'f2b2c3d4']);
   // Notes: only whole ones, of a kind the app knows, the newest first, thirty at most, never too long.
   const note = (n, over = {}) => ({ id: n.toString(16).padStart(10, '0'), at: n, kind: 'warn', title: `t${n}`, body: `b${n}`, ...over });
@@ -485,7 +487,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.13.0', api: 3 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.14.0', api: 3 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -565,7 +567,7 @@ test('pairing: the code from /app is good once, for a token of which only the SH
     assert.match(r.json.device.id, /^[0-9a-f]{8}$/);
     assert.deepEqual(r.json.device, { id: r.json.device.id, name: 'Francisco\'s iPhone' });
     const saved = t.store.load();
-    assert.deepEqual(saved.apps, [{ id: r.json.device.id, name: 'Francisco\'s iPhone', hash: crypto.createHash('sha256').update(r.json.token).digest('hex'), at: t.clock.t, seenAt: t.clock.t, push: null, owner: OWNER }]);
+    assert.deepEqual(saved.apps, [{ id: r.json.device.id, name: 'Francisco\'s iPhone', hash: crypto.createHash('sha256').update(r.json.token).digest('hex'), at: t.clock.t, seenAt: t.clock.t, push: null, owner: OWNER, ...NO_WIDGET }]);
     assert.ok(!JSON.stringify(saved).includes(r.json.token));
     assert.equal((await get('/app/state', { token: r.json.token })).status, 200);
     assert.equal((await post('/app/pause', { paused: false }, { token: r.json.token })).status, 200);
@@ -742,7 +744,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.13.0',
+    bot: '2.14.0',
     telegram: true,
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
     venues: venuesOn(TUE),
@@ -809,6 +811,8 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
       { id: phone.id, name: 'Francisco\'s iPhone', at: at(NOON), seenAt: at(NOON), me: true },
       { id: other.id, name: 'iPad', at: at(NOON), seenAt: at(NOON), me: false },
     ],
+    // 2.14: no Live Activity by push here (no APNS_KEY), and this phone gave no push-to-start token.
+    activity: { push: false, start: false },
   });
   // The words are the menu's own (it says "Your PC · " before them), and the same booking is what Telegram's /plan lists.
   await t.app.handleUpdate(say(OWNER, '/menu'));
@@ -818,7 +822,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const seenByOther = t.app.appState(other.device);
   assert.deepEqual(seenByOther.state.devices.map(d => d.me), [false, true]);
   assert.notEqual(seenByOther.etag, etag);
-  assert.ok(!/hash|token|push/i.test(JSON.stringify(state)));
+  assert.ok(!/hash|token|push/i.test(JSON.stringify({ ...state, activity: null })));        // `activity` (2.14) says only whether pushes are on: no token
   // Over HTTP it is the same thing, as JSON.
   await withServer(t, async ({ get }) => {
     assert.deepEqual(await get('/app/state', { token: phone.token }), { status: 200, json: { ok: true, etag, state } });
@@ -2436,7 +2440,7 @@ test('what 2.8 saves is what 2.7 saved, with the phones and the notes beside it:
   const saved = t.store.load();
   // The keys 2.7 knows, in its order, then those it has never heard of (2.10's weekly entries and the
   // other venues' one-offs among them). Still version 4.
-  assert.deepEqual(Object.keys(saved), ['v', 'owner', 'plan', 'weekly', 'once', 'onceAway', ...KNOWN_TO_27.slice(4), 'apps', 'notes', 'pcCard', 'pcBooks', 'pcClubRun']);
+  assert.deepEqual(Object.keys(saved), ['v', 'owner', 'plan', 'weekly', 'once', 'onceAway', ...KNOWN_TO_27.slice(4), 'apps', 'notes', 'pcCard', 'pcBooks', 'pcClubRun', 'activitySent']);
   assert.equal(saved.pcCard, null);                                                       // 2.11.1: no ping has said anything of a card
   assert.equal(saved.pcBooks, false);                                                     // 2.11.3: nor that its booker takes Book now at Glasgow Club
   assert.equal(saved.v, 4);
