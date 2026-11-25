@@ -185,3 +185,18 @@ test('what is masked before anything about a push is logged', () => {
   assert.equal(mask('BadDeviceToken'), 'BadDeviceToken');
   assert.equal(mask(null), '');
 });
+
+test('a push kept for a phone out of signal: apns-expiration is the moment given (whole seconds), else 0', async () => {
+  const h = fakeHttp2(), clock = { t: T0 };
+  const apns = createApns({ key: PEM, keyId: KEY_ID, teamId: TEAM_ID, connect: h.connect, now: () => clock.t });
+  const kept = apns.send(DEVICE, { aps: {} }, { pushType: 'liveactivity', priority: 10, expiresAt: 1794938400 });
+  assert.equal(h.last().headers['apns-expiration'], '1794938400');
+  h.answer(h.last(), 200);
+  await kept;
+  for (const expiresAt of [undefined, 0, -5, 1.5, 'soon']) {
+    const sent = apns.send(DEVICE, { aps: {} }, { expiresAt });
+    assert.equal(h.last().headers['apns-expiration'], '0', String(expiresAt));
+    h.answer(h.last(), 200);
+    await sent;
+  }
+});

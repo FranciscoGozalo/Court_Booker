@@ -26,6 +26,10 @@ const shown = over => ({ id: '2026-11-24@16:00', venue: 'kelvingrove', status: '
 const appState = results => ({ venue: { name: 'Kelvingrove Park' }, venues: V.venueList(G.SHEETS, '2026-11-24', G.sheetUrl), results });
 const TUE_9AM = at('2026-11-24T09:00:00Z');
 
+// What a push is sent with: kept by Apple until a moment (a start: until its court is over; an end: an hour on), for a
+// phone out of signal when it goes.
+const until = (at, plus = 0) => ({ pushType: 'liveactivity', priority: 10, expiresAt: Date.parse(at) / 1000 + plus });
+
 test('the court on the Lock Screen, in the app\'s own words: a park with a gate code, one without, Glasgow Club paid for one court and for two', () => {
   const card = r => AC.courtActivity(appState([r]), Date.parse(`${r.date}T00:00:00Z`) + r.start * 60000 - 3600000);
   // A park, with its gate code.
@@ -128,7 +132,7 @@ test('a phone that gave its push-to-start token is sent today\'s court once, wit
   await tickAt(t, '2026-11-17T07:59:30Z');
   assert.deepEqual(t.apns.sent, [], 'more than eight hours before: nothing');
   await tickAt(t, '2026-11-17T08:00:00Z');
-  assert.deepEqual(t.apns.sent, [{ token: START_A, opts: { pushType: 'liveactivity', priority: 10 },
+  assert.deepEqual(t.apns.sent, [{ token: START_A, opts: until('2026-11-17T18:00:00Z'),
     payload: startOf(PARK_PROPS, 'courtbooker:///ticket?id=2026-11-17%4016%3A00', '2026-11-17T18:00:00Z', '2026-11-17T08:00:00Z', 'Court 3 today', 'Kelvingrove · 16:00–18:00') }]);
   assert.deepEqual(t.store.load().activitySent, { [phone.id]: PARK.id });
   assert.ok(t.logs.includes('Today\'s court is on the Lock Screen of iPhone (a Live Activity, started by a push).'));
@@ -164,9 +168,9 @@ test('no push for a court the app started itself; when the court shown changes, 
   // 18:00: Kelvingrove is over and Gorbals is next. The app's card is ended, with the words it showed; the next court is started by a push.
   await tickAt(t, '2026-11-17T18:00:30Z');
   assert.deepEqual(t.apns.sent, [
-    { token: UPDATE, opts: { pushType: 'liveactivity', priority: 10 }, payload: endOf(PARK_PROPS, '2026-11-17T18:00:30Z') },
-    { token: START_A, opts: { pushType: 'liveactivity', priority: 10 },
-      payload: startOf(CLUB_PROPS, 'courtbooker:///ticket?id=gorbals%2F2026-11-17%4019%3A00', '2026-11-17T20:00:00Z', '2026-11-17T18:00:30Z', 'Courts 3 & 4 today', 'Gorbals · 19:00–20:00') },
+    { token: UPDATE, opts: until('2026-11-17T18:00:30Z', 3600), payload: endOf(PARK_PROPS, '2026-11-17T18:00:30Z') },
+    { token: START_A, opts: until('2026-11-17T20:00:00Z'),
+    payload: startOf(CLUB_PROPS, 'courtbooker:///ticket?id=gorbals%2F2026-11-17%4019%3A00', '2026-11-17T20:00:00Z', '2026-11-17T18:00:30Z', 'Courts 3 & 4 today', 'Gorbals · 19:00–20:00') },
   ]);
   assert.equal(t.store.load().apps[0].activityUpdate, null);
   assert.deepEqual(t.store.load().activitySent, { [phone.id]: CLUB.id });
@@ -176,7 +180,7 @@ test('no push for a court the app started itself; when the court shown changes, 
   assert.equal(t.apns.sent.length, 2);
   // 20:00: Gorbals is over, and there is no court after it: its card is ended, so a stale one leaves the Lock Screen.
   await tickAt(t, '2026-11-17T20:00:30Z');
-  assert.deepEqual(t.apns.sent.slice(2), [{ token: UPDATE_2, opts: { pushType: 'liveactivity', priority: 10 }, payload: endOf(CLUB_PROPS, '2026-11-17T20:00:30Z') }]);
+  assert.deepEqual(t.apns.sent.slice(2), [{ token: UPDATE_2, opts: until('2026-11-17T20:00:30Z', 3600), payload: endOf(CLUB_PROPS, '2026-11-17T20:00:30Z') }]);
   assert.equal(t.app.state.apps[0].activityUpdate, null);
   await tickAt(t, '2026-11-17T21:00:00Z');
   assert.equal(t.apns.sent.length, 3);
@@ -184,7 +188,7 @@ test('no push for a court the app started itself; when the court shown changes, 
   // only not within eight hours by this clock, is left to the app.
   await ask(t, phone, 'activity/token', { kind: 'update', activity: 'C3', court: 'maryhill/2026-11-17@10:00', token: UPDATE });
   await tickAt(t, '2026-11-17T21:01:00Z');
-  assert.deepEqual(t.apns.sent.slice(3), [{ token: UPDATE, opts: { pushType: 'liveactivity', priority: 10 }, payload: endOf(null, '2026-11-17T21:01:00Z') }]);
+  assert.deepEqual(t.apns.sent.slice(3), [{ token: UPDATE, opts: until('2026-11-17T21:01:00Z', 3600), payload: endOf(null, '2026-11-17T21:01:00Z') }]);
   t.app.state.results['2026-11-18@19:00'] = { ...PARK, id: '2026-11-18@19:00', date: '2026-11-18', start: 1140, end: 1200 };
   await ask(t, phone, 'activity/token', { kind: 'update', activity: 'D4', court: '2026-11-18@19:00', token: UPDATE_2 });
   await tickAt(t, '2026-11-17T21:02:00Z');

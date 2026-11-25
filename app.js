@@ -2824,9 +2824,11 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       .finally(() => { activityBusy = false; });
   }
   // One push to Apple: { status, reason }, never thrown.
-  async function apnsSend(token, payload) {
+  // `until` (ms): Apple keeps the push until then for a phone offline when it goes (a court's start, kept till it is
+  // over; an end, for an hour), so a phone out of signal at that moment still gets it.
+  async function apnsSend(token, payload, until = 0) {
     try {
-      const r = await apns.send(token, payload, { pushType: 'liveactivity', priority: 10 });
+      const r = await apns.send(token, payload, { pushType: 'liveactivity', priority: 10, expiresAt: until > 0 ? Math.floor(until / 1000) : 0 });
       return r && typeof r === 'object' ? { status: Number(r.status) || 0, reason: r.reason ? maskApns(r.reason).slice(0, 80) : null } : { status: 0, reason: null };
     } catch (e) { return { status: 0, reason: maskApns((e && e.message) || e).slice(0, 200) }; }
   }
@@ -2853,7 +2855,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   async function startActivity(d, want, t) {
     const key = `${d.id} start ${want.key}`, token = d.activityStart;
     if (!mayTry(key, t)) return;
-    const told = await apnsSend(token, AC.startPayload(want, t));
+    const told = await apnsSend(token, AC.startPayload(want, t), want.endsAt);
     if (!state.apps.includes(d)) return;                                   // unlinked meanwhile
     if (told.status === 200) {
       state.activitySent[d.id] = want.key; activityTries.delete(key); save();
@@ -2873,7 +2875,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (!mayTry(key, t)) return;
     // The words the card showed, to end it with, worked out again (null once its result has gone).
     const r = view.results.find(x => x.id === old.court && x.status === 'booked');
-    const told = await apnsSend(old.token, AC.endPayload(r ? JSON.stringify(AC.activityOf(view, r).props) : null, t));
+    const told = await apnsSend(old.token, AC.endPayload(r ? JSON.stringify(AC.activityOf(view, r).props) : null, t), t + 3600000);
     if (!state.apps.includes(d)) return;
     const forget = () => { activityTries.delete(key); if (d.activityUpdate === old) { d.activityUpdate = null; save(); } };
     if (told.status === 200 || tokenGone(told)) return forget();          // ended, or there is no such card any more
