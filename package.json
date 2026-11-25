@@ -1,6 +1,6 @@
 {
   "name": "court-booker",
-  "version": "2.14.0",
+  "version": "2.15.0",
   "description": "The bot behind the court-booking iPhone app (Telegram optional): it keeps your court bookings; your PC at home books them at each release and the bot sends the court, time and gate code.",
   "private": true,
   "main": "index.js",

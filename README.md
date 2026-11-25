@@ -5,7 +5,7 @@ A small bot for Kelvingrove Park Tennis Courts, behind the iPhone app (and, if y
 The work is split in two because ClubSpark sits behind Cloudflare, which turns cloud servers like Railway away:
 
 - **The bot runs on Railway.** It is always online, keeps your requests, answers your messages and sends the cards.
-- **The booker runs on your PC.** It is in the separate repository [kelvingrove-court-booker](https://github.com/FranciscoGozalo/kelvingrove-court-booker). A Windows task wakes the PC at 21:55, the booker asks this bot what to book, books it at 22:00 and reports back.
+- **The booker runs on your PC.** It is in the separate repository [kelvingrove-court-booker](https://github.com/FranciscoGozalo/kelvingrove-court-booker). A Windows task wakes the PC at 21:55, the booker asks this bot what to book, books it at 22:00 and reports back. From 2.15 the PC wakes only on the nights with something to book (below, "Only the nights with a booking").
 
 Your ClubSpark password stays on your PC. The bot never sees it and never touches ClubSpark.
 
@@ -122,7 +122,15 @@ While the dot is amber or red, the menu has a **Wake my PC** button (and there i
 While the dot is green, the same place on the menu has **Sleep my PC** (and there is `/sleep`). The bot cannot reach into your PC, so it hands the request to the PC's next ping: the PC link's ping waits up to 50 seconds for an answer, so the request arrives within seconds of your tap. The PC then goes to ordinary sleep (not hibernate), and the dot turns amber straight away.
 
 - **Never before a booking:** from 30 minutes before a release, the bot refuses, and the PC itself refuses while its nightly booking task is running.
-- **Only when it can wake for the booking:** the PC sleeps only if its booking task (21:55 each night, 5 minutes before the 22:00 release) is there, switched on, set to wake the computer and due to run, and wake timers are allowed. Otherwise it stays awake and you get a message saying why.
+- **Only when it can wake for the booking:** the PC sleeps only if its booking task (21:55 each night, 5 minutes before the 22:00 release) is there, switched on, set to wake the computer and due to run, and wake timers are allowed. Otherwise it stays awake and you get a message saying why. With a booker that wakes only on the nights with a booking (2.15, below), each task with a night still to come must be so; with nothing to book, nothing needs to wake it.
+
+### Only the nights with a booking (2.15)
+
+Until 2.15 the PC's two booking tasks woke it every night, at 21:55 (the parks) and at 23:50 (Glasgow Club), whether or not there was anything to book. Now the bot tells the PC, in the answer to each of its pings, which runs the next eight nights need (`wakes`: the parks' run at 21:55 on a night whose 22:00 release books something, Glasgow Club's at 23:50 on a night whose midnight does, and the next run before a one-off date already open; `lib/schedule.js` `wakesFor`). The PC's link sets each task to exactly those nights and switches it off while it has none (its `lib/wakes.js`), and each ping says what they are set to (`wakesSet`). A night with nothing to book, the PC sleeps through.
+
+- **A booking added while the PC sleeps**, for a night it has not heard of: twenty minutes before that run the bot wakes the PC over the internet (as **Wake my PC** does; it needs `WAKE_MAC`), the link hears of the night, sets the task and keeps the PC awake for the run. It tries again five minutes later while the PC has not heard, three times in all; if the PC never answers, you are told, with "its own timer will not wake it", so you can wake it by hand. Without `WAKE_MAC` nothing can wake it for such a night: add a booking while the PC is awake, or wake it.
+- **The status line** says the PC's real next wake-up ("Asleep · wakes tomorrow at 21:55", or "Asleep · nothing to book").
+- **A booker that does not set its own wake-ups** (before its 2.14) is answered as before and wakes every night; nothing here changes for it. If its link could not set the tasks, it puts them back to every night and says nothing of its nights, and the bot treats it the same way.
 - **Never late:** a request that no ping collects within 2 minutes is dropped, so the PC doesn't fall asleep the next time it wakes.
 - Nothing open on the PC is closed. Wake it again with **Wake my PC**.
 

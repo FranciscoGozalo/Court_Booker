@@ -17,10 +17,10 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { iso, label, hhmm, todayCivil, addDays, londonInstant, londonWall, civil, dayKey, DAY_KEYS, DAY_LONG } = require('./lib/time');
+const { iso, label, hhmm, clockAt, todayCivil, addDays, londonInstant, londonWall, civil, dayKey, DAY_KEYS, DAY_LONG } = require('./lib/time');
 const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, cleanOnceAway, cleanWeekly, weeklyFromPlan, planOf, newWeeklyId, slotText, slotEnd,
   MAX_WEEKLY, courtsOf } = require('./lib/plan');
-const { jobsFor, jobId, missingFor, msToNextCheck, opensAt, opensAtFor, civilOf, upcoming, releaseAround, isClub, MISSING_MS, SEEN_FRESH_MS } = require('./lib/schedule');
+const { jobsFor, jobId, missingFor, msToNextCheck, opensAt, opensAtFor, civilOf, upcoming, releaseAround, isClub, wakesFor, MISSING_MS, SEEN_FRESH_MS } = require('./lib/schedule');
 const M = require('./lib/messages');
 const UI = require('./lib/ui');
 const { readMac, publicIPv4, sendWake } = require('./lib/wake');
@@ -34,7 +34,7 @@ const GB = require('./lib/glasgowbook');
 const AC = require('./lib/activity');
 const { mask: maskApns } = require('./lib/apns');
 
-const VERSION = '2.14.0';
+const VERSION = '2.15.0';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -46,6 +46,8 @@ const MAX_ONCE = 60;                       // one-off dates on the list at once,
 const HEADS_UP_MS = 30 * 60 * 1000;   // the heads-up card only goes out when the PC checks in this close to a release
 const PREFLIGHT_MS = 20 * 60 * 1000;       // this long before a release, make sure the PC answers (waking it if asleep)
 const PREFLIGHT_WAIT_MS = 3 * 60 * 1000;   // how long the PC gets to answer that wake-up before you are told
+const TOLD_AGAIN_MS = 5 * 60 * 1000;       // a run your PC has not heard of: woken again this long after (2.15)...
+const TOLD_TRIES = 3;                      // ...this many times in all
 const NO_WORD_MS = 8 * 60 * 1000;          // a run that started should have reported by this long after the release
 const NO_WORD_FOR_MS = 60 * 60 * 1000;     // ...and after this the bot stops watching for it
 const PRE_210_COPY = 'state.pre-2.10.json';         // the settings as a bot older than 2.10 kept them (see createApp)
@@ -155,13 +157,21 @@ function cleanPcCard(raw) {
   return kept === undefined ? null : { kept, auto: raw.auto === true };
 }
 
+// The runs your PC said its booking tasks will wake it for (its lib/wakes.js, 2.14), soonest first:
+// [{ run: 'parks' | 'club', at }]. Anything but a list (a booker that wakes every night): null.
+function cleanPcWakes(raw) {
+  if (!Array.isArray(raw)) return null;
+  return raw.slice(0, 50).filter(w => w && (w.run === 'parks' || w.run === 'club') && Number.isInteger(w.at) && w.at > 0)
+    .map(w => ({ run: w.run, at: w.at })).sort((a, b) => a.at - b.at);
+}
+
 // Settings from storage, or from the environment on a first start, made safe to use.
 // Settings saved by version 1 (the link alerts) keep the owner, weekly plan, court order and pictures.
 function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, weekly: [], once: [], onceAway: [], order: [1, 2, 3, 4, 5, 6], paused: false,
     results: {}, sent: {}, pics: {}, lastSeen: null, lastRun: null, home: null,
-    apps: [], notes: [], pcCard: null, pcBooks: false, pcClubRun: null, activitySent: {},
+    apps: [], notes: [], pcCard: null, pcBooks: false, pcClubRun: null, pcWakes: null, activitySent: {},
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -196,6 +206,9 @@ function loadState(raw, env = {}) {
       // When your PC's booker starts Glasgow Club's own run (2.12: 1430, 23:50), as it last said; null
       // for a booker that books Glasgow Club from its 21:55 run.
       state.pcClubRun = Number.isInteger(raw.pcClubRun) ? raw.pcClubRun : null;
+      // The runs your PC's booking tasks are set to wake it for (2.15), as its last ping said; null for
+      // a booker whose tasks wake it every night.
+      state.pcWakes = cleanPcWakes(raw.pcWakes);
     }
     for (const kind of KINDS) {                                   // what Telegram calls each picture, once it has it
       const p = raw.pics && raw.pics[kind];
@@ -1466,7 +1479,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     : { is_disabled: true });
 
   // ---------- the tap-through screens ----------
-  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked, pc: pcState(), wake: wakeState(), wokeAt, sleepAsk, card: pcCard });
+  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked, pc: pcState(), wake: wakeState(), wokeAt, sleepAsk, card: pcCard, pcWakes: state.pcWakes });
   const statusInfo = () => ({
     version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused,
     linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null, pc: pcState(),
@@ -2053,10 +2066,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // `book` (2.11.3): the ping's `glasgowBook`, { max, why }, when its booker takes Book now at Glasgow
   // Club; null when it says nothing. Read before anything is handed over, so that a PC rolled back to
   // an older booker is never handed a Book now on its first ping.
-  async function pingFromAgent(from = {}, { wait = 0, refused = null, card = null, book = null } = {}) {
+  async function pingFromAgent(from = {}, { wait = 0, refused = null, card = null, book = null, wakes } = {}) {
     state.lastSeen = now();
     noteHome(from);
     pcBookFrom(book);
+    const was = JSON.stringify(state.pcWakes);
+    state.pcWakes = cleanPcWakes(wakes);                   // a booker before 2.14 says nothing: every night
+    if (JSON.stringify(state.pcWakes) !== was && state.pcWakes) log(`Your PC wakes to book: ${state.pcWakes.length ? state.pcWakes.map(w => `${label(todayCivil(w.at))} ${clockAt(w.at).slice(0, 5)}`).join(', ') : 'no night (nothing to book)'}.`);
+    else if (JSON.stringify(state.pcWakes) !== was) log('Your PC wakes every night (its booker sets no nights of its own).');
     save();
     cardFromPc(card);
     autoFromPc(card);
@@ -2076,8 +2093,18 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       await waitForOrder(wait * 1000);
       order = takeOrder(now());
     }
-    return { ok: true, ...order };
+    // The nights its booking tasks are to wake it (2.15: those with a booking), for a booker that sets
+    // them (its ping says wakesSet); one before 2.14 is answered as before, and wakes every night.
+    return { ok: true, ...order, ...(wakes !== undefined ? { wakes: wakesToSet(now()) } : {}) };
   }
+  // The runs your PC should wake for (lib/schedule.js wakesFor), or none while paused.
+  function wakesToSet(t) {
+    if (state.paused || owner() === null) return [];
+    return wakesFor(t, cfg(), { clubRun: state.pcClubRun, results: state.results }).map(w => ({ run: w.run, at: w.at }));
+  }
+  // Whether your PC has been told of a run: its tasks wake it every night (a booker before 2.14), or
+  // the runs its last ping said include it.
+  const toldOf = w => !Array.isArray(state.pcWakes) || state.pcWakes.some(s => s.run === w.run && Math.abs(s.at - w.at) < 60000);
 
   // The PC says how tonight's run is going, before there is a result: "ready" once it has signed
   // in to ClubSpark (written on the heads-up card), or "trouble" when an attempt failed and it is
@@ -2454,7 +2481,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       if (wakeState() !== 'ready') {
         // Nothing to wake it with from here: speak up only if it has been silent for over a day.
         if (pc === 'offline') {
-          await warnOnce(warned, t, () => M.notAnsweringText(cfg(), rel, null, !!state.lastSeen), text => sendCard(chat, 'home-offline', text, UI.afterNotAnswering(false)),
+          await warnOnce(warned, t, () => M.notAnsweringText(cfg(), rel, null, !!state.lastSeen, untoldRun(rel)), text => sendCard(chat, 'home-offline', text, UI.afterNotAnswering(false)),
             `Warned ahead of ${label(rel.playDate)}'s booking that the PC has been out of touch for over a day`);
         }
         return;
@@ -2472,8 +2499,50 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       return;
     }
     if (t - tried < PREFLIGHT_WAIT_MS || (state.lastSeen && state.lastSeen > tried)) return;     // still waiting, or it answered
-    await warnOnce(warned, t, () => M.notAnsweringText(cfg(), rel, tried), text => sendCard(chat, 'home-offline', text, UI.afterNotAnswering(true)),
+    await warnOnce(warned, t, () => M.notAnsweringText(cfg(), rel, tried, true, untoldRun(rel)), text => sendCard(chat, 'home-offline', text, UI.afterNotAnswering(true)),
       `Warned that the PC did not answer a wake-up ahead of ${label(rel.playDate)}'s booking`);
+  }
+
+  // The PC's run for a release, when the PC has not been told of it (2.15), or null.
+  function untoldRun(rel) {
+    const w = wakesFor(now(), cfg(), { clubRun: state.pcClubRun, results: state.results }).find(x => x.rel && x.rel.releaseAt === rel.releaseAt);
+    return w && !toldOf(w) ? w.at : null;
+  }
+
+  // A run your PC has not been told of (2.15). Its booking tasks wake it only for the runs it has
+  // heard of, from the answer to its pings (lib/schedule.js wakesFor); a booking added while it
+  // sleeps, for a night it is not to wake, would be missed. So twenty minutes before such a run it
+  // is woken from here: it hears of the night, sets its task and stays awake for it (its
+  // lib/wakes.js). Again five minutes later while it has not heard, three times in all; then, if it
+  // has not been in touch since the first, you are told, as before a release (the same warning, so
+  // it is said once). A PC whose booker wakes it every night (before 2.14) is left to it.
+  const toldTries = {};
+  async function checkTold(t, chat) {
+    if (!Array.isArray(state.pcWakes) || wakeState() !== 'ready') return;
+    for (const w of wakesFor(t, cfg(), { clubRun: state.pcClubRun, results: state.results })) {
+      if (t < w.at - PREFLIGHT_MS || t >= w.at || toldOf(w)) continue;
+      const key = `${w.run}:${w.at}`, tries = toldTries[key] || (toldTries[key] = []);
+      if (pcState(t) === 'awake') continue;                     // it hears of it with its next ping
+      if (tries.length && t - tries[tries.length - 1] < TOLD_AGAIN_MS) continue;
+      if (tries.length < TOLD_TRIES && wokeAt && t - wokeAt < TOLD_AGAIN_MS) continue;   // one went a moment ago (before a release, say)
+      if (tries.length >= TOLD_TRIES) {
+        if (w.rel && !(state.lastSeen && state.lastSeen > tries[0])) {
+          await warnOnce(`prewarn:${w.rel.releaseAt}`, t, () => M.notAnsweringText(cfg(), w.rel, tries[0], true, w.at), text => sendCard(chat, 'home-offline', text, UI.afterNotAnswering(true)),
+            `Warned that the PC did not answer a wake-up for a run it had not heard of (${label(w.rel.playDate)})`);
+        }
+        continue;
+      }
+      try {
+        await wake({ host: state.home.ip, port: wakePort, mac: wakeMac });
+      } catch (err) {
+        log(`Wake-up for a run your PC has not heard of not sent: ${err.message}`);
+        continue;
+      }
+      tries.push(t);
+      wokeAt = t;
+      for (const k of Object.keys(toldTries)) if (Number(k.split(':')[1]) < t - 86400000) delete toldTries[k];
+      log(`Your PC has not heard of its run at ${clockAt(w.at).slice(0, 5)} on ${label(todayCivil(w.at))}, so I sent it a wake-up.`);
+    }
   }
 
   async function checkStarted(t, chat) {
@@ -2521,6 +2590,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const chat = owner();
       if (chat === null || state.paused || !linked) return;
       await checkAhead(t, chat);
+      await checkTold(t, chat);
       await checkStarted(t, chat);
       await checkReported(t, chat);
     } finally {
@@ -2740,6 +2810,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         // 2.12: the minute Glasgow Club's own run starts on your PC (1430, 23:50): requests for the coming
         // midnight are taken until then. Null: its 21:55 run takes them, so until 21:55.
         clubRun: Number.isInteger(state.pcClubRun) ? state.pcClubRun : null,
+        // 2.15: the runs your PC's booking tasks will wake it for, as it last said ({ run, at }), or null
+        // when they wake it every night.
+        wakes: Array.isArray(state.pcWakes) ? state.pcWakes.filter(w => w.at > t) : null,
       },
       release: releases.length ? releaseOf(releases[0]) : null,
       later: releases.slice(1).map(releaseOf),

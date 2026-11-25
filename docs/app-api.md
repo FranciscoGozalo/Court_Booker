@@ -442,6 +442,7 @@ as the owner gave them do not say. `week`: that Monday, YYYY-MM-DD.
 - `sleepAsked`: when sleep was asked for, while the PC has not collected the request yet (it has
   two minutes to; after that, or once collected, null). `wokeAt`: when the last wake-up was sent
   since the bot started, or null.
+- `wakes` (2.15): the runs your PC's booking tasks will wake it for, soonest first, as its last ping said: `[{ run: 'parks' | 'club', at }]` (`at` in ms; the parks' run at 21:55, Glasgow Club's at 23:50); `[]` when nothing is to book; null for a booker whose tasks wake it every night. `line` follows it ("Asleep · wakes tomorrow at 21:55", "Asleep · nothing to book").
 - `clubRun` (2.12): the minute Glasgow Club's own run starts on your PC, 1430 for 23:50, as its booker last said when it asked for jobs; null for a booker older than 2.12, whose 21:55 run takes Glasgow Club's list for the coming midnight. Requests for that midnight are taken until this minute (21:55 when null). The PC sleeps between the parks' run and this one, so Sleep is refused only from five minutes before it (an hour before midnight when null), and the PC is looked for three minutes after it rather than twenty minutes before midnight.
 - `cardKey`: your PC's key for sealing a card or a security code to it: standard base64 (44
   characters) of a 32-byte X25519 public key, made once on the PC, whose secret half never leaves
