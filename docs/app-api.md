@@ -1892,7 +1892,7 @@ What the bot does with them, looked at every 30 seconds at most (with the timer,
 - **Start.** For each phone with a push-to-start token, once the court is within eight hours and that phone has not
   had it (`state.activitySent[phone id]`, kept on disk, so a restart sends none twice; a court the app said it
   started counts): a push-to-start to that token, `apns-push-type: liveactivity`, `apns-topic:
-  <APNS_TOPIC>.push-type.liveactivity`, `apns-priority: 10`, `apns-expiration: 0`:
+  <APNS_TOPIC>.push-type.liveactivity`, `apns-priority: 10`, `apns-expiration` (a start: its court's end; an end: an hour on):
 
   ```
   { aps: { timestamp: <now, s>, event: "start",
@@ -1942,8 +1942,8 @@ key, the signed token and every phone's token are never written in the log.
 - iOS keeps a Live Activity for eight hours at most (and on the Lock Screen up to four more once it ends), so a
   court is put there no sooner than eight hours before it starts; it goes stale at its end (`stale-date`).
 - A Live Activity started by a push needs iOS 17.2 or later (the push-to-start token comes from there on), and the
-  app built to receive pushes for it. `apns-expiration: 0`: a phone that is off when the push goes does not get it
-  later; the app puts the card there when next opened.
+  app built to receive pushes for it. Apple keeps a start for a phone that is off or out of signal when it goes,
+  and delivers it until the court is over (an end, for an hour); after that the app puts the card there when next opened.
 - One push-to-start for each court and phone. Dismissed from the Lock Screen, it is not sent again; the app starts it
   again when opened. A push-to-start that Apple took but iOS did not show (Live Activities off for the app, say) is
   not known here, nor tried again.
