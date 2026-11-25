@@ -173,6 +173,16 @@ In the app a weekly booking, or a one-off date, can be at any venue the bot know
 - **Updating:** update your PC's booker first, then the bot. Then run `schedule.ps1` on the PC once more: the nightly task may now run three hours, to see midnight out. A booker older than 2.10 is given Kelvingrove's bookings alone, and every other one gets a "Not booked" card saying to update it. A booker of 2.10.0 cannot read signatures: update it to 2.10.1 with the bot.
 - **Going back to an older version:** a bot older than 2.10, started on 2.10's settings, keeps your Kelvingrove weekly times and one-off dates (and books them as before), but drops the other venues' the first time it saves. So 2.10 keeps a copy of the settings as they were before it first started, `state.pre-2.10.json`, beside `state.json` on the volume. To go back: stop the bot, copy `state.pre-2.10.json` over `state.json` (from a shell on the service, say), deploy the older version, and then set again by hand whatever you added or changed since 2.10 started (Kelvingrove's in Telegram; the rest is lost to the older version anyway). Going forward again later, add the other venues' bookings again in the app.
 
+### Widgets and today's court on the Lock Screen (version 2.14)
+
+With the app closed, the iPhone's widgets read what the app shows (your next court, its gate code), and today's court can come onto the Lock Screen and the Dynamic Island by itself, eight hours before it starts, as the app puts it there when you open it.
+
+- **The widgets** ask the bot with a token of their own, which the app gets once (its fingerprint is kept, as a phone's is). It reads the state and nothing else: it can change nothing, and opens nothing of your PC's. At most 120 reads an hour for each phone. Unlinking the phone ends it.
+- **Today's court by push** needs Apple's push service: in your Apple developer account, under Keys, make a key with Apple Push Notifications service, and set `APNS_KEY` (the `.p8` file's text, or that text base64-encoded), `APNS_KEY_ID` and `APNS_TEAM_ID` on Railway (see [Variables](#variables)). Without them it is off (the log says so at the start), and the app still puts the court there whenever it is opened.
+- **Once a court:** each phone is sent each court once, and none the app put there itself. When that court is over, or another comes first, the card the app said it shows is taken off, so an old one does not stay on the Lock Screen. Nothing of the key, nor any phone's token, is written in the log.
+
+The details, request by request, are in [docs/app-api.md](docs/app-api.md) ("Widgets and today's court on the Lock Screen").
+
 ## The pictures
 
 The banners in `assets/` are made from the two pictures in `art/` (the court at night, and with the floodlights on):
@@ -219,6 +229,11 @@ With the token back, Telegram is back as it was.
 | `WAKE_MAC` | To wake your PC | The PC's network card address, for example `44:AF:28:7A:1A:5C` (`Get-NetAdapter` on the PC). |
 | `WAKE_PORT` | To wake your PC | The outside port your router forwards to the PC's port 9 (UDP). Default `9`. |
 | `PORT` | No | Railway sets this. Default `8080`. |
+| `APNS_KEY` | For today's court on the Lock Screen by push (2.14) | The key from Apple's developer site (Keys, Apple Push Notifications service): the `.p8` file's text, or that text base64-encoded. Never in the log. |
+| `APNS_KEY_ID` | With `APNS_KEY` | That key's id, ten letters and digits. |
+| `APNS_TEAM_ID` | With `APNS_KEY` | Your Apple team id, ten letters and digits. |
+| `APNS_TOPIC` | No | The app's bundle id. Default `com.franciscogozalo.courtbooker`. |
+| `APNS_HOST` | No | Default `api.push.apple.com` (TestFlight and App Store builds). `api.sandbox.push.apple.com` for a build run from Xcode. |
 
 ## For developers
 
@@ -240,6 +255,8 @@ lib/server.js     the HTTP endpoint your PC talks to (GET /agent/jobs, POST /age
 lib/appapi.js     the iPhone app's API, the parts that need nothing else: pairing codes, tokens,
                   the linked phones, the notes, and what each request must look like
 lib/push.js       notifications to the linked phones, by Expo's push service
+lib/apns.js       Apple's own push service, for today's court on the Lock Screen (2.14)
+lib/activity.js   which court is on the Lock Screen, and its words, worked out as the app does (2.14)
 lib/ui.js         the tap-through screens and their buttons
 lib/wake.js       the Wake-on-LAN magic packet, and where it may go
 lib/glasgowclub.js  Glasgow Club's free courts, read as a visitor (by your PC, or from here where

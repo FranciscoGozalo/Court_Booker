@@ -24,7 +24,9 @@ Two things are the app's alone:
 
 Everything else adds no new power.
 
-This file describes the API as built in version 2.13.0 (`api: 3`; 2.13 makes Telegram optional, by addition only:
+This file describes the API as built in version 2.14.0 (`api: 3`; 2.14 adds the widgets' own read and today's court on the
+Lock Screen started by a push, by addition only: `POST /app/widget/token`, `GET /app/widget/state`, `POST /app/activity/token`
+and `state.activity` (see "Widgets and today's court on the Lock Screen (2.14)"); 2.13 makes Telegram optional, by addition only:
 `state.telegram`, `POST /app/pair/code`, `POST /app/unpair/other` and the PC's `POST /agent/pair` (see "Who is asking");
 2.12 adds `pc.clubRun` and `glasgow.tried`; it signs Book now at Glasgow Club
 in words of its own, `court-broker/now/v1`, with the courts and the minute the app signed (`stamp`, required on
@@ -63,7 +65,8 @@ longer say to pay on the phone: signing in to Glasgow Club on a phone does not s
 PC filled), and the weekly allowance, which can now refuse a one-off date or a weekly time that
 would pass it. The pure parts are in `lib/appapi.js`, the parks' in `lib/clubspark.js`,
 `lib/venues.js` and `lib/allowance.js`, Book now at Glasgow Club in `lib/glasgowbook.js`, the push
-sender in `lib/push.js`, and the checks in `test/appapi.test.js`, `test/pay.test.js`,
+sender in `lib/push.js`, Apple's push service and the Lock Screen's court in `lib/apns.js` and `lib/activity.js` (2.14,
+checked in `test/apns.test.js`, `test/activity.test.js` and `test/widget.test.js`), and the checks in `test/appapi.test.js`, `test/pay.test.js`,
 `test/clubspark.test.js`, `test/glasgowbook.test.js` and `test/allowance.test.js`.
 
 Bodies are JSON, at most 4 KB. Instants (`at`, `seenAt`, `until`, `opensAt`…) are milliseconds since
@@ -107,6 +110,10 @@ CORS headers: the API is meant for the phone app, not for a page in a browser.
   linked while another was linked already is a note to every phone (`info`, "Phone linked": "<name>
   can now reach your bot. Not yours? Unlink it in Settings."), and its notification, with Telegram on
   or off; the first phone has no one to tell.
+- The widgets (2.14): a linked phone may ask for a second token, for its widgets alone (`POST /app/widget/token`). It is
+  of the same form, only its SHA-256 is kept (on that phone, as `widget`), and it opens one thing: `GET
+  /app/widget/state`, the state as that phone is shown it. It opens nothing else under `/app/` (`401 unpaired`), and a
+  phone's own token does not open that read. See "Widgets and today's court on the Lock Screen (2.14)".
 - Telegram off (2.13): a bot started without `TELEGRAM_BOT_TOKEN` and with no owner answers to the
   app alone: its owner is `0`, which no Telegram chat is, and phones are linked for it. With
   `TELEGRAM_CHAT_ID` set later, that chat takes it over, and the phones stay linked. A bot that had
@@ -132,11 +139,12 @@ fresh read in any minute, 6 reads of the parks on ClubSpark in any 10 minutes (n
 22:30, and no booking there from 21:25, nor any for 2 hours after ClubSpark turns your PC away), 4
 bookings at the parks in an hour, 60 one-off dates on the list, 4 waits open at once for one phone,
 a hold or a booking only for a court that a look showed the app free in the last 15 minutes, the
-week's 7 sessions and 14 hours, one card on its way to the PC at a time, and one Pay for each hold.
+week's 7 sessions and 14 hours, one card on its way to the PC at a time, one Pay for each hold, and (2.14) 120 reads
+of the state an hour by each phone's widgets.
 
 ## Reading
 
-`GET /app/hello` → `{ ok: true, bot: "2.13.0", api: 3 }`. Nothing private.
+`GET /app/hello` → `{ ok: true, bot: "2.14.0", api: 3 }`. Nothing private.
 
 `POST /app/pair { code, name }` → `{ ok: true, token, device: { id, name } }`, or `400 { ok: false,
 why: "wrong" | "expired" | "none" | "full", left }` (`left`: tries left on this code).
@@ -221,6 +229,7 @@ state = {
   hold:    null | hold,
   notes:   [ { id, at, kind: "booked" | "missed" | "warn" | "hold" | "info", title, body, ref } ],   // newest first, the last 30; ref (2.10.4): the result it is about, or null
   devices: [ { id, name, at, seenAt, me } ],
+  activity: { push, start },                                             // 2.14: today's court on the Lock Screen, by push
 }
 
 hold = { id, startedBy: "app" | "telegram", centre, centreName, date, start, end, court, courtName,
@@ -724,7 +733,14 @@ time, whoever started it.
   `links.sheet`: that centre's sheet for the hold's date.
 
 **`notes`**: see the last section. **`devices`**: the linked phones. `at`: when each was linked;
-`seenAt`: when it was last heard from (to the minute); `me`: the phone that asked.
+`seenAt`: when it was last heard from (to the minute); `me`: the phone that asked. A widget's read
+(`GET /app/widget/state`, 2.14) is not the phone being heard from: it leaves `seenAt` as it was.
+
+**`activity`** (2.14): today's court on the Lock Screen, started by the bot with a push while the app is closed.
+`push`: the bot can send such pushes (`APNS_KEY`, `APNS_KEY_ID` and `APNS_TEAM_ID` are set on Railway); false, and
+the app alone starts the card, when it opens. `start`: this phone gave its push-to-start token (`POST
+/app/activity/token`). No token is ever in the state. Missing before 2.14. See "Widgets and today's court on the Lock
+Screen (2.14)".
 
 ## Asking
 
@@ -756,6 +772,8 @@ is fine, and things as they stand refuse it (the same request may work later).
 | `POST /app/card/auto` | (app only, api 3) | `{ sealed }`: the card's security code for automatic payments |
 | `POST /app/card/auto/off` | (app only, api 3) | `{}` |
 | `POST /app/push` | | `{ token }`: this phone's Expo push token, or null to stop |
+| `POST /app/widget/token` | (app only, 2.14) | `{}` → `{ ok: true, token }` (no state): a token for this phone's widgets |
+| `POST /app/activity/token` | (app only, 2.14) | `{ kind: "start", token }` or `{ kind: "update", activity, court, token }`: the Live Activity tokens |
 | `POST /app/clubspark/look` | (app only) | `{ venue, date, fresh }` → `{ ok: true, look }` (no state): a park's free courts |
 | `POST /app/clubspark/book` | (app only) | `{ venue, date, start, hours, court }`: Book now at a park |
 | `POST /app/glasgow/book` | (app only, 2.11.3) | `{ venue, type, date, start, hours: 1, court, courts?, auth, stamp }` (`stamp` 2.12): Book now at Glasgow Club, paid by your PC |
@@ -1806,6 +1824,138 @@ something else. With each part older than 2.12:
   the booking you asked for, as you asked for it; no signature of a weekly booking or one-off will do
   in its place, and none is shown in the state for anyone to take.
 
+## Widgets and today's court on the Lock Screen (2.14)
+
+Two things for the iPhone with the app closed: its widgets read the state themselves, and today's court comes onto
+the Lock Screen (a Live Activity) by a push from the bot. Nothing here adds a power: the widgets read what the app
+reads, and a Live Activity shows a court already booked.
+
+### The widgets' own read
+
+`POST /app/widget/token {}` (a linked phone, with its own token) → `{ ok: true, token }`, and no state. `token`: 43
+characters (32 random bytes, base64url), of the same form as a phone's own, given this once. Only its SHA-256 is
+kept, on that phone (`widget`). Each phone has one at most: a new one replaces the old, which opens nothing any more.
+It goes when the phone is unlinked, however that is done (`/app/unpair`, `/app/unpair/other`, `/app forget`, the PC's
+`forget`, or the bot coming to answer to another chat). It is never written in the log, and not in the one-line
+`/backup`. `400 { why: "The request body must be a JSON object." }` for a body that is not an object.
+
+`GET /app/widget/state` with `Authorization: Bearer <widget token>` → `{ ok: true, etag, state }`: exactly what
+`GET /app/state` gives that phone (`devices[].me` is that phone), at once. `have` and `wait` are not looked at: it
+never waits. Answers:
+
+| Status | Body | When |
+| --- | --- | --- |
+| 200 | `{ ok: true, etag, state }` | a widget token the bot knows, of a phone still linked |
+| 401 | `{ ok: false, why: "unpaired" }` | no token, a phone's own token, a widget token replaced or of a phone unlinked, anything else |
+| 429 | `{ ok: false, why: "slow" }` | the 121st read in an hour for that phone's widgets (a new widget token does not start a new count) |
+
+- The widget token opens nothing else: `GET /app/state`, every `POST /app/...` and everything under `/agent/` answer
+  it `401`. A phone's own token does not open `/app/widget/state` (`401`), and a `POST` there is `404`.
+- At most 120 reads an hour for each phone, counted in any stretch of an hour; a read turned away is not counted.
+  The count is kept in memory: a restart of the bot starts it again.
+- A read does not count as the phone being heard from: `devices[].seenAt` stays as the app itself last left it.
+- A bot older than 2.14 answers `POST /app/widget/token` with `404`, and `GET /app/widget/state` with `401`.
+
+### Today's court on the Lock Screen, by push
+
+The app's Live Activity (`CourtActivity`: ActivityKit attributes `LiveActivityAttributes { url }`, content
+`{ name, props }`, `props` one string of JSON) shows today's court: the first booked court not over yet, soonest
+first, once it starts within eight hours. The app starts it itself whenever it is open. From 2.14 the bot can start
+it with the app closed, by a push through Apple's own push service (APNs), and end it once the court shown is
+another. It works out the court, and the card's words, exactly as the app does (`lib/activity.js`, a port of the
+app's `courtActivity`, `courtPill`, `courtPlace` and `courtsName` in `src/data/view.js`), from the same `results`
+and `venues`, so a card started by a push is, to the character, the one the app would start:
+
+```
+props = { place: "Kelvingrove", day: "Tue 24 Nov", time: "16:00–18:00", start: "16:00", court: "Court 3",
+          pillLabel: "GATE", pillValue: "2433", startsAt, endsAt }      // ms; "PAID" "£46.00" at Glasgow Club once paid; "" "" for neither
+```
+
+`POST /app/activity/token` (a linked phone) → the state, as every request:
+
+- `{ kind: "start", token }`: the phone's push-to-start token (`Activity<LiveActivityAttributes>.pushToStartToken`,
+  hex, 64 to 400 characters; kept in lower case, as `activityStart`). One phone, one token: the same token from
+  another phone moves to it. `{ kind: "start", token: null }` forgets it.
+- `{ kind: "update", activity, court, token }`: an activity the app runs: its id (up to 80 letters, digits and
+  dashes, as iOS gives it), the court it shows (a result's `id`, as `results` gives it) and its own push token (hex,
+  64 to 400). Kept as `activityUpdate`, one a phone, the newest. That court counts as started on that phone: no push
+  starts another for it. `{ kind: "update", token: null }` forgets it.
+- `400`, with these `why`s: "To give a Live Activity token, send kind: "start" (the push-to-start token) or "update"
+  (an activity's own token)."; "A push-to-start token is hex, 64 to 400 characters. Send one, or null to stop.";
+  "An activity's token needs its activity id (up to 80 letters, digits and dashes), its court (a result's id, as
+  state.results gives it) and the token (hex, 64 to 400 characters). Or send token: null to forget it."; and the
+  usual "The request body must be a JSON object.".
+- The tokens are never in the state (only `activity.start`) nor in the log. They go when the phone is unlinked.
+
+What the bot does with them, looked at every 30 seconds at most (with the timer, never holding it up):
+
+- **Start.** For each phone with a push-to-start token, once the court is within eight hours and that phone has not
+  had it (`state.activitySent[phone id]`, kept on disk, so a restart sends none twice; a court the app said it
+  started counts): a push-to-start to that token, `apns-push-type: liveactivity`, `apns-topic:
+  <APNS_TOPIC>.push-type.liveactivity`, `apns-priority: 10`, `apns-expiration: 0`:
+
+  ```
+  { aps: { timestamp: <now, s>, event: "start",
+           "content-state": { name: "CourtActivity", props: "<the props, as one string of JSON>" },
+           "attributes-type": "LiveActivityAttributes", attributes: { url: "courtbooker:///ticket?id=<the result's id, encoded>" },
+           "stale-date": <the court's end, s>,
+           alert: { title: "Court 3 today", body: "Kelvingrove · 16:00–18:00" } } }
+  ```
+
+  ("… tomorrow" in the title for a court early in the morning, started before midnight.) Apple taking it (`200`)
+  marks that court sent to that phone.
+- **End.** When the court shown changes (another court is shown now, or the one a phone's `activityUpdate` is for is
+  over, or no longer booked), the card that phone said it runs is ended, then forgotten:
+
+  ```
+  { aps: { timestamp: <now, s>, event: "end", "dismissal-date": <now, s>,
+           "content-state": { name: "CourtActivity", props: "<the words it showed>" } } }
+  ```
+
+  (`props` left out when its result is gone.) So a card left on the Lock Screen goes, and the next court's is
+  started by its own push. A card for a court still ahead but more than eight hours off by the bot's clock is left
+  to the app.
+- **When Apple says no.** `410`, or `400 BadDeviceToken`: the token is forgotten (a push-to-start token until the app
+  gives a new one; an activity's, with its card), with a line in the log. `403` (the key, its id or the team id is
+  wrong, or the key was revoked): said once in the log, and nothing more is sent until the bot restarts. Anything
+  else (and no answer within 10 seconds): tried again a minute later, five tries in all for each phone and court,
+  then given up on, with a line in the log.
+
+The bot proves itself to Apple with a token it signs with the key (ES256: `{ alg: "ES256", kid: APNS_KEY_ID }`,
+`{ iss: APNS_TEAM_ID, iat }`), made afresh every 50 minutes, over one HTTP/2 connection it keeps (made again after an
+error, or once Apple closes it). The variables, on Railway:
+
+| Variable | What it is |
+| --- | --- |
+| `APNS_KEY` | The key from Apple's developer site (Keys, with Apple Push Notifications service): the `.p8` file's text, or that text base64-encoded (one line). |
+| `APNS_KEY_ID` | That key's id (ten letters and digits). |
+| `APNS_TEAM_ID` | The team id (ten letters and digits). |
+| `APNS_TOPIC` | The app's bundle id. Default `com.franciscogozalo.courtbooker`. |
+| `APNS_HOST` | Default `api.push.apple.com`, for TestFlight and App Store builds; `api.sandbox.push.apple.com` for a build run from Xcode. |
+
+Without `APNS_KEY`, `APNS_KEY_ID` and `APNS_TEAM_ID` it is off, and the log says so once, at the start: "Live
+Activities by push are off: add APNS_KEY, APNS_KEY_ID and APNS_TEAM_ID on Railway." (`activity.push` false). The
+key, the signed token and every phone's token are never written in the log.
+
+### Known limits of the widgets and the Live Activity
+
+- iOS keeps a Live Activity for eight hours at most (and on the Lock Screen up to four more once it ends), so a
+  court is put there no sooner than eight hours before it starts; it goes stale at its end (`stale-date`).
+- A Live Activity started by a push needs iOS 17.2 or later (the push-to-start token comes from there on), and the
+  app built to receive pushes for it. `apns-expiration: 0`: a phone that is off when the push goes does not get it
+  later; the app puts the card there when next opened.
+- One push-to-start for each court and phone. Dismissed from the Lock Screen, it is not sent again; the app starts it
+  again when opened. A push-to-start that Apple took but iOS did not show (Live Activities off for the app, say) is
+  not known here, nor tried again.
+- The bot ends only a card whose token the app gave it (`kind: "update"`). One started by a push, whose token the
+  app has not passed on yet, goes stale at its court's end, and the app ends it when next opened.
+- An app that starts its own card at the moment a push starts one can show two for a moment; the app keeps one when
+  next opened.
+- Apple keeps a budget of priority-10 pushes for each app's Live Activities; at a push or two for each court, the
+  bot stays far below it.
+- The widgets' 120 reads an hour, and the tries for each court, are counted in memory: a restart of the bot starts
+  them again.
+
 ## Notes and notifications
 
 Whatever the bot tells the owner unprompted in Telegram (a court booked or not, trouble before a
@@ -1889,6 +2039,9 @@ phone's push token: the phone stays linked, and gets notifications again once th
   afterwards, `hold/order` answers "I am no longer following that hold…", and the one-at-a-time
   and six-an-hour counts start again. The PC still lets the court go by itself when its time is up.
   What looks showed the app, a waiting pairing code and the run's stage are lost with a restart too.
+- A widget token (2.14) does not expire either. It stops working when the app asks for a new one, or when its phone
+  is unlinked, however that is done. It reads the state, the gate codes in it included: a widget token that leaks
+  shows what the app shows, and changes nothing.
 - A phone's token does not expire. It stops working when the phone unlinks itself, when
   `/app forget` is sent, or when the bot comes to answer to another chat.
 - Telegram can only unlink every phone at once (`/app forget`). One phone is unlinked from itself
