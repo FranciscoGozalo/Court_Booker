@@ -112,7 +112,7 @@ function cleanResult(raw) {
     if (courts && r.court === courts.join(' & ')) r.courts = courts;
     if (raw.gate) r.gate = String(raw.gate).replace(/[^\w#*-]/g, '').slice(0, 20) || undefined;
   } else if (raw.why) {
-    r.why = String(raw.why).slice(0, 300);
+    r.why = M.pcWords(String(raw.why).slice(0, 1000)).slice(0, 300);      // in plain words (2.12): never your PC's .env, a setting's name or a file
   }
   return r;
 }
@@ -525,7 +525,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     } else {
       const kind = G.KINDS.includes(raw.kind) && raw.kind !== 'pc' ? raw.kind : 'odd';
       const why = String(raw.why || 'no reason given').replace(/\s+/g, ' ').slice(0, 200);
-      const err = G.problem(kind, why);
+      const err = G.problem(kind, M.pcWords(why));                    // in plain words, as you are told it (2.12)
+      if (err.message !== why) log(`Your PC's words about a look at Glasgow Club: ${why}`);
       // Your PC's own "no" to the sheet itself (a PC not yet updated for Scotstoun's outdoor
       // courts says this of them): the look ends with its words, not with the site's.
       if (why === NOT_READ_BY_PC) {
@@ -946,6 +947,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // comes every few seconds; neither is ever said twice.) The same once if the PC says it could
   // not pay: the old card may be standing at "Paying…".
   const noteText = v => String(v ?? '').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '').slice(0, 300);
+  // A reason from your PC as you are told it (2.12, lib/messages.js pcWords): never its .env, a
+  // setting's name or a file. The log keeps its own words (noteText).
+  const pcSaid = v => noteText(M.pcWords(String(v ?? '').slice(0, 1000)));
   const BASKETS = ['empty', 'items', 'unclear', 'untouched', 'gone', 'still'];
   // What a note says of a press: on its way to paying ('paying', 'approve') and with an ending, in its `pressed`.
   const pressOf = (raw, stage) => (PAYING.includes(stage) || HOLD_ENDS.includes(stage) ? pressedSaid(raw.pressed) : null);
@@ -970,11 +974,12 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (strangers.size > 20) strangers.delete(strangers.keys().next().value);
     if (couldNot ? s.failed || s.ended : ending ? s.ended : s.going || s.ended) return;
     if (couldNot) s.failed = true; else if (ending) s.ended = true; else s.going = true;
-    const scr = UI.indoorHoldStray(ctx(), { ...(s.court || {}), stage: 'held', pressed: s.pressed || false, end: ending ? stage : null, why: noteText(raw.why), words: noteText(raw.words),
+    const scr = UI.indoorHoldStray(ctx(), { ...(s.court || {}), stage: 'held', pressed: s.pressed || false, end: ending ? stage : null, why: pcSaid(raw.why), words: noteText(raw.words),
       basket: BASKETS.includes(raw.basket) ? raw.basket : '', removed: null, checked: raw.checked === true, bank: ['approve', 'code'].includes(raw.bank) ? raw.bank : '',
-      payFailed: couldNot ? noteText(raw.payWhy) || 'no reason was given' : '' });
-    log(couldNot ? 'A hold I am not following: your PC says it could not pay for it. Told you so.'
-      : `A hold I am not following ${ending ? `ended (${stage})` : 'is going on'}, and your PC says Pay ${s.pressed === 'maybe' ? 'may have been' : 'was'} pressed for it: told you so.`);
+      payFailed: couldNot ? pcSaid(raw.payWhy) || 'no reason was given' : '' });
+    const pcs = noteText(couldNot ? raw.payWhy : raw.why);
+    log(`${couldNot ? 'A hold I am not following: your PC says it could not pay for it. Told you so.'
+      : `A hold I am not following ${ending ? `ended (${stage})` : 'is going on'}, and your PC says Pay ${s.pressed === 'maybe' ? 'may have been' : 'was'} pressed for it: told you so.`}${pcs ? ` Your PC's words: ${pcs}.` : ''}`);
     // The same words as a note for the app, which has no hold to show them on either.
     const [, ...lines] = scr.caption.split('\n').map(A.plain);
     const where = s.court ? `${G.CENTRES[s.court.key].label} ${M.courtWordsIn(s.court)}` : 'a court your PC was holding';
@@ -1030,7 +1035,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       const own = pressedSoFar(h, stage === 'gone');
       h.pressed = stage === 'gone' ? stronger(own, says || false) : says ?? own;
       h.end = stage;
-      h.why = text(raw.why);
+      h.why = pcSaid(raw.why);
       h.words = text(raw.words);
       h.basket = BASKETS.includes(raw.basket) ? raw.basket : '';
       h.removed = Number.isInteger(raw.removed) && raw.removed >= 0 ? raw.removed : null;
@@ -1042,7 +1047,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         holdQuiet = t + HOLD_QUIET_MS;
         if (indoor.turnedAway) indoor.turnedAway('pc', 'the site was checking its visitors when your PC went to hold a court');
       }
-      log(`Hold ${stage}: ${holdName(h)}${h.why ? ` (${h.why})` : ''}${h.pressed ? `; Pay ${h.pressed === true ? 'was' : h.pressed === 'maybe' ? 'may have been' : 'was ordered and may have been'} pressed` : ''}.`);
+      log(`Hold ${stage}: ${holdName(h)}${h.why ? ` (${text(raw.why)})` : ''}${h.pressed ? `; Pay ${h.pressed === true ? 'was' : h.pressed === 'maybe' ? 'may have been' : 'was ordered and may have been'} pressed` : ''}.`);
       drawHold(h);
       holdEnded(h);
       // The courts your PC found booked, as its note names them (2.11); a note that names none: the hold's.
@@ -1066,8 +1071,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       if (says && !pressedNow(h)) {
         h.pressed = says;
         h.pressedAt = t;
-        h.payDoubt = says === 'maybe' ? text(raw.payWhy).slice(0, 160) : '';
-        log(`Hold: your PC ${says === 'maybe' ? 'may have pressed' : 'pressed'} Pay for ${holdName(h)}${h.payAmount ? ` (${h.payAmount})` : ''}${h.payDoubt ? `: ${h.payDoubt}` : ''}.`);
+        h.payDoubt = says === 'maybe' ? pcSaid(raw.payWhy).slice(0, 160) : '';
+        log(`Hold: your PC ${says === 'maybe' ? 'may have pressed' : 'pressed'} Pay for ${holdName(h)}${h.payAmount ? ` (${h.payAmount})` : ''}${h.payDoubt ? `: ${text(raw.payWhy)}` : ''}.`);
         redraw = true;
       }
       if (HOLD_STAGES.indexOf(stage) > HOLD_STAGES.indexOf(h.stage)) {    // forwards only: paying, then approve
@@ -1109,9 +1114,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       // What the PC says, with each of its notes in the basket, about paying for this court
       // from the app: it can ('ready'), it cannot ('off', and why), or it tried and could not.
       const pay = ['ready', 'off', 'failed'].includes(raw.pay) ? raw.pay : '';
-      const payWhy = pay && pay !== 'ready' ? text(raw.payWhy).slice(0, 200) : '';
+      const payWhy = pay && pay !== 'ready' ? pcSaid(raw.payWhy).slice(0, 200) : '';
       if (pay !== h.pay || payWhy !== h.payWhy) {
-        if (pay !== h.pay) log(`Hold: your PC ${pay === 'ready' ? 'can pay for' : pay ? `cannot pay for` : 'says nothing about paying for'} ${holdName(h)}${payWhy ? ` (${payWhy})` : ''}.`);
+        if (pay !== h.pay) log(`Hold: your PC ${pay === 'ready' ? 'can pay for' : pay ? `cannot pay for` : 'says nothing about paying for'} ${holdName(h)}${payWhy ? ` (${text(raw.payWhy)})` : ''}.`);
         h.pay = pay;
         h.payWhy = payWhy;
         redraw = true;
@@ -1125,7 +1130,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         if (pay === 'failed') {
           h.payState = 'failed';
           h.payFailed = payWhy || 'no reason was given';
-          log(`Hold: your PC could not pay for ${holdName(h)} (${h.payFailed}).`);
+          log(`Hold: your PC could not pay for ${holdName(h)} (${text(raw.payWhy) || h.payFailed}).`);
           redraw = true;
         } else if (h.payState === 'told' && ++h.payAfter >= 2) {
           withdrawPay(h, 'your PC did not get the order to pay');
@@ -1307,9 +1312,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       log(card ? `Your PC kept the card from the app${pcCard ? ` (${pcCard.brand} ending ${pcCard.last4})` : ''}.` : 'Your PC forgot its card.');
       cardWhy = null;
     } else {
-      const why = noteText(A.plain(done.why)).slice(0, 200) || 'no reason was given';
+      const why = pcSaid(A.plain(done.why)).slice(0, 200) || 'no reason was given';
       cardWhy = card ? `Your PC did not keep that card: ${why}.` : `Your PC could not forget its card: ${why}.`;
-      log(cardWhy);
+      log(`${cardWhy}${noteText(A.plain(done.why)) !== why ? ` Your PC's words: ${noteText(A.plain(done.why))}.` : ''}`);
     }
     cardAsk = null;
   }
@@ -1405,9 +1410,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       autoWhy = null;
       log(on ? 'Your PC keeps the code: automatic payments are on.' : 'Your PC deleted the code: automatic payments are off.');
     } else {
-      const why = noteText(A.plain(done.why)).slice(0, 200) || 'no reason was given';
+      const why = pcSaid(A.plain(done.why)).slice(0, 200) || 'no reason was given';
       autoWhy = on ? `Your PC did not turn automatic payments on: ${why}.` : `Your PC could not turn automatic payments off: ${why}.`;
-      log(autoWhy);
+      log(`${autoWhy}${noteText(A.plain(done.why)) !== why ? ` Your PC's words: ${noteText(A.plain(done.why))}.` : ''}`);
     }
     autoAsk = null;
   }
@@ -1544,10 +1549,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // What your PC's last ping said of it (`glasgowBook`): { max, why } (its price cap a court, and why
   // it cannot pay just now), or null when it said nothing (an older booker, or no ping since this
   // start). Whether it said anything at all is kept on disk too (state.pcBooks).
+  // Its `why` is kept in your PC's own words, and logged so when it changes; what you are told of it
+  // is in plain words (lib/glasgowbook.js, said).
   let pcBook = null;
   function pcBookFrom(book) {
     const b = book && typeof book === 'object' && !Array.isArray(book) ? book : null;
     const why = b && typeof b.why === 'string' ? A.cut(noteText(A.plain(b.why)), 200) : '';
+    if (why && why !== (pcBook && pcBook.why)) log(`Your PC says it cannot pay at Glasgow Club just now: ${why}.`);
     pcBook = b ? { max: A.readAmount(b.max), why: why || null } : null;
     if (!!b !== state.pcBooks) {
       state.pcBooks = !!b;
@@ -2017,8 +2025,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       log(`Your PC stayed awake: ${refused}`);
       const chat = owner();
       if (chat !== null) {
-        say(chat, `<b>Your PC stayed awake</b>\nIt did not go to sleep: ${M.esc(refused)}.`).catch(e => log(`Could not say so: ${e.message}`));
-        note('info', 'Your PC stayed awake', `It did not go to sleep: ${refused}.`);
+        const why = M.pcWords(refused).replace(/[.\s]+$/, '');          // in plain words (2.12); the log keeps the PC's
+        say(chat, `<b>Your PC stayed awake</b>\nIt did not go to sleep: ${M.esc(why)}.`).catch(e => log(`Could not say so: ${e.message}`));
+        note('info', 'Your PC stayed awake', `It did not go to sleep: ${why}.`);
       }
     }
     if (wait > 0) tryPcOnce(now());
@@ -2044,9 +2053,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (stage === 'ready' && raw.club === true) { log('Your PC has signed in to Glasgow Club and is waiting for midnight.'); return { ok: true }; }
     let trouble = null;
     if (stage === 'trouble') {
-      const why = String(raw.why || 'no reason given').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '').slice(0, 300);
+      const pcs = String(raw.why || 'no reason given').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '').slice(0, 300);
+      const why = M.pcWords(pcs).replace(/[.\s]+$/, '');              // in plain words, as you are told it (2.12); the log keeps the PC's
       const text = M.troubleText(why, intIn(raw.attempt, 2, 9), intIn(raw.of, 2, 9));
-      trouble = { why, text, about: noteOf(text, 2) };
+      trouble = { why: pcs, text, about: noteOf(text, 2) };
     }
     runNote = { stage, at: now(), why: trouble ? trouble.about.body : null };
     if (chat === null) return { ok: true };
@@ -2121,6 +2131,9 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   async function resultFromAgent(raw, { quiet = false, own = false } = {}) {
     const r = ownResult(raw, own);
     if (!r) return { ok: false, why: 'that result is missing something or does not make sense' };
+    // Your PC's reason as it gave it, where you are told it in plainer words (cleanResult): kept here.
+    const pcs = !own && r.why !== undefined ? String(raw.why).slice(0, 300) : '';
+    if (pcs && pcs !== r.why) log(`Your PC's words for ${r.id}: ${pcs}`);
     const followed = quiet || own ? null : gb.onResult(r);
     if (!followed) return takeResult(r, quiet, own);
     try { return await takeResult(followed, quiet); } catch (e) {

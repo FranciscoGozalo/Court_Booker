@@ -480,6 +480,11 @@ test('when the court has gone your PC takes no other, and says so; a refusal, a 
   assert.equal(await said(['starting', 'signing-in'], { stage: 'quit', why: 'the booking tool was still running after ten minutes, so it was stopped' }),
     'It didn’t work: your PC\'s booking stopped before it booked anything (the booking tool was still running after ten minutes, so it was stopped).');
   assert.equal(await said(['starting', 'signing-in', 'signed-in', 'booking'], { stage: 'quit' }), 'It didn’t work: your PC\'s booking stopped while it was booking court 1: check ClubSpark for it.');
+  // Your PC's reasons in plain words (2.12): never its .env, a setting's name or a file; the line in the app as well.
+  const dry = await outcome(['starting', 'signing-in', 'signed-in'], { stage: 'failed', why: 'DRY_RUN is on in .env on your PC, so it stopped before booking (court 1 was free, Free)' });
+  assert.deepEqual([dry.result.why, dry.book.line], ['It didn’t work: your PC is set to try without booking (dry run), so it stopped before booking (court 1 was free, Free).',
+    'Not booked: your PC is set to try without booking (dry run), so it stopped before booking (court 1 was free, Free).']);
+  assert.equal(await said([], { stage: 'refused', why: 'the booking tool would not start: --book does not go with --look' }), 'It didn’t work: your PC did not start it: the booking tool would not start.');
   // A quit after the tool's own word changes nothing.
   const t = makeBot();
   const phone = await linkPhone(t);

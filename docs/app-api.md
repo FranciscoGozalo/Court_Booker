@@ -476,6 +476,23 @@ app older than 2.11 shows as it is), `price` the total paid for both (`"£46.00"
 court that names it in a list keeps that too (`courts: [3]`, `court: "3"`); one that does not, or a
 park's, has `courts: null`. A result that is not booked has none: its `why` says what happened ("It
 didn’t work: Only 1 of 2 courts was free, so none was taken. Nothing was paid.", in your PC's words).
+
+**Your PC's reasons, in plain words (2.12).** Your PC's booker gives its reasons as they read on the
+PC: a line of its `.env`, a setting's name, a file under `logs\` or `vault\`, an option of one of its
+tools ("DRY_RUN is on in .env on your PC, so it took no court"). Wherever this bot passes one on to
+you (Telegram, a note and its notification, `results[].why`, `glasgow.bookNo`, `glasgow.book.why` and
+`line`, a park's Book now, a hold's `lines` and Pay refusals, the card's and automatic payments'
+`why`, `run.why`, a look's refusal, "Your PC stayed awake") it says it in plain words instead, and never names `.env`, a setting or a file: "your
+PC is set to try without booking (dry run), so it took no court"; "your PC is set to make no
+payments" (`GLASGOW_PAY_PER_DAY` 0); "that would be more than 2 payments from this PC today"; "your PC
+could not check how many payments it has made today" (its note of payments unreadable: its advice to
+put that file right is for the PC alone); "your PC could not read its own settings"; "your PC has no
+Glasgow Club login to sign in with"; "(the Glasgow Club login on your PC may be out of date)"; "its
+card store would not load"; and so on (`lib/messages.js`, `pcWords`). Anything else of that kind is
+left out: a part in brackets that names it, or the rest of a sentence from the part where it begins
+("the booking tool would not start: --book-now …" is "the booking tool would not start"); a reason
+with nothing left is "something on your PC needs looking at there". The bot's own log keeps your PC's
+exact words, and so does your PC's log. A result kept by an older bot is said in plain words too.
 Its card in Telegram reads "Booked · Courts 3 & 4", and its note "Courts 3 & 4 booked".
 A Glasgow Club court held and then booked (2.10.3: paid from the app, by the PC with its card, or
 in Chrome on the PC and then "I have paid") is a result too, as the midnight run's would be for the
@@ -837,7 +854,7 @@ without "It didn’t work: "):
 
 - "It didn’t work: court 1 was no longer free for that time (not free at 18:00 any more), and your PC takes no other court." (or "(free at 18:00, but only until 19:00)")
 - "It didn’t work: your PC did not start it: <its reason>." (its own limits, or a hold under way)
-- "It didn’t work: <your PC's reason>." Among them: "ClubSpark asked for payment; nothing was booked or paid"; "after "Confirm", ClubSpark went on to a payment page, where your PC paid nothing: check ClubSpark for it"; "DRY_RUN is on in .env on your PC, so it stopped before booking (court 3 was free, Free)"; "ClubSpark showed a "Just a moment" page, so your PC stopped there" (or "ClubSpark's booking sheet never showed, …", "ClubSpark refused a request (HTTP 403), …"); "Chrome could not start (…)"; a sign-in that did not go through; "queenspark has no court 9"; "it could not reach the bot just before booking (…), so it booked nothing"; "this PC went to sleep while booking, so it stopped". Once this bot has given the go-ahead, anything that went wrong (but a court gone, or a stop at a payment step) ends "… It was booking when that happened: check ClubSpark for it", whether your PC's words say so or not.
+- "It didn’t work: <your PC's reason>." Among them: "ClubSpark asked for payment; nothing was booked or paid"; "after "Confirm", ClubSpark went on to a payment page, where your PC paid nothing: check ClubSpark for it"; "your PC is set to try without booking (dry run), so it stopped before booking (court 3 was free, Free)" (2.12: in plain words, see "Your PC's reasons" under `results`); "ClubSpark showed a "Just a moment" page, so your PC stopped there" (or "ClubSpark's booking sheet never showed, …", "ClubSpark refused a request (HTTP 403), …"); "Chrome could not start (…)"; a sign-in that did not go through; "queenspark has no court 9"; "it could not reach the bot just before booking (…), so it booked nothing"; "this PC went to sleep while booking, so it stopped". Once this bot has given the go-ahead, anything that went wrong (but a court gone, or a stop at a payment step) ends "… It was booking when that happened: check ClubSpark for it", whether your PC's words say so or not.
 - "It didn’t work: your PC's booking stopped before it booked anything (<why>)." or "… stopped while it was booking court 3: check ClubSpark for it."
 - "It didn’t work: ClubSpark had turned your PC away, so it was not handed to your PC and nothing was booked." (or "your PC's nightly booking run was near, so …")
 - "It didn’t work: your PC did not collect it in time, so nothing was booked."
@@ -1243,13 +1260,13 @@ not reach it: nothing was pressed, and Pay may be asked for again. The checks co
 - 409 "Your PC is forgetting its card."
 - 409 "Your new card has not reached your PC yet. Try again in a moment."
 - 409 "There is no card on your PC. Add one in the app first."
-- 409 "Your PC cannot pay for this court: <the PC's reason>." The PC's reasons: "no card is kept on
-  this PC", "the card kept on this PC has expired", "this PC has no card key yet (the PC link makes
-  it when it starts)", "the payment page does not have the three card boxes I know", "that would be
-  more than 2 payments from this PC today (GLASGOW_PAY_PER_DAY)", "GLASGOW_PAY_PER_DAY in .env is 0,
-  so no payment is made from this PC", "BOT_URL in the .env file on your PC is not an https address,
-  and an order to pay is only taken from a bot reached over https", and the PC's own note of
-  payments made being unreadable.
+- 409 "Your PC cannot pay for this court: <the PC's reason>." The PC's reasons (in plain words since
+  2.12, see "Your PC's reasons" under `results`): "no card is kept on this PC", "the card kept on
+  this PC has expired", "this PC has no card key yet (the PC link makes it when it starts)", "the
+  payment page does not have the three card boxes I know", "that would be more than 2 payments from
+  this PC today", "your PC is set to make no payments", "your PC does not reach me at a secure
+  (https) address, and an order to pay is only taken from a bot reached over https", and "your PC
+  could not check how many payments it has made today".
 - 409 "Your PC has not said that it can pay for this court." (its booker is older than 2.9)
 - 409 "Your PC didn’t say both courts are in your basket, so it isn’t asked to pay." (2.11: a hold of two courts whose note from the basket did not name both; a PC whose booker is older than 2.11 holds the first alone, at that court's price)
 - 409 "Your PC could not read the price, so it cannot pay for this court."
@@ -1590,10 +1607,12 @@ the state, with `glasgow.book` at stage `"asked"`; from then on it moves in the 
   8. "Glasgow Club was checking visitors from your home connection. Not available until 13:00."
   9. "That’s 6 sign-ins to Glasgow Club in an hour. Next at 13:00." (holds and Book now together)
   10. "Update the booker on your PC." (its pings do not say `glasgowBook`; the app holds instead)
-  11. "Your PC can’t pay just now: <its reason>." (from its ping, read fresh from its `.env` each
-      time: "GLASGOW_PAY_PER_DAY in .env is 0", its daily limit used up, a cap that does not read,
-      no card kept, the card expired, DRY_RUN on), or "Your PC hasn’t said yet whether it can pay.
-      Try again in a minute." (no ping has said its cap since the bot started)
+  11. "Your PC can’t pay just now: <its reason>." (from its ping, which reads its `.env` afresh each
+      time; in plain words since 2.12, starting "it" for your PC: "Your PC can’t pay just now: it is
+      set to try without booking (dry run).", "…: it is set to make no payments.", "…: that would be
+      more than 2 payments from this PC today.", a cap that does not read, "…: this PC keeps no
+      card.", "…: the card kept on this PC has expired."), or "Your PC hasn’t said yet whether it can
+      pay. Try again in a minute." (no ping has said its cap since the bot started)
   12. "There is no card on your PC. Add one in the app first."
   13. "Turn on Pay Automatically first." (also while an off is on its way to your PC)
   14. "Your new card has not reached your PC yet. Try again in a moment." / "Pay Automatically has
@@ -1661,10 +1680,10 @@ your banking app and under Bookings on Glasgow Club's site.").
 
 | Ending | `paid` | `why` |
 | --- | --- | --- |
-| `notsent` | false | "<why>, so it was not handed to your PC" ("Glasgow Club was checking visitors from your home connection", "your PC's nightly booking run was near", "your PC was holding a court at Glasgow Club", "your PC was booking a park court", "your PC no longer said it books Glasgow Club", "your PC could not pay just then (<its reason>)") |
+| `notsent` | false | "<why>, so it was not handed to your PC" ("Glasgow Club was checking visitors from your home connection", "your PC's nightly booking run was near", "your PC was holding a court at Glasgow Club", "your PC was booking a park court", "your PC no longer said it books Glasgow Club", "your PC could not pay just then (<its reason>)", or "…: <its reason>" when its reason has brackets of its own; its reason in plain words since 2.12) |
 | `nopickup` (25 s) | false | "your PC did not collect it in time" |
 | `nostart` (90 s, no word at all) | false | "your PC collected it but did not start on it" |
-| `refused` | false | "your PC did not start it: <its reason>" |
+| `refused` | false | "your PC did not start it: <its reason>" (in plain words since 2.12) |
 | `silent` (4 min), before the go-ahead | false | "no word from your PC for four minutes, so I stopped following it. It pays nothing without my go-ahead" |
 | `timeout` (30 min), before the go-ahead | false | "your PC was still at it half an hour after it took the booking, so I stopped following it. It pays nothing without my go-ahead" |
 | `gone` / `quit`, before the go-ahead | false | "your PC's booking stopped before paying (<why>)" |

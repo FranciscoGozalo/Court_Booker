@@ -216,7 +216,7 @@ test('what stands in the way, in order: each sentence as the one before it is cl
     ['Glasgow Club was checking visitors from your home connection. Not available until 12:30.', () => { env.quiet = 0; }],
     ['That’s 6 sign-ins to Glasgow Club in an hour. Next at 12:10.', () => { env.starts = []; }],
     ['Update the booker on your PC.', () => { env.books = true; }],
-    ['Your PC can’t pay just now: GLASGOW_PAY_PER_DAY in .env is 0.', () => { env.why = null; }],
+    ['Your PC can’t pay just now: it is set to make no payments.', () => { env.why = null; }],                 // in plain words (2.12)
     ['Your PC hasn’t said yet whether it can pay. Try again in a minute.', () => { env.max = '£30.00'; }],
     ['There is no card on your PC. Add one in the app first.', () => { env.asking = 'card'; }],
     ['Your new card has not reached your PC yet. Try again in a moment.', () => { env.kept = true; env.asking = null; }],
@@ -296,7 +296,7 @@ test('what stands in the way, from the bot as it runs: the PC asleep, a hold, a 
   await pcPing(v, { book: null });
   assert.deepEqual([stateOf(v, phoneV).glasgow.pcBooks, bookNo(v, phoneV)], [false, 'Update the booker on your PC.']);
   await pcPing(v, { book: { max: '£30.00', why: 'GLASGOW_PAY_PER_DAY in .env is 0.' } });
-  assert.deepEqual([stateOf(v, phoneV).glasgow.pcBooks, stateOf(v, phoneV).glasgow.payMax, bookNo(v, phoneV)], [true, '£30.00', 'Your PC can’t pay just now: GLASGOW_PAY_PER_DAY in .env is 0.']);
+  assert.deepEqual([stateOf(v, phoneV).glasgow.pcBooks, stateOf(v, phoneV).glasgow.payMax, bookNo(v, phoneV)], [true, '£30.00', 'Your PC can’t pay just now: it is set to make no payments.']);
   await pcPing(v, { book: { max: '30 pounds' } });
   assert.deepEqual([stateOf(v, phoneV).glasgow.payMax, bookNo(v, phoneV)], [null, 'Your PC hasn’t said yet whether it can pay. Try again in a minute.']);
   // The card, and Pay Automatically, as your PC says it keeps them, and what is on its way to it.
@@ -473,7 +473,7 @@ test('a booking waiting for your PC\'s ping is looked at again before it is hand
   await seeFree(u, phoneU);
   await ask(u, phoneU, 'glasgow/book', BODY);
   assert.deepEqual(await pcPing(u, { book: { max: '£30.00', why: 'GLASGOW_PAY_PER_DAY in .env is 0.' } }), { ok: true });
-  assert.equal(stateOf(u, phoneU).glasgow.book.why, 'your PC could not pay just then (GLASGOW_PAY_PER_DAY in .env is 0), so it was not handed to your PC. Nothing was paid');
+  assert.equal(stateOf(u, phoneU).glasgow.book.why, 'your PC could not pay just then (it is set to make no payments), so it was not handed to your PC. Nothing was paid');
   const n = makeBot(`${TUE}T21:24:50Z`);
   const phoneN = await linkPhone(n);
   await pcPing(n);
@@ -1073,6 +1073,89 @@ test('a booking this bot is not following any more (ended, or never had) is told
     assert.deepEqual(pcSays(b, { id: 'ffffffffffff', stage, beat: true }), { ok: true, stop: true, unknown: true }, stage);
   }
   for (const stage of ['refused', 'gone', 'quit']) assert.deepEqual(pcSays(b, { id: 'ffffffffffff', stage }), { ok: true, unknown: true }, stage);
+});
+
+// ---------- your PC's words ----------
+
+test('your PC\'s reasons reach you in plain words, never its .env, a setting\'s name or a file (2.12): the app\'s refusal, a booking not handed over, a step, its result, Telegram and the notes; the log keeps its exact words', async () => {
+  const M = require('../lib/messages');
+  // Each reason your PC's booker (2.12) gives in its own terms, and how you are told it.
+  const cases = [
+    ['DRY_RUN is on in .env on your PC', 'your PC is set to try without booking (dry run)'],
+    ['DRY_RUN is on in .env on your PC, so it took no court', 'your PC is set to try without booking (dry run), so it took no court'],
+    ['GLASGOW_PAY_PER_DAY in .env is 0, so no payment is made from this PC', 'your PC is set to make no payments'],
+    ['GLASGOW_PAY_PER_DAY in .env should be a whole number of payments a day (2 if left empty)', 'the number of payments a day your PC is set to make is not a whole number'],
+    ['GLASGOW_AUTO_PAY_MAX in .env should be an amount in pounds, like 30', 'the most your PC is set to pay for a court is not an amount in pounds'],
+    ['that would be more than 2 payments from this PC today (GLASGOW_PAY_PER_DAY)', 'that would be more than 2 payments from this PC today'],
+    ['the note of payments made from this PC (logs/glasgow-pay.json) does not read as I wrote it, so today\'s limit cannot be checked. Put the file right, or delete it if you know what was paid today',
+      'your PC could not check how many payments it has made today'],
+    ['the note of payments made from this PC (logs/glasgow-pay.json) could not be read (EBUSY), so today\'s limit cannot be checked', 'your PC could not check how many payments it has made today'],
+    ['the note of payments made from this PC (logs/glasgow-pay.json) cannot be written (EPERM), and without it the daily limit cannot be kept', 'your PC could not keep count of its payments today'],
+    ['the .env file on your PC could not be read', 'your PC could not read its own settings'],
+    ['its card store would not load (ENOENT: no such file or directory, open \'C:\\court\\vault\\key.json\')', 'its card store would not load'],
+    ['GLASGOW_CLUB_USERNAME and GLASGOW_CLUB_PASSWORD are not both set in the .env file on your PC, so there is nothing to sign in with', 'your PC has no Glasgow Club login to sign in with'],
+    ['the sign-in to Glasgow Club did not go through (the login in the .env file on your PC may be out of date)', 'the sign-in to Glasgow Club did not go through (the Glasgow Club login on your PC may be out of date)'],
+    ['the note of holds already paid for on this PC (vault\\used.json) could not be read', 'your PC could not check which slots it has paid for already'],
+    ['its price was £31.00, more than the £30 automatic payments are for (GLASGOW_AUTO_PAY_MAX). The court was taken out of your basket again', 'its price was £31.00, more than the £30 automatic payments are for. The court was taken out of your basket again'],
+    // Anything else of the kind is left out: a part in brackets, or a sentence from where it begins.
+    ['the booking tool would not start: --book-now does not go with --for-bot', 'the booking tool would not start'],
+    ['it stopped: EACCES C:\\court\\logs\\hold.log. Look under Bookings on Glasgow Club\'s site and in your banking app', 'it stopped. Look under Bookings on Glasgow Club\'s site and in your banking app'],
+    ['SOME_SETTING', M.PC_UNSAID],
+    // Plain already: as it was.
+    ['Court 3 was no longer free at 18:00, and your PC takes no other court', 'Court 3 was no longer free at 18:00, and your PC takes no other court'],
+    ['this PC keeps no card', 'this PC keeps no card'],
+  ];
+  const inside = /\.env|[A-Z]+_[A-Z_]+|\.json|\.log|--[a-z]|C:\\/;
+  for (const [pc, plain] of cases) {
+    assert.equal(M.pcWords(pc), plain, pc);
+    assert.ok(!inside.test(M.pcWords(pc)), pc);
+    assert.equal(M.pcWords(M.pcWords(pc)), M.pcWords(pc), pc);                                      // said once, said the same again
+  }
+  // The app's refusal before Face ID; and a booking not handed over, when the ping that would collect it says so.
+  const t = makeBot();
+  const phone = await linkPhone(t);
+  await pcPing(t, { book: { max: '£30.00', why: 'DRY_RUN is on in .env on your PC' } });
+  assert.equal(stateOf(t, phone).glasgow.bookNo, 'Your PC can’t pay just now: it is set to try without booking (dry run).');
+  await pcPing(t);
+  await seeFree(t, phone);
+  assert.equal((await ask(t, phone, 'glasgow/book', BODY)).status, 200);
+  await pcPing(t, { book: { max: '£30.00', why: 'DRY_RUN is on in .env on your PC' } });
+  await settle();
+  let s = stateOf(t, phone);
+  assert.equal(s.results[0].why, 'It didn’t work: your PC could not pay just then: it is set to try without booking (dry run), so it was not handed to your PC. Nothing was paid.');
+  // A step's reason (its link would not start it).
+  const u = makeBot();
+  const phoneU = await linkPhone(u);
+  const cu = await collected(u, phoneU);
+  pcSays(u, { id: cu.id, stage: 'refused', why: 'it could not open its log (EACCES: permission denied, open \'C:\\court\\logs\\hold.log\')' });
+  await settle();
+  assert.equal(stateOf(u, phoneU).results[0].why, 'It didn’t work: your PC did not start it: it could not open its log. Nothing was paid.');
+  assert.match(u.logs.join('\n'), /Your PC's words: it could not open its log \(EACCES: permission denied, open 'C:\\court\\logs\\hold\.log'\)/);
+  // Its result: Courts, the card in Telegram, the note and the booking's line, all in plain words.
+  const v = makeBot();
+  const phoneV = await linkPhone(v);
+  await started(v, phoneV);
+  v.tg.clear();
+  await v.app.resultFromAgent(notPaidOf('DRY_RUN is on in .env on your PC, so it took no court'));
+  await settle();
+  s = stateOf(v, phoneV);
+  const plain = 'It didn’t work: your PC is set to try without booking (dry run), so it took no court. Nothing was paid.';
+  assert.deepEqual([s.results[0].why, s.notes[0].body, s.glasgow.book.line], [plain, `Gorbals · Fri 20 Nov · 18:00–19:00. ${plain}`, `Not booked: ${plain.slice('It didn’t work: '.length)}`]);
+  assert.equal(v.tg.calls[0].text.split('\n')[1], plain);
+  assert.ok(![JSON.stringify([s.results, s.notes, s.glasgow]), JSON.stringify(v.tg.calls), JSON.stringify(v.pushes)].some(x => inside.test(x)));
+  assert.match(v.logs.join('\n'), /Your PC's words for gorbals\/2026-11-20@18:00: DRY_RUN is on in \.env on your PC, so it took no court/);
+  // ...and the ping's reason, as it came, once when it changed.
+  assert.equal(t.logs.filter(l => l === 'Your PC says it cannot pay at Glasgow Club just now: DRY_RUN is on in .env on your PC.').length, 2);
+  // A result kept by an older bot, in your PC's own words, is said in plain words all the same.
+  const w = makeBot(NOON, { state: { results: { [RID]: { id: RID, venue: 'gorbals', status: 'failed', date: FRI, start: 1080, end: 1140, type: 'indoor', paid: false,
+    why: 'GLASGOW_CLUB_USERNAME and GLASGOW_CLUB_PASSWORD are not both set in the .env file on your PC, so there is nothing to sign in with', at: at(NOON) - MIN } } } });
+  const phoneW = await linkPhone(w);
+  assert.equal(stateOf(w, phoneW).results[0].why, 'It didn’t work: your PC has no Glasgow Club login to sign in with. Nothing was paid.');
+  // The midnight run's trouble before a booking, in Telegram and as a note.
+  w.tg.clear();
+  await w.app.progressFromAgent({ stage: 'trouble', why: 'the sign-in to Glasgow Club did not go through (the login in the .env file on your PC may be out of date)', attempt: 2, of: 3 });
+  assert.equal(w.tg.last().text.split('\n')[1], 'the sign-in to Glasgow Club did not go through (the Glasgow Club login on your PC may be out of date).');
+  assert.match(w.logs.join('\n'), /trouble before the booking: the sign-in to Glasgow Club did not go through \(the login in the \.env file on your PC may be out of date\)/);
 });
 
 // ---------- kept across a restart of the bot ----------
