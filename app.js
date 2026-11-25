@@ -8,13 +8,14 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { iso, label, hhmm, todayCivil, addDays, londonInstant, civil, DAY_KEYS, DAY_LONG } = require('./lib/time');
-const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, slotText, slotEnd } = require('./lib/plan');
-const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf, upcoming, releaseAround, MISSING_MS, SEEN_FRESH_MS } = require('./lib/schedule');
+const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, parseRemind, cleanPlan, cleanOrder, cleanOnce, cleanFallback, slotText, slotEnd } = require('./lib/plan');
+const { jobsFor, missingFor, msToNextCheck, opensAt, civilOf, upcoming, releaseAround, requestsOn, alternativesFor, MISSING_MS, SEEN_FRESH_MS, LATE_MS } = require('./lib/schedule');
 const M = require('./lib/messages');
 const UI = require('./lib/ui');
 const { readMac, publicIPv4, sendWake } = require('./lib/wake');
+const { feed } = require('./lib/calendar');
 
-const VERSION = '2.4';
+const VERSION = '2.5';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -27,6 +28,8 @@ const PREFLIGHT_MS = 20 * 60 * 1000;       // this long before a release, make s
 const PREFLIGHT_WAIT_MS = 3 * 60 * 1000;   // how long the PC gets to answer that wake-up before you are told
 const NO_WORD_MS = 8 * 60 * 1000;          // a run that started should have reported by this long after the release
 const NO_WORD_FOR_MS = 60 * 60 * 1000;     // ...and after this the bot stops watching for it
+const REMIND_DEFAULT = 120;                // minutes before you play that the reminder comes (/remind)
+const BOOK_ASK_MS = 5 * 60 * 1000;         // a Book now no ping has collected within this long is dropped
 const GONE = ['test', 'free', 'signin', 'style', 'lead', 'warn', 'go', 'code'];   // link-alert commands from version 1
 
 // The banner pictures (made by art/make-banners.cjs): the menu card in three versions, one for
@@ -59,15 +62,22 @@ function cleanResult(raw) {
   const id = String(raw.id || '');
   const m = /^(\d{4}-\d{2}-\d{2})@(\d{2}):(\d{2})$/.exec(id);
   if (!m || !['booked', 'none', 'failed'].includes(raw.status)) return null;
-  const start = Number(m[2]) * 60 + Number(m[3]);
+  const asked = Number(m[2]) * 60 + Number(m[3]);
+  // A booking may be a fallback, at another start or length than asked for (the id always
+  // names what was asked). Then the PC says when it really is, and what was asked is kept too.
+  const start = raw.status === 'booked' ? intIn(raw.start, 0, 1439) ?? asked : asked;
   const end = intIn(raw.end, start + 30, 1440) ?? slotEnd(start, 1);
   const r = { id, status: raw.status, date: m[1], start, end };
   if (raw.status === 'booked') {
     r.court = String(raw.court ?? '').replace(/[^\w ]/g, '').slice(0, 20);
     if (!r.court) return null;
     if (raw.gate) r.gate = String(raw.gate).replace(/[^\w#*-]/g, '').slice(0, 20) || undefined;
-  } else if (raw.why) {
-    r.why = String(raw.why).slice(0, 300);
+    const askedEnd = intIn(raw.askedEnd, asked + 30, 1440);
+    if (askedEnd !== null && (start !== asked || end !== askedEnd)) { r.askedStart = asked; r.askedEnd = askedEnd; }
+  } else {
+    if (raw.why) r.why = String(raw.why).slice(0, 300);
+    const tried = raw.status === 'none' ? intIn(raw.tried, 2, 9) : null;      // how many slots it looked for, with fallbacks
+    if (tried !== null) r.tried = tried;
   }
   return r;
 }
@@ -78,6 +88,7 @@ function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, once: [], order: [1, 2, 3, 4, 5, 6], paused: false,
     results: {}, sent: {}, pics: {}, lastSeen: null, lastRun: null, home: null,
+    remind: REMIND_DEFAULT, fallback: cleanFallback(null), cal: null,
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -85,6 +96,9 @@ function loadState(raw, env = {}) {
     state.once = cleanOnce(raw.once);
     state.order = cleanOrder(raw.order);
     state.paused = raw.paused === true;
+    state.remind = intIn(raw.remind, 0, 1440) ?? REMIND_DEFAULT;                  // minutes before you play; 0 is off
+    state.fallback = cleanFallback(raw.fallback);                                 // what to book when the slot is taken
+    if (typeof raw.cal === 'string' && /^[0-9a-f]{32}$/.test(raw.cal)) state.cal = raw.cal;   // the calendar feed's secret
     if (raw.v === STATE_VERSION) {
       if (raw.sent && typeof raw.sent === 'object') {
         for (const k of Object.keys(raw.sent)) if (typeof raw.sent[k] === 'number') state.sent[k] = raw.sent[k];
@@ -113,7 +127,10 @@ function loadState(raw, env = {}) {
 
 // The settings as one line, for the COURT_SETTINGS variable, and back again.
 function backupLine(state) {
-  return JSON.stringify({ v: STATE_VERSION, owner: state.owner, plan: cleanPlan(state.plan), once: cleanOnce(state.once), order: state.order });
+  return JSON.stringify({
+    v: STATE_VERSION, owner: state.owner, plan: cleanPlan(state.plan), once: cleanOnce(state.once), order: state.order,
+    remind: state.remind, fallback: cleanFallback(state.fallback), ...(state.cal ? { cal: state.cal } : {}),
+  });
 }
 function readBackup(text) {
   try {
@@ -246,8 +263,54 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     log('Asked your PC to sleep.');
     return { toast: 'Sleep sent', screen: UI.home(ctx()), view: 'h' };
   }
-  // What the PC should do now, collected by its ping: { sleep: true } once, or nothing.
+  // ---------- booking now ----------
+  // Book now (the button, /booknow): your PC books what is already open straight away, instead
+  // of at its nightly run. The request waits for the PC's next ping, like Sleep; a PC that is
+  // asleep is woken first, and the request waits for it a few minutes.
+  let bookAsk = null;                                 // when you asked (not yet collected)
+  let bookWatch = null;                               // { at, ids }: collected, until those results are in
+  // What you asked for that is open already and not booked yet.
+  const openNow = (t = now()) => (state.paused || owner() === null ? [] : jobsFor(t, cfg(), state.results).filter(j => j.releaseAt <= t));
+  async function requestBookNow() {
+    const t = now();
+    const back = toast => ({ toast, screen: UI.home(ctx()), view: 'h' });
+    if (!linked) return { toast: 'Your PC is not linked to me.' };
+    if (state.paused) return back('Booking is paused. Resume it first.');
+    if (!openNow(t).length) return back('Nothing is open to book right now.');
+    // Around a release the nightly run is doing exactly this, or about to.
+    if (releaseAround(t, cfg(), SLEEP_GUARD_MS, LATE_MS)) return back(`Your PC's ${hhmm(releaseMin)} run books this too. No need.`);
+    if (bookAsk !== null && t - bookAsk < 30000) return back('Sent a moment ago.');
+    if (pcState(t) !== 'awake') {
+      if (wakeState() !== 'ready') return back('Your PC is not awake. It books this at its next run.');
+      try {
+        await wake({ host: state.home.ip, port: wakePort, mac: wakeMac });
+      } catch (err) {
+        log(`Book now: the wake-up was not sent: ${err.message}`);
+        return { toast: 'Your PC is asleep and the wake-up could not be sent. Try again.' };
+      }
+      bookAsk = wokeAt = t;
+      log('Book now: your PC was not awake, so I sent it a wake-up first.');
+      return back('Waking your PC to book');
+    }
+    bookAsk = t;
+    for (const w of waiters) w.wake();
+    log('Asked your PC to book now.');
+    return back('Book now sent');
+  }
+
+  // What the PC should do now, collected by its ping: { book: true } or { sleep: true }, once,
+  // or nothing.
   function takeOrder(t) {
+    if (bookAsk !== null) {
+      const open = t - bookAsk <= BOOK_ASK_MS ? openNow(t) : [];
+      bookAsk = null;
+      if (open.length) {
+        sleepAsk = null;                              // it cannot do both: the booking wins
+        bookWatch = { at: t, ids: open.map(j => j.id) };
+        log('Your PC collected the request to book now.');
+        return { book: true };
+      }
+    }
     if (sleepAsk === null) return {};
     const fresh = t - sleepAsk <= SLEEP_ASK_MS && !sleepBlocker(t);
     sleepAsk = null;
@@ -271,12 +334,26 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     ? { url: `https://${publicHost}/card/${kind}?v=${pictures[kind].hash}`, prefer_large_media: true, show_above_text: true }
     : { is_disabled: true });
 
+  // ---------- the calendar feed (lib/calendar.js) ----------
+  // The feed's address holds a secret, made the first time you open Calendar and kept with the
+  // settings. Whoever has the address can read the feed, and nobody else.
+  const calUrl = () => (publicHost && state.cal ? `https://${publicHost}/cal/${state.cal}` : null);
+  function newCalendarLink() { state.cal = crypto.randomBytes(16).toString('hex'); save(); }
+  function calendarFeed(token) {
+    const have = state.cal, given = String(token || '');
+    if (!have || given.length !== have.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(have))) return null;
+    return feed(state.results, { now: now(), venue: (env.VENUE_NAME || '').trim() || undefined });
+  }
+
   // ---------- the tap-through screens ----------
-  const ctx = () => ({ cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked, pc: pcState(), wake: wakeState(), wokeAt, sleepAsk });
+  const ctx = () => ({
+    cfg: cfg(), now: now(), paused: state.paused, results: state.results, lastSeen: state.lastSeen, linked, pc: pcState(), wake: wakeState(), wokeAt, sleepAsk,
+    openNow: openNow(), bookAsk, remind: state.remind, fallback: state.fallback, calUrl: calUrl(),
+  });
   const statusInfo = () => ({
     version: VERSION, skewMs: tg.skewMs ? tg.skewMs() : null, kept: kept(), paused: state.paused,
     linked, lastSeen: state.lastSeen, lastSeenDay: state.lastSeen ? todayCivil(state.lastSeen) : null, pc: pcState(),
-    wake: wakeState(), wokeAt,
+    wake: wakeState(), wokeAt, remind: state.remind, fallback: state.fallback,
   });
   // The menu cards sent since this start, so a tap, or a change in your PC's state, can redraw
   // them: { kind (banner), wide, caption, keyboard, view ('h' home, 's' status, or null) }.
@@ -400,6 +477,28 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (data === 's') return { screen: UI.status(c, statusInfo()), view: 's' };
     if (data === 'sl') return { screen: UI.sleepConfirm(c) };
     if (data === 'sl:ok') return requestSleep();
+    if (data === 'opt') return { screen: UI.options(c) };
+    if (data === 'rm') return { screen: UI.reminder(c) };
+    if ((m = /^rm:(\d{1,4})$/.exec(data)) && UI.REMIND_CHOICES.includes(+m[1])) {
+      state.remind = +m[1]; save();
+      return { screen: UI.reminder(ctx()), toast: `Reminder: ${M.remindWords(state.remind)}` };
+    }
+    if (data === 'fb') return { screen: UI.fallback(c) };
+    if (data === 'fb:s' || data === 'fb:l') {
+      const key = data === 'fb:s' ? 'shorter' : 'later';
+      state.fallback = { ...state.fallback, [key]: !state.fallback[key] }; save();
+      return { screen: UI.fallback(ctx()), toast: `If your slot is taken: ${M.fallbackWords(state.fallback)}` };
+    }
+    if (data === 'c') {
+      if (!state.cal) newCalendarLink();
+      return { screen: UI.calendarLink(ctx()) };
+    }
+    if (data === 'c:new') return { screen: UI.calendarNew() };
+    if (data === 'c:new:ok') {
+      newCalendarLink();
+      log('A new calendar link was made; the old one no longer works.');
+      return { screen: UI.calendarLink(ctx()), toast: 'New link made. The old one no longer works.' };
+    }
     return { toast: 'That button is out of date. Send /menu.' };
   }
 
@@ -412,7 +511,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     const fresh = data.startsWith('n:');                                   // on a booking message: keep it, open a new card
     if (fresh) data = data.slice(2);
     let result;
-    try { result = data === 'wk' ? await wakePc() : route(data); } catch (e) { log(`Button failed: ${e.message}`); result = { toast: 'That did not work. Send /menu to start again.' }; }
+    try { result = data === 'wk' ? await wakePc() : data === 'bn' ? await requestBookNow() : route(data); } catch (e) { log(`Button failed: ${e.message}`); result = { toast: 'That did not work. Send /menu to start again.' }; }
     await answer(result.toast);
     const wide = typeof q.message.text === 'string';                      // the wide trial card is a text message
     if (result.screen) await show(chat, result.screen, fresh ? null : q.message.message_id, { view: result.view || null, wide: wide && !fresh });
@@ -448,8 +547,14 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       }
     }
     save();
+    // With fallbacks switched on, each job also says what may be booked instead when its slot
+    // is taken, nearest first (never a time you have asked for separately that day).
+    const alternatives = j => {
+      const mine = requestsOn(civilOf(j.date), c).filter(r => r.id !== j.id).map(r => r.start);
+      return alternativesFor(j, state.fallback, UI.LAST_END).filter(a => !mine.includes(a.start));
+    };
     return {
-      jobs: jobs.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end, hours: j.hours, releaseAt: j.releaseAt })),
+      jobs: jobs.map(j => ({ id: j.id, date: j.date, start: j.start, end: j.end, hours: j.hours, releaseAt: j.releaseAt, alternatives: alternatives(j) })),
       order: c.order, releaseMin, daysAhead,
     };
   }
@@ -458,18 +563,28 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // signed in to Windows. That is all the dot on the menu banner goes on.
   // With `wait` (seconds) the answer waits until there is something for the PC to do, so a
   // Sleep tap reaches it within seconds instead of at its next ping.
-  async function pingFromAgent(from = {}, { wait = 0, refused = null } = {}) {
+  // `refused` says the PC did not do what it was asked, and why; `about` says which thing
+  // ("book" for Book now, otherwise going to sleep).
+  async function pingFromAgent(from = {}, { wait = 0, refused = null, about = null } = {}) {
     state.lastSeen = now();
     noteHome(from);
     save();
-    if (refused) {                                    // asked to sleep, it would not: say why
-      sleptAt = null;
-      log(`Your PC stayed awake: ${refused}`);
+    if (refused) {
       const chat = owner();
-      if (chat !== null) say(chat, `<b>Your PC stayed awake</b>\nIt did not go to sleep: ${M.esc(refused)}.`).catch(e => log(`Could not say so: ${e.message}`));
+      const tell = text => { if (chat !== null) say(chat, text).catch(e => log(`Could not say so: ${e.message}`)); };
+      if (about === 'book') {                         // asked to book now, it could not start: say why
+        bookWatch = null;
+        log(`Your PC did not start the booking: ${refused}`);
+        tell(`<b>The booking did not start</b>\nYour PC could not start it: ${M.esc(refused)}.`);
+      } else {                                        // asked to sleep, it would not: say why
+        sleptAt = null;
+        log(`Your PC stayed awake: ${refused}`);
+        tell(`<b>Your PC stayed awake</b>\nIt did not go to sleep: ${M.esc(refused)}.`);
+      }
     }
+    const has = o => !!(o.sleep || o.book);
     let order = takeOrder(now());
-    if (!order.sleep && wait > 0) {
+    if (!has(order) && wait > 0) {
       await waitForOrder(wait * 1000);
       order = takeOrder(now());
     }
@@ -584,6 +699,32 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
         else await say(chat, M.esc(r.toast));
         break;
       }
+
+      case 'booknow': {                              // the Book now button, typed
+        const r = await requestBookNow();
+        if (r.screen) { await show(chat, r.screen, null, { view: 'h' }); if (!/sent|Waking/.test(r.toast)) await say(chat, M.esc(r.toast)); }
+        else await say(chat, M.esc(r.toast));
+        break;
+      }
+
+      case 'options':
+        await show(chat, UI.options(ctx())); break;
+
+      case 'remind': {
+        if (!rest) { await show(chat, UI.reminder(ctx())); break; }
+        const minutes = parseRemind(rest);
+        if (minutes === null) { await say(chat, 'Use it like this:  /remind 2h   (or 90 for minutes, or off). Between 15 minutes and a day.'); break; }
+        state.remind = minutes; save();
+        await say(chat, minutes ? `On the day you play, I send the court and the gate code ${M.remindWords(minutes)}.${keepNote()}` : `No reminders.${keepNote()}`);
+        break;
+      }
+
+      case 'fallback':
+        await show(chat, UI.fallback(ctx())); break;
+
+      case 'calendar':
+        if (!state.cal) newCalendarLink();
+        await show(chat, UI.calendarLink(ctx())); break;
 
       case 'help':
         await say(chat, M.HELP); break;
@@ -768,6 +909,43 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       `Said there is no word from the PC about ${silent.map(r => r.id).join(', ')}`);
   }
 
+  // On the day you play: the court and the gate code again, `state.remind` minutes before the
+  // start. Only today's and tomorrow's bookings are looked at, so this costs nothing most days.
+  async function checkReminders(t, chat, today) {
+    if (!state.remind) return;
+    const days = [iso(today), iso(addDays(today, 1))];
+    for (const r of Object.values(state.results)) {
+      if (r.status !== 'booked' || !days.includes(r.date)) continue;
+      const key = `remind:${r.id}`;
+      if (state.sent[key]) continue;
+      const startAt = londonInstant(civilOf(r.date), r.start);
+      const from = startAt - state.remind * 60000;
+      if (t < from || t >= startAt) continue;
+      if (r.at >= from) {                             // booked this close to the start: that message was the reminder
+        state.sent[key] = t; save();
+        continue;
+      }
+      await warnOnce(key, t, () => sendCard(chat, 'booked', M.reminderText(r, startAt - t, r.date === days[0]), UI.afterBooked()), `Reminded you about ${r.id}`);
+    }
+  }
+
+  // After a Book now the PC collected: if its run never started, or started and said nothing
+  // for eight minutes, say so.
+  async function checkBookNow(t, chat) {
+    if (!bookWatch) return;
+    const fresh = id => { const r = state.results[id]; return !!r && r.at >= bookWatch.at; };
+    const open = jobsFor(t, cfg(), state.results);
+    const waiting = bookWatch.ids.filter(id => !fresh(id)).map(id => open.find(j => j.id === id)).filter(Boolean);
+    if (!waiting.length) { bookWatch = null; return; }
+    const ran = !!state.lastRun && state.lastRun >= bookWatch.at;
+    const heard = bookWatch.ids.map(id => (fresh(id) ? state.results[id].at : 0));
+    if (t < Math.max(bookWatch.at, ran ? state.lastRun : 0, ...heard) + NO_WORD_MS) return;
+    const key = `booknow:${bookWatch.at}`;
+    await warnOnce(key, t, () => sendCard(chat, 'missed', ran ? M.noWordText(waiting) : M.notStartedText(waiting), UI.afterFailed()),
+      `Said that Book now came to nothing for ${waiting.map(j => j.id).join(', ')} (${ran ? 'no word from the run' : 'the run did not start'})`);
+    if (state.sent[key]) bookWatch = null;
+  }
+
   async function tick() {
     if (ticking) return;
     ticking = true;
@@ -777,10 +955,13 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       if (pastOnce.length) { state.once = state.once.filter(o => civilOf(o.date) >= today); save(); }
       await refreshNewest(t);
       const chat = owner();
-      if (chat === null || state.paused || !linked) return;
+      if (chat === null) return;
+      await checkReminders(t, chat, today);           // these need neither your PC nor booking switched on
+      if (state.paused || !linked) return;
       await checkAhead(t, chat);
       await checkStarted(t, chat);
       await checkReported(t, chat);
+      await checkBookNow(t, chat);
     } finally {
       ticking = false;
     }
@@ -804,7 +985,10 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
   // A banner by name, for the public /banner and /card pages (the wide trial).
   const picture = kind => (pictures && KINDS.includes(kind) ? pictures[kind] : null);
 
-  return { handleUpdate, tick, msToNext, announce, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures };
+  return {
+    handleUpdate, tick, msToNext, announce, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, calendarFeed,
+    pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures,
+  };
 }
 
 module.exports = { createApp, loadState, loadPictures, backupLine, readBackup, cleanResult, intIn, VERSION, KINDS };

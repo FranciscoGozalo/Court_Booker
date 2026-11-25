@@ -20,7 +20,9 @@ const COMMANDS = [
   ['set', 'Every week: /set thu 19:00 2h'],
   ['cancel', 'Remove a one-off: /cancel 2'],
   ['off', 'Stop a weekday: /off thu'],
+  ['booknow', 'Book what is open, now'],
   ['order', 'Court order: /order 3 4 5 2 1 6'],
+  ['options', 'Reminder, fallbacks, calendar'],
   ['status', 'Clock, your PC and settings'],
   ['wake', 'Wake your PC from sleep'],
   ['sleep', 'Put your PC to sleep'],
@@ -71,7 +73,7 @@ async function main() {
   // The endpoint your PC talks to. Also answers a plain /health, which lets Railway give the
   // service a public domain.
   if (linked) {
-    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onProgress: app.progressFromAgent, picture: app.picture, token: agentToken, publicKey, log });
+    const server = createServer({ getJobs: app.jobsForAgent, onResult: app.resultFromAgent, onPing: app.pingFromAgent, onProgress: app.progressFromAgent, calendar: app.calendarFeed, picture: app.picture, token: agentToken, publicKey, log });
     const port = Number(process.env.PORT) || 8080;
     server.listen(port, () => log(`Listening for your PC on port ${port} (${[publicKey && 'signed requests', agentToken && 'AGENT_TOKEN'].filter(Boolean).join(' or ')}).`));
     server.on('error', e => log(`The endpoint for your PC could not start: ${e.message}`));
