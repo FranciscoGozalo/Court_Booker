@@ -1610,7 +1610,17 @@ the state, with `glasgow.book` at stage `"asked"`; from then on it moves in the 
   6. "Not available 21:25–00:30 tonight, around the midnight booking." (on a night your PC books at
      Glasgow Club: its run is up from 21:25 until half an hour after midnight) or "Not available
      21:25–22:15, around the nightly booking." (every night)
-  7. "Not available until the nightly booking has finished."
+  7. "Not available until the midnight booking has finished." (2.12: past that window, while your PC's
+     run for Glasgow Club's midnight may still be paying: this bot has heard from it for that midnight,
+     its 23:50 run starting, or the run signing in at Glasgow Club for midnight, or your bank's approval
+     for one of its payments (kept on disk, so a restart changes nothing), and it has not yet said how
+     each of that midnight's bookings went; an hour after midnight at most, as long as this bot waits
+     for them. A run not heard for that midnight at all, the PC asleep say, is not known to be going:
+     the window in 6 is all there is. Before, Book now was taken from 00:30 while a booker older than
+     2.12 (whose one run starts at 21:55) could still be paying at midnight, and so after a restart of
+     the bot.) Else "Not available
+     until the nightly booking has finished." (tonight's run, as `run` shows it, has not said how
+     every booking went)
   8. "Glasgow Club was checking visitors from your home connection. Not available until 13:00."
   9. "That’s 6 sign-ins to Glasgow Club in an hour. Next at 13:00." (holds and Book now together)
   10. "Update the booker on your PC." (its pings do not say `glasgowBook`; the app holds instead)

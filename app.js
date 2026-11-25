@@ -1572,10 +1572,22 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (nearHoldGuard(t)) return `Not available ${hhmm(from)}–${hhmm((releaseMin + HOLD_AFTER_MS / 60000) % 1440)}, around the nightly booking.`;
     return null;
   }
+  // ...and past that window (2.12), your PC's run for Glasgow Club's midnight while it is still going,
+  // by what this bot knows of it, not by the clock: heard for that midnight (state.lastRun, kept on
+  // disk: the 23:50 run starting, or the run signing in at Glasgow Club for midnight, or your bank's
+  // approval for one of its payments), and not yet said how each of that midnight's bookings went;
+  // until an hour after midnight at most, as long as this bot waits for them (checkReported). A run
+  // not heard for that midnight at all is not known to be going: the window above is all there is.
+  function clubRunGoing(t) {
+    if (state.paused || owner() === null) return false;
+    const rel = releaseAround(t, cfg(), 0, NO_WORD_FOR_MS, true);
+    if (!rel || !state.lastRun || state.lastRun < rel.releaseAt - SEEN_FRESH_MS) return false;
+    return rel.requests.some(r => !reported(rel, r));
+  }
   // Tests may give `glasgowbook` (its waits) alongside createApp's other options.
   const gb = GB.createGlasgowBook({
     now, log, linked, ...((arguments[0] && arguments[0].glasgowbook) || {}),
-    pcAwake: t => pcState(t) === 'awake', holdLive: t => holdLive(t), csLive: t => cs.live(t), runGoing: t => !!runNow(t), nightNo: bookNightNo,
+    pcAwake: t => pcState(t) === 'awake', holdLive: t => holdLive(t), csLive: t => cs.live(t), runGoing: t => !!runNow(t), midnightGoing: clubRunGoing, nightNo: bookNightNo,
     quietUntil: t => siteQuietUntil(t),
     // Sign-ins to Glasgow Club this hour, shared with holds: read and added to where holds keep them.
     starts: () => holdStarts, addStart: t => { holdStarts.push(t); },

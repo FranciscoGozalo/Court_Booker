@@ -102,10 +102,10 @@ const tap = (app, data, messageId) => app.handleUpdate({
 const lastAnswer = t => t.tg.answers[t.tg.answers.length - 1];
 
 // Stand-ins for everything lib/glasgowbook.js asks app.js, each one switch: nothing in the way.
-const clearEnv = () => ({ t: at(NOON), holdLive: false, csLive: false, awake: true, night: null, run: false, quiet: 0, starts: [],
+const clearEnv = () => ({ t: at(NOON), holdLive: false, csLive: false, awake: true, night: null, midnight: false, run: false, quiet: 0, starts: [],
   books: true, why: null, max: '£30.00', kept: true, auto: true, asking: null });
 const depsOf = (env, extra = {}) => ({ now: () => env.t, linked: true,
-  holdLive: () => env.holdLive, csLive: () => env.csLive, pcAwake: () => env.awake, nightNo: () => env.night, runGoing: () => env.run,
+  holdLive: () => env.holdLive, csLive: () => env.csLive, pcAwake: () => env.awake, nightNo: () => env.night, midnightGoing: () => env.midnight, runGoing: () => env.run,
   quietUntil: () => env.quiet, starts: () => env.starts, addStart: t => env.starts.push(t), pc: () => ({ books: env.books, max: env.max, why: env.why }),
   card: () => ({ said: true, kept: env.kept, auto: env.auto, asking: env.asking }), shownFree: () => true, ...extra });
 
@@ -204,7 +204,7 @@ test('what stands in the way, in order: each sentence as the one before it is cl
   assert.equal(gb.blocker(env.t), null);
   assert.equal(await gb.appAsk({ ...BODY, stamp: stampOf(env.t) }, () => 'asked'), 'asked');
   // Everything at once in the way, then cleared one at a time.
-  Object.assign(env, { holdLive: true, csLive: true, awake: false, night: 'Not available 21:25–22:15, around the nightly booking.', run: true, quiet: at(NOON) + 30 * MIN,
+  Object.assign(env, { holdLive: true, csLive: true, awake: false, night: 'Not available 21:25–22:15, around the nightly booking.', midnight: true, run: true, quiet: at(NOON) + 30 * MIN,
     starts: Array.from({ length: 6 }, (_, i) => at(NOON) - 50 * MIN + i * MIN), books: false, why: 'GLASGOW_PAY_PER_DAY in .env is 0.', max: null, kept: false, auto: false, asking: null });
   const steps = [
     ['Your PC is already booking a court.', () => { env.t += 25000; gb.tick(env.t); }],              // this booking, until it is over
@@ -212,6 +212,7 @@ test('what stands in the way, in order: each sentence as the one before it is cl
     ['Your PC is already booking a court.', () => { env.csLive = false; }],                       // a park's Book now
     ['Your PC isn’t awake. Wake it and try again.', () => { env.awake = true; }],
     ['Not available 21:25–22:15, around the nightly booking.', () => { env.night = null; }],
+    ['Not available until the midnight booking has finished.', () => { env.midnight = false; }],      // 2.12: your PC's Glasgow Club run, past the window
     ['Not available until the nightly booking has finished.', () => { env.run = false; }],
     ['Glasgow Club was checking visitors from your home connection. Not available until 12:30.', () => { env.quiet = 0; }],
     ['That’s 6 sign-ins to Glasgow Club in an hour. Next at 12:10.', () => { env.starts = []; }],
@@ -317,6 +318,53 @@ test('what stands in the way, from the bot as it runs: the PC asleep, a hold, a 
   await pcPing(v);
   assert.equal((await ask(v, phoneV, 'card/auto/off')).status, 200);                         // off on its way counts at once
   assert.equal(bookNo(v, phoneV), 'Turn on Pay Automatically first.');
+});
+
+test('past half past midnight, none while your PC\'s Glasgow Club run is still going (2.12): heard for that midnight and not yet said how each booking went, an hour after midnight at most; a run not heard for it leaves the window alone', async () => {
+  const WED = '2026-11-18';
+  const MIDNIGHT = 'Not available until the midnight booking has finished.';
+  const WINDOW = 'Not available 21:25–00:30 tonight, around the midnight booking.';
+  const weekly = [{ id: 'aaaaaaa3', venue: 'gorbals', day: 'wed', start: 1080, hours: 1 }];     // booked at Tuesday's midnight, for Wed 25 Nov
+  const RID_W = 'gorbals/2026-11-25@18:00';
+  const booked = { id: RID_W, date: '2026-11-25', start: 1080, end: 1140, type: 'indoor', status: 'booked', court: 2, courts: [2], price: '£23.00', paid: true };
+  const bookNoAt = async (t, phone, time) => { t.clock.t = at(time); await pcPing(t); return stateOf(t, phone).glasgow.bookNo; };
+  // A booker older than 2.12: one run from 21:55, awake for midnight, signed in at Glasgow Club a few minutes before.
+  const store = memStore({ v: 4, owner: OWNER, order: [3, 4, 5, 2, 1, 6], weekly });
+  const a = makeBot(`${TUE}T21:55:00Z`, { store });
+  const phoneA = await linkPhone(a);
+  a.app.jobsForAgent(HOME, { run: true, venues: true });
+  a.clock.t = at(`${TUE}T23:56:00Z`);
+  await a.app.progressFromAgent({ stage: 'ready', club: true });
+  assert.equal(await bookNoAt(a, phoneA, `${WED}T00:30:00Z`), WINDOW);
+  assert.equal(await bookNoAt(a, phoneA, `${WED}T00:30:01Z`), MIDNIGHT);
+  await seeFree(a, phoneA);
+  assert.deepEqual(await ask(a, phoneA, 'glasgow/book', BODY), refused(409, MIDNIGHT));
+  assert.equal(stateOf(a, phoneA).glasgow.book, null);
+  // ...kept across a restart of the bot (what it last heard of the run is on disk).
+  const r = makeBot(`${WED}T00:40:00Z`, { store });
+  const phoneR = await linkPhone(r);
+  assert.equal(await bookNoAt(r, phoneR, `${WED}T00:40:00Z`), MIDNIGHT);
+  // Its result: every booking of that midnight said, so it is over.
+  await a.app.resultFromAgent(booked);
+  assert.equal(await bookNoAt(a, phoneA, `${WED}T00:41:00Z`), null);
+  // Booker 2.12: its own run at 23:50. Never more than an hour after midnight, with no word from it.
+  const b = makeBot(`${TUE}T21:55:00Z`, { state: { weekly } });
+  const phoneB = await linkPhone(b);
+  b.app.jobsForAgent(HOME, { run: true, venues: true, clubRun: 1430 });
+  b.clock.t = at(`${TUE}T23:50:00Z`);
+  b.app.jobsForAgent(HOME, { run: true, venues: true, clubRun: 1430 });
+  assert.equal(await bookNoAt(b, phoneB, `${WED}T00:45:00Z`), MIDNIGHT);
+  assert.equal(await bookNoAt(b, phoneB, `${WED}T00:59:59Z`), MIDNIGHT);
+  assert.equal(await bookNoAt(b, phoneB, `${WED}T01:00:00Z`), null);
+  // Its 23:50 run never heard (asleep, say): nothing known of it, so the window around midnight is all.
+  const c = makeBot(`${TUE}T21:55:00Z`, { state: { weekly } });
+  const phoneC = await linkPhone(c);
+  c.app.jobsForAgent(HOME, { run: true, venues: true, clubRun: 1430 });
+  assert.equal(await bookNoAt(c, phoneC, `${WED}T00:30:00Z`), WINDOW);
+  assert.equal(await bookNoAt(c, phoneC, `${WED}T00:30:01Z`), null);
+  // The parks' nightly run still going says so in its own words, as before.
+  assert.equal(GB.RUN_GOING, 'Not available until the nightly booking has finished.');
+  assert.equal(GB.MIDNIGHT_GOING, MIDNIGHT);
 });
 
 test('the day, the time, a booking kept already (either court type at Scotstoun), and a court a look showed free lately: each refused in its own words, and nothing is started', async () => {
