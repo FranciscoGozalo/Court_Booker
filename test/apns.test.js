@@ -200,3 +200,54 @@ test('a push kept for a phone out of signal: apns-expiration is the moment given
     await sent;
   }
 });
+
+test('broadcast channels (2.16): made and deleted on their own host, a message sent on one, the next host tried when the first does not know the path', async () => {
+  const h = fakeHttp2(), clock = { t: T0 };
+  const logs = [];
+  const apns = createApns({ key: PEM, keyId: KEY_ID, teamId: TEAM_ID, connect: h.connect, now: () => clock.t, log: l => logs.push(l) });
+  // Made: POST on the channel host, the id from Apple's header.
+  const made = apns.createChannel();
+  let req = h.last();
+  assert.equal(h.sessions.at(-1).authority, 'https://api-manage-broadcast.push.apple.com:2196');
+  const { authorization: a1, ...made1 } = req.headers;
+  assert.deepEqual(made1, { ':method': 'POST', ':path': `/1/apps/${DEFAULT_TOPIC}/channels`, 'content-type': 'application/json' });
+  assert.match(a1, /^bearer /);
+  assert.deepEqual(JSON.parse(req.body), { 'message-storage-policy': 1, 'push-type': 'LiveActivity' });
+  req.emit('response', { ':status': 201, 'apns-channel-id': 'Y2hhbm5lbA==' }); req.emit('end'); req.emit('close');
+  assert.deepEqual(await made, { channel: 'Y2hhbm5lbA==', status: 201, reason: null });
+  // Refused (Broadcast Capability off): no channel.
+  const refused = apns.createChannel();
+  h.answer(h.last(), 403, JSON.stringify({ reason: 'Forbidden' }));
+  assert.deepEqual(await refused, { channel: null, status: 403, reason: 'Forbidden' });
+  // A broadcast: the first host does not know the path, the second takes it, and is used first from then on.
+  const payload = { aps: { timestamp: 1, event: 'update', 'content-state': { name: 'BookingActivity', props: '{}' } } };
+  const sent = apns.broadcast('Y2hhbm5lbA==', payload, { priority: 10, expiresAt: 1795700000 });
+  req = h.last();
+  assert.equal(h.sessions.at(-1).authority, 'https://api.push.apple.com');
+  const { authorization: a2, ...b1 } = req.headers;
+  assert.deepEqual(b1, { ':method': 'POST', ':path': `/4/broadcasts/apps/${DEFAULT_TOPIC}`, 'apns-channel-id': 'Y2hhbm5lbA==', 'apns-push-type': 'liveactivity', 'apns-priority': '10', 'apns-expiration': '1795700000', 'content-type': 'application/json' });
+  h.answer(req, 404, JSON.stringify({ reason: 'BadPath' }));
+  await new Promise(r => setImmediate(r));
+  req = h.last();
+  assert.equal(h.sessions.at(-1).authority, 'https://api-broadcast.push.apple.com');
+  assert.deepEqual(JSON.parse(req.body), payload);
+  h.answer(req, 200);
+  assert.deepEqual((await sent).status, 200);
+  assert.ok(logs.includes('Broadcasts go to api-broadcast.push.apple.com.'));
+  const again = apns.broadcast('Y2hhbm5lbA==', payload);
+  assert.equal(h.last().headers[':path'], `/4/broadcasts/apps/${DEFAULT_TOPIC}`);
+  assert.equal(h.sessions.find(s => s.requests.includes(h.last())).authority, 'https://api-broadcast.push.apple.com');
+  h.answer(h.last(), 200);
+  await again;
+  // A refusal that is not about the path is not tried elsewhere.
+  const bad = apns.broadcast('nope', payload);
+  h.answer(h.last(), 400, JSON.stringify({ reason: 'BadChannelId' }));
+  assert.deepEqual(await bad, { status: 400, reason: 'BadChannelId', headers: { ':status': 400 } });
+  // Deleted.
+  const gone = apns.deleteChannel('Y2hhbm5lbA==');
+  req = h.sessions.find(x => x.authority === 'https://api-manage-broadcast.push.apple.com:2196').requests.at(-1);
+  assert.deepEqual([req.headers[':method'], req.headers[':path'], req.headers['apns-channel-id']], ['DELETE', `/1/apps/${DEFAULT_TOPIC}/channels`, 'Y2hhbm5lbA==']);
+  assert.equal(req.body, undefined);
+  h.answer(req, 204);
+  assert.deepEqual(await gone, { ok: true, status: 204, reason: null });
+});

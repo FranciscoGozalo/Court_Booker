@@ -122,6 +122,8 @@ async function main() {
   // Can this server read Glasgow Club's free indoor courts? One look, said in the log; the
   // rest of the start-up does not wait for it.
   app.checkIndoor().catch(e => log(`The look at Glasgow Club failed: ${e.message}`));
+  // Can the booking go on the Lock Screen (2.16)? One channel asked of Apple, said in the log.
+  app.checkBroadcast().catch(e => log(`The check of Apple's channels failed: ${e.message}`));
 
   // Timed messages: look every 100 ms, and wake exactly on time when one is nearly due.
   let stopping = false, timer = null;

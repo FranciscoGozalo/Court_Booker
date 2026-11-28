@@ -20,7 +20,8 @@ const crypto = require('crypto');
 const { iso, label, hhmm, clockAt, todayCivil, addDays, londonInstant, londonWall, civil, dayKey, DAY_KEYS, DAY_LONG } = require('./lib/time');
 const { parseDay, parseTime, parseOrder, parsePlan, parseSlot, parseBooking, cleanPlan, cleanOrder, cleanOnce, cleanOnceAway, cleanWeekly, weeklyFromPlan, planOf, newWeeklyId, slotText, slotEnd,
   MAX_WEEKLY, courtsOf } = require('./lib/plan');
-const { jobsFor, jobId, missingFor, msToNextCheck, opensAt, opensAtFor, civilOf, upcoming, releaseAround, isClub, wakesFor, MISSING_MS, SEEN_FRESH_MS } = require('./lib/schedule');
+const { jobsFor, jobId, missingFor, msToNextCheck, opensAt, opensAtFor, civilOf, upcoming, releaseAround, releasesOn, isClub, wakesFor, MISSING_MS, SEEN_FRESH_MS, LATE_MS, CLUB_LATE_MS } = require('./lib/schedule');
+const BA = require('./lib/bookingActivity');
 const M = require('./lib/messages');
 const UI = require('./lib/ui');
 const { readMac, publicIPv4, sendWake } = require('./lib/wake');
@@ -34,7 +35,7 @@ const GB = require('./lib/glasgowbook');
 const AC = require('./lib/activity');
 const { mask: maskApns } = require('./lib/apns');
 
-const VERSION = '2.15.0';
+const VERSION = '2.16.0';
 const STATE_VERSION = 4;
 // Your PC checks in every minute while it is awake (node book.js --link), and at its nightly run.
 const AWAKE_MS = 3 * 60 * 1000;            // heard from this recently: awake
@@ -165,13 +166,26 @@ function cleanPcWakes(raw) {
     .map(w => ({ run: w.run, at: w.at })).sort((a, b) => a.at - b.at);
 }
 
+// The booking's card on the Lock Screen (2.16, lib/bookingActivity.js): { releaseAt, channel, started (phone ids),
+// sent (its words as last sent), endedAt, deleteAt }, or null.
+function cleanBookingCard(raw) {
+  if (!raw || typeof raw !== 'object' || !Number.isInteger(raw.releaseAt) || typeof raw.channel !== 'string' || !/^[A-Za-z0-9+/=_-]{4,200}$/.test(raw.channel)) return null;
+  const when = v => (Number.isInteger(v) && v > 0 ? v : null);
+  return {
+    releaseAt: raw.releaseAt, channel: raw.channel,
+    started: Array.isArray(raw.started) ? raw.started.filter(x => typeof x === 'string').slice(0, 10) : [],
+    sent: typeof raw.sent === 'string' && raw.sent.length <= 5000 ? raw.sent : null,
+    endedAt: when(raw.endedAt), deleteAt: when(raw.deleteAt),
+  };
+}
+
 // Settings from storage, or from the environment on a first start, made safe to use.
 // Settings saved by version 1 (the link alerts) keep the owner, weekly plan, court order and pictures.
 function loadState(raw, env = {}) {
   const state = {
     v: STATE_VERSION, owner: null, plan: {}, weekly: [], once: [], onceAway: [], order: [1, 2, 3, 4, 5, 6], paused: false,
     results: {}, sent: {}, pics: {}, lastSeen: null, lastRun: null, home: null,
-    apps: [], notes: [], pcCard: null, pcBooks: false, pcClubRun: null, pcWakes: null, activitySent: {},
+    apps: [], notes: [], pcCard: null, pcBooks: false, pcClubRun: null, pcWakes: null, activitySent: {}, bookingCard: null,
   };
   if (raw && typeof raw === 'object') {
     state.owner = intIn(raw.owner, -1e15, 1e15);
@@ -209,6 +223,8 @@ function loadState(raw, env = {}) {
       // The runs your PC's booking tasks are set to wake it for (2.15), as its last ping said; null for
       // a booker whose tasks wake it every night.
       state.pcWakes = cleanPcWakes(raw.pcWakes);
+      // The booking's card on the Lock Screen (2.16), so a restart neither starts it twice nor loses its channel.
+      state.bookingCard = cleanBookingCard(raw.bookingCard);
     }
     for (const kind of KINDS) {                                   // what Telegram calls each picture, once it has it
       const p = raw.pics && raw.pics[kind];
@@ -1986,7 +2002,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     }
     state.lastSeen = t;
     if (starting) state.lastRun = t;
-    if (starting) runNote = { stage: 'started', at: t, why: null };
+    if (starting) { runNote = { stage: 'started', at: t, why: null }; bookingSoon(); }
     noteHome(from);
     const c = cfg();
     const all = state.paused || owner() === null ? [] : jobsFor(t, c, state.results);
@@ -2126,6 +2142,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       trouble = { why: pcs, text, about: noteOf(text, 2) };
     }
     runNote = { stage, at: now(), why: trouble ? trouble.about.body : null };
+    bookingSoon();
     if (chat === null) return { ok: true };
     if (stage === 'ready') {
       const card = headsUp;
@@ -2163,6 +2180,8 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
     if (!r || !V.clubOf(r.venue)) return { ok: false, why: 'that is not one of the run\'s Glasgow Club bookings' };
     state.lastSeen = state.lastRun = now();
     save();
+    bankFor[r.id] = { at: now(), price: A.readAmount(raw.price) ? String(raw.price).slice(0, 12) : null };   // the booking's card counts down five minutes (2.16)
+    bookingSoon();
     await bankSay({ venue: r.venue, type: r.type, date: r.date, start: r.start, price: raw.price, court: raw.court, courts: raw.courts });
     return { ok: true };
   }
@@ -2237,6 +2256,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       for (const k of Object.keys(state.results)) if (now() - state.results[k].at > RESULTS_KEEP_MS) delete state.results[k];
       save();
       log(`${quiet ? 'Kept as a booking' : 'Result from the PC'}: ${r.id} ${r.status}${r.court ? ` (${M.courtWords(r)})` : ''}`);
+      bookingSoon();
     }
     if (!same && chat !== null) {                     // what the card said, as a note for the app
       const after = V.clubOf(r.venue) ? (r.paid === true ? `paid ${r.price || ''}`.trim() : r.paid === 'maybe' ? 'Pay was pressed' : 'not paid')
@@ -2586,6 +2606,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       checkCard(t);
       checkAuto(t);
       checkActivity(t);                               // today's court on the Lock Screen (2.14): not waited for
+      checkBookingActivity(t);                        // the booking itself on the Lock Screen (2.16): not waited for
       await flushNotes(t);
       const chat = owner();
       if (chat === null || state.paused || !linked) return;
@@ -2896,6 +2917,137 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
       .catch(e => log(`A Live Activity could not be sent: ${maskApns((e && e.message) || e)}`))
       .finally(() => { activityBusy = false; });
   }
+  // ---------- the booking itself on the Lock Screen (2.16, lib/bookingActivity.js) ----------
+  // From an hour before a release that books something for you until a quarter of an hour after its result: a
+  // Live Activity started on each phone that gave its push-to-start token, listening on a channel of its own
+  // (Apple's broadcast pushes, iOS 18), so each change reaches it with the app closed. One card a release; its
+  // words are worked out every 15 seconds, and at once when your PC says something, and sent only when they
+  // change. Apple refusing to make a channel (Broadcast Capability not switched on for the app) starts none, and
+  // is said once a release; it is asked again half an hour later.
+  const BOOKING_EVERY_MS = 15 * 1000;
+  const BOOKING_DISMISS_MS = 15 * 60 * 1000;
+  const BROADCAST_AGAIN_MS = 30 * 60 * 1000;
+  let bookingAt = null, bookingBusy = false, broadcastOffUntil = 0;
+  const bankFor = {};                                 // request id -> { at, price }: your bank asked, at Glasgow Club
+  const bookingSaid = new Set();                      // what was said once ("no channel" for a release, a refused start)
+  function bookingSoon() { bookingAt = null; }        // something happened: looked at on the next beat
+  function bookingRelease(t) {
+    if (state.paused || owner() === null) return null;
+    const today = todayCivil(t);
+    for (const night of [addDays(today, -1), today]) {
+      for (const rel of releasesOn(night, cfg())) {
+        const late = rel.club ? CLUB_LATE_MS : LATE_MS;
+        if (t >= rel.releaseAt - BA.LEAD_MS && t < rel.releaseAt + late + 60000) return rel;
+      }
+    }
+    return null;
+  }
+  // When your PC's run for a release starts: the parks' at 21:55; Glasgow Club's at its own run (23:50), or for a
+  // booker before 2.12 that night's 21:55 run.
+  const pcRunOf = rel => (rel.club && Number.isInteger(state.pcClubRun) ? londonInstant(rel.night, state.pcClubRun)
+    : rel.club ? londonInstant(rel.night, releaseMin) - 5 * 60000 : rel.releaseAt - 5 * 60000);
+  function bookingCardNow(rel, t) {
+    const bank = rel.requests.map(r => bankFor[r.id]).filter(Boolean).sort((a, b) => b.at - a.at)[0] || null;
+    return BA.cardFor({ rel, now: t, pcRunAt: pcRunOf(rel), order: rel.club ? [] : state.order, results: state.results,
+      run: { lastRun: state.lastRun, note: runNote }, bank, late: rel.club ? CLUB_LATE_MS : LATE_MS });
+  }
+  const bookingUntil = rel => Math.floor((rel.releaseAt + (rel.club ? CLUB_LATE_MS : LATE_MS) + BOOKING_DISMISS_MS) / 1000);
+  function checkBookingActivity(t) {
+    if (!apns || apnsRefused || bookingBusy || typeof apns.broadcast !== 'function') return;
+    if (bookingAt !== null && t >= bookingAt && t - bookingAt < BOOKING_EVERY_MS) return;
+    bookingAt = t;
+    const card = state.bookingCard;
+    const rel = bookingRelease(t);
+    const steps = [];
+    // A card for another release still up (the bot was restarted past its end, say): ended; a channel whose card has gone: deleted.
+    if (card && !card.endedAt && (!rel || rel.releaseAt !== card.releaseAt)) steps.push(() => endBookingCard(card, null, t));
+    if (card && card.deleteAt && t >= card.deleteAt) steps.push(() => dropBookingChannel(card));
+    if (rel && !(card && card.releaseAt === rel.releaseAt && card.endedAt)) {
+      const phones = state.apps.filter(d => d.activityStart);
+      if (phones.length || (card && card.releaseAt === rel.releaseAt)) steps.push(() => keepBookingCard(rel, phones, t));
+    }
+    if (!steps.length) return;
+    bookingBusy = true;
+    (async () => { for (const step of steps) if (!apnsRefused) await step(); })()
+      .catch(e => log(`The booking's card could not be sent: ${maskApns((e && e.message) || e)}`))
+      .finally(() => { bookingBusy = false; });
+  }
+  async function keepBookingCard(rel, phones, t) {
+    const { final, props, stage } = bookingCardNow(rel, t);
+    let card = state.bookingCard && state.bookingCard.releaseAt === rel.releaseAt ? state.bookingCard : null;
+    if (!card) {
+      if (final || t < broadcastOffUntil) return;           // nothing started for a booking already over
+      const made = await apns.createChannel();
+      if (!made.channel) {
+        broadcastOffUntil = t + BROADCAST_AGAIN_MS;
+        const key = `nochannel:${rel.releaseAt}`;
+        if (!bookingSaid.has(key)) {
+          bookingSaid.add(key);
+          log(`The booking at ${clockAt(rel.releaseAt).slice(0, 5)} was not put on the Lock Screen: Apple would not make a channel for it (${apnsWords(made)}). Switch on Broadcast Capability under the app's Push Notifications at developer.apple.com.`);
+        }
+        return;
+      }
+      const old = state.bookingCard;                         // an older card's channel, not deleted yet: deleted now
+      if (old && old.channel) await apns.deleteChannel(old.channel).catch(() => null);
+      card = state.bookingCard = { releaseAt: rel.releaseAt, channel: made.channel, started: [], sent: null, endedAt: null, deleteAt: null };
+      save();
+    }
+    if (final) return endBookingCard(card, { props, stage }, t);
+    const json = JSON.stringify(props);
+    for (const d of phones) {
+      if (card.started.includes(d.id)) continue;
+      const told = await apnsSend(d.activityStart, BA.startPayload({ props }, card.channel, t), rel.releaseAt);
+      if (!state.apps.includes(d)) continue;
+      if (told.status === 200) {
+        card.started.push(d.id); card.sent = json; save();
+        log(`The booking at ${clockAt(rel.releaseAt).slice(0, 5)} is on the Lock Screen of ${d.name} (${stage}).`);
+      } else if (keyRefused(told)) return;
+      else if (tokenGone(told)) {
+        d.activityStart = null; save();
+        log(`Apple no longer takes the token ${d.name} gave for starting Live Activities (${apnsWords(told)}).`);
+      } else if (!bookingSaid.has(`start:${rel.releaseAt}:${d.id}`)) {
+        bookingSaid.add(`start:${rel.releaseAt}:${d.id}`);
+        log(`The booking's card could not be started on ${d.name} (${apnsWords(told)}); tried again shortly.`);
+      }
+    }
+    if (!card.started.length || card.sent === json) return;
+    const told = await apns.broadcast(card.channel, BA.updatePayload({ props }, t), { priority: 10, expiresAt: bookingUntil(rel) });
+    if (told.status === 200) { card.sent = json; save(); log(`The booking's card: ${stage}.`); }
+    else if (!bookingSaid.has(`update:${rel.releaseAt}:${stage}`)) { bookingSaid.add(`update:${rel.releaseAt}:${stage}`); log(`The booking's card was not brought up to date (${apnsWords(told)}).`); }
+  }
+  // Ends a card: its last words (`last`, or those it showed), gone from the Lock Screen a quarter of an hour later.
+  async function endBookingCard(card, last, t) {
+    let props = last ? last.props : null;
+    if (!props && card.sent) { try { props = JSON.parse(card.sent); } catch { props = null; } }
+    if (card.started.length && props) {
+      const told = await apns.broadcast(card.channel, BA.updatePayload({ props }, t, { end: true, dismissAt: t + BOOKING_DISMISS_MS }),
+        { priority: 10, expiresAt: Math.floor((t + BOOKING_DISMISS_MS) / 1000) });
+      if (told.status === 200) log(`The booking's card ended${last && last.stage ? ` (${last.stage})` : ''}.`);
+      else log(`The booking's card could not be ended (${apnsWords(told)}); it leaves the Lock Screen by itself.`);
+    }
+    card.endedAt = t; card.deleteAt = t + BOOKING_DISMISS_MS + 5 * 60000;
+    if (props) card.sent = JSON.stringify(props);
+    save();
+  }
+  // At start-up: whether Apple makes channels for the app (Broadcast Capability switched on), said in the log, so the
+  // booking's card is known to work before a night needs it. A channel made to ask is deleted at once.
+  async function checkBroadcast() {
+    if (!apns || typeof apns.createChannel !== 'function') return null;
+    const r = await apns.createChannel();
+    if (!r.channel) {
+      log(`The booking on the Lock Screen is off: Apple would not make a channel (${apnsWords(r)}). Switch on Broadcast Capability under the app's Push Notifications at developer.apple.com.`);
+      return false;
+    }
+    await apns.deleteChannel(r.channel).catch(() => null);
+    log('The booking on the Lock Screen is on: Apple makes channels for the app.');
+    return true;
+  }
+  async function dropBookingChannel(card) {
+    const r = await apns.deleteChannel(card.channel);
+    if (!r.ok && !bookingSaid.has(`delete:${card.channel}`)) { bookingSaid.add(`delete:${card.channel}`); log(`A channel could not be deleted (${apnsWords(r)}); Apple keeps up to 10,000.`); }
+    if (state.bookingCard === card) { state.bookingCard = null; save(); }
+  }
+
   // One push to Apple: { status, reason }, never thrown.
   // `until` (ms): Apple keeps the push until then for a phone offline when it goes (a court's start, kept till it is
   // over; an end, for an hour), so a phone out of signal at that moment still gets it.
@@ -3138,7 +3290,7 @@ function createApp({ now = Date.now, tg, store, log = () => {}, env = {}, pictur
 
   return {
     clubSparkFromAgent: cs.fromAgent, glasgowBookFromAgent: raw => gb.fromPc(raw),
-    handleUpdate, tick, msToNext, announce, checkIndoor, lookFromAgent, holdFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures,
+    handleUpdate, tick, msToNext, announce, checkIndoor, checkBroadcast, lookFromAgent, holdFromAgent, jobsForAgent, pingFromAgent, progressFromAgent, resultFromAgent, picture, pcState, wakeState, kept, state, cfg, owner, VERSION, hasPictures: !!pictures,
     appHello, appPair, appAuth, appState, appAsk, appWidget, sealedHeld, pairFromAgent, quiet,
   };
 }

@@ -359,7 +359,7 @@ test('settings saved before the app existed load as they were, and the state ver
   };
   const s = loadState(JSON.parse(JSON.stringify(old)));
   // 2.10: Kelvingrove's plan, one a day, is now weekly entries at any venue; the plan stays beside them.
-  assert.deepEqual(s, { ...old, apps: [], notes: [], onceAway: [], pcCard: null, pcBooks: false, pcClubRun: null, pcWakes: null, activitySent: {}, weekly: [{ id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 2, on: true }] });
+  assert.deepEqual(s, { ...old, apps: [], notes: [], onceAway: [], pcCard: null, pcBooks: false, pcClubRun: null, pcWakes: null, activitySent: {}, bookingCard: null, weekly: [{ id: 'a8d74aef', venue: 'kelvingrove', type: 'outdoor', day: 'thu', start: 1140, hours: 2, on: true }] });
   assert.equal(s.v, 4);
   assert.equal(loadState(null).v, 4);
   assert.deepEqual([loadState(null).apps, loadState(null).notes], [[], []]);
@@ -487,7 +487,7 @@ test('hello is open and says nothing private; everything else needs a linked pho
   const t = makeBot();
   const phone = await linkPhone(t);
   await withServer(t, async ({ get, post }) => {
-    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.15.0', api: 3 } });
+    assert.deepEqual(await get('/app/hello'), { status: 200, json: { ok: true, bot: '2.16.0', api: 3 } });
     const unpaired = { status: 401, json: { ok: false, why: 'unpaired' } };
     assert.deepEqual(await get('/app/state'), unpaired);
     assert.deepEqual(await get('/app/state', { token: A.newToken().token }), unpaired);
@@ -744,7 +744,7 @@ test('the state, field by field: a weekly plan, one-offs open and not yet open, 
   const { etag, state } = t.app.appState(phone.device);
   assert.deepEqual(state, {
     now: at(NOON),
-    bot: '2.15.0',
+    bot: '2.16.0',
     telegram: true,
     venue: { name: 'Kelvingrove Park', short: 'KP', first: 540, last: 1260, lengths: [1, 2], courts: [1, 2, 3, 4, 5, 6], releaseMin: 1320, daysAhead: 7, maxAheadDays: 90 },
     venues: venuesOn(TUE),
@@ -2440,7 +2440,7 @@ test('what 2.8 saves is what 2.7 saved, with the phones and the notes beside it:
   const saved = t.store.load();
   // The keys 2.7 knows, in its order, then those it has never heard of (2.10's weekly entries and the
   // other venues' one-offs among them). Still version 4.
-  assert.deepEqual(Object.keys(saved), ['v', 'owner', 'plan', 'weekly', 'once', 'onceAway', ...KNOWN_TO_27.slice(4), 'apps', 'notes', 'pcCard', 'pcBooks', 'pcClubRun', 'pcWakes', 'activitySent']);
+  assert.deepEqual(Object.keys(saved), ['v', 'owner', 'plan', 'weekly', 'once', 'onceAway', ...KNOWN_TO_27.slice(4), 'apps', 'notes', 'pcCard', 'pcBooks', 'pcClubRun', 'pcWakes', 'activitySent', 'bookingCard']);
   assert.equal(saved.pcCard, null);                                                       // 2.11.1: no ping has said anything of a card
   assert.equal(saved.pcBooks, false);                                                     // 2.11.3: nor that its booker takes Book now at Glasgow Club
   assert.equal(saved.v, 4);
